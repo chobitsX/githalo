@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">GitHalo 粒子光环</title>
+  <desc id="desc">三组发光粒子围成闭合圆环，三个较亮的节点连接各组。一条短支线分出再汇合。</desc>
+  <defs>
+    <linearGradient id="tile-color" x1="0.10" y1="0" x2="0.86" y2="1">
+      <stop offset="0" stop-color="#17373B"/>
+      <stop offset="1" stop-color="#10232B"/>
+    </linearGradient>
+    <linearGradient id="orbit-color" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#79F5BD"/>
+      <stop offset="0.52" stop-color="#69E8CE"/>
+      <stop offset="1" stop-color="#8CCFFF"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <g id="halo-particles">
+      <circle cx="442.1" cy="251.2" r="36" fill="#E0FFE5"/>
+      <circle cx="535.5" cy="243.0" r="23" fill="#B4F8D4"/>
+      <circle cx="626.1" cy="267.3" r="20" fill="#93EFC9"/>
+      <circle cx="702.9" cy="321.1" r="18" fill="#82E3C3"/>
+      <circle cx="756.7" cy="397.9" r="20" fill="#83E2CA"/>
+      <circle cx="781.0" cy="488.5" r="23" fill="#A3F0DC"/>
+      <circle cx="772.8" cy="581.9" r="36" fill="#D5FFFA"/>
+      <circle cx="733.2" cy="666.9" r="23" fill="#ABF3ED"/>
+      <circle cx="666.9" cy="733.2" r="20" fill="#8DE7ED"/>
+      <circle cx="581.9" cy="772.8" r="18" fill="#7BD8EF"/>
+      <circle cx="488.5" cy="781.0" r="20" fill="#88D6F5"/>
+      <circle cx="397.9" cy="756.7" r="23" fill="#9DE2FC"/>
+      <circle cx="321.1" cy="702.9" r="36" fill="#E0F5FF"/>
+      <circle cx="267.3" cy="626.1" r="23" fill="#ACDDFB"/>
+      <circle cx="243.0" cy="535.5" r="20" fill="#99D6F2"/>
+      <circle cx="251.2" cy="442.1" r="18" fill="#92DEEA"/>
+      <circle cx="290.8" cy="357.1" r="20" fill="#A0E9DD"/>
+      <circle cx="357.1" cy="290.8" r="23" fill="#B7F3DE"/>
+    </g>
+  </defs>
+  <rect x="96" y="96" width="832" height="832" rx="188" fill="url(#tile-color)"/>
+  <rect x="97.5" y="97.5" width="829" height="829" rx="186.5"
+    fill="none" stroke="#A2E4DA" stroke-width="3" opacity=".18"/>
+  <circle cx="512" cy="512" r="270" fill="none" stroke="url(#orbit-color)"
+    stroke-width="22" opacity=".20" filter="url(#glow)"/>
+  <circle cx="512" cy="512" r="270" fill="none" stroke="url(#orbit-color)"
+    stroke-width="8" opacity=".34"/>
+  <path d="M442.1 251.2 C582 287 710 424 772.8 581.9"
+    fill="none" stroke="#87E4CC" stroke-width="6" opacity=".39"/>
+  <g opacity=".91">
+    <circle cx="544.0" cy="295.8" r="13" fill="#9EEBD1"/>
+    <circle cx="636.4" cy="370.8" r="16" fill="#9EEBD1"/>
+    <circle cx="714.3" cy="468.6" r="13" fill="#9EEBD1"/>
+  </g>
+  <use href="#halo-particles" filter="url(#glow)" opacity=".55"/>
+  <use href="#halo-particles"/>
+</svg>

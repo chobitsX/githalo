@@ -1,0 +1,31 @@
+GitHalo
+Copyright 2026 GitHalo Contributors
+
+This product is licensed under the Apache License, Version 2.0.
+
+========================================================================
+Third-Party & Reference Notices
+========================================================================
+
+1. GPUI (Zed Industries)
+   GitHalo's native desktop interface is built on top of the `gpui` and
+   `gpui_platform` crates from Zed Industries:
+   https://github.com/zed-industries/zed
+   Licensed under the Apache License, Version 2.0.
+
+2. Rebased (Workflow Reference)
+   GitHalo's desktop Git workflows and layout conventions are inspired by
+   Rebased 1.1.24 (https://github.com/DetachHead/rebased), which is based
+   on JetBrains IntelliJ Community Platform. GitHalo is an independent,
+   clean-room implementation written from scratch in Rust + GPUI and
+   contains no source code from Rebased or JetBrains.
+
+3. Offline Git Test Fixture (Scap)
+   `client/src/git/fixtures/sync.bundle` is derived from the public Git
+   history of `zed-industries/scap` (MIT License). See
+   `client/src/git/fixtures/SCAP-LICENSE.txt` and
+   `client/src/git/fixtures/README.md` for full attribution details.
+
+4. Other Rust Dependencies
+   All Cargo dependencies are listed in `client/Cargo.toml` and pinned in
+   `client/Cargo.lock`, subject to their respective open-source licenses.

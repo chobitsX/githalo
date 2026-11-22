@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">GitHalo — Fast, Native Desktop Git Client</title>
+  <desc id="desc">GitHalo social preview banner built with Rust and GPUI.</desc>
+  <defs>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0B161B"/>
+      <stop offset="0.55" stop-color="#10222A"/>
+      <stop offset="1" stop-color="#0B1419"/>
+    </linearGradient>
+    <radialGradient id="ambient-left" cx="0.24" cy="0.5" r="0.45">
+      <stop offset="0" stop-color="#69E8CE" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#69E8CE" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ambient-right" cx="0.88" cy="0.2" r="0.4">
+      <stop offset="0" stop-color="#8CCFFF" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#8CCFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="tile-color" x1="0.10" y1="0" x2="0.86" y2="1">
+      <stop offset="0" stop-color="#17373B"/>
+      <stop offset="1" stop-color="#10232B"/>
+    </linearGradient>
+    <linearGradient id="orbit-color" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#79F5BD"/>
+      <stop offset="0.52" stop-color="#69E8CE"/>
+      <stop offset="1" stop-color="#8CCFFF"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="14"/>
+    </filter>
+    <g id="halo-particles">
+      <circle cx="442.1" cy="251.2" r="36" fill="#E0FFE5"/>
+      <circle cx="535.5" cy="243.0" r="23" fill="#B4F8D4"/>
+      <circle cx="626.1" cy="267.3" r="20" fill="#93EFC9"/>
+      <circle cx="702.9" cy="321.1" r="18" fill="#82E3C3"/>
+      <circle cx="756.7" cy="397.9" r="20" fill="#83E2CA"/>
+      <circle cx="781.0" cy="488.5" r="23" fill="#A3F0DC"/>
+      <circle cx="772.8" cy="581.9" r="36" fill="#D5FFFA"/>
+      <circle cx="733.2" cy="666.9" r="23" fill="#ABF3ED"/>
+      <circle cx="666.9" cy="733.2" r="20" fill="#8DE7ED"/>
+      <circle cx="581.9" cy="772.8" r="18" fill="#7BD8EF"/>
+      <circle cx="488.5" cy="781.0" r="20" fill="#88D6F5"/>
+      <circle cx="397.9" cy="756.7" r="23" fill="#9DE2FC"/>
+      <circle cx="321.1" cy="702.9" r="36" fill="#E0F5FF"/>
+      <circle cx="267.3" cy="626.1" r="23" fill="#ACDDFB"/>
+      <circle cx="243.0" cy="535.5" r="20" fill="#99D6F2"/>
+      <circle cx="251.2" cy="442.1" r="18" fill="#92DEEA"/>
+      <circle cx="290.8" cy="357.1" r="20" fill="#A0E9DD"/>
+      <circle cx="357.1" cy="290.8" r="23" fill="#B7F3DE"/>
+    </g>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#9CE8DA" stroke-opacity="0.035" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="url(#bg-grad)"/>
+  <rect width="1280" height="640" fill="url(#grid)"/>
+  <rect width="1280" height="640" fill="url(#ambient-left)"/>
+  <rect width="1280" height="640" fill="url(#ambient-right)"/>
+
+  <!-- Subtle outer frame -->
+  <rect x="28" y="28" width="1224" height="584" rx="28" fill="none" stroke="#8CE8D8" stroke-opacity="0.12" stroke-width="1.5"/>
+
+  <!-- Left: GitHalo App Icon (scaled 0.34, centered around x=260, y=320) -->
+  <g transform="translate(86, 146) scale(0.34)">
+    <rect x="96" y="96" width="832" height="832" rx="188" fill="url(#tile-color)"/>
+    <rect x="97.5" y="97.5" width="829" height="829" rx="186.5"
+      fill="none" stroke="#A2E4DA" stroke-width="4" opacity=".24"/>
+    <circle cx="512" cy="512" r="270" fill="none" stroke="url(#orbit-color)"
+      stroke-width="22" opacity=".20" filter="url(#glow)"/>
+    <circle cx="512" cy="512" r="270" fill="none" stroke="url(#orbit-color)"
+      stroke-width="8" opacity=".34"/>
+    <path d="M442.1 251.2 C582 287 710 424 772.8 581.9"
+      fill="none" stroke="#87E4CC" stroke-width="6" opacity=".39"/>
+    <g opacity=".91">
+      <circle cx="544.0" cy="295.8" r="13" fill="#9EEBD1"/>
+      <circle cx="636.4" cy="370.8" r="16" fill="#9EEBD1"/>
+      <circle cx="714.3" cy="468.6" r="13" fill="#9EEBD1"/>
+    </g>
+    <use href="#halo-particles" filter="url(#glow)" opacity=".55"/>
+    <use href="#halo-particles"/>
+  </g>
+
+  <!-- Right: Typography & Pills -->
+  <g transform="translate(476, 185)">
+    <!-- Eyebrow tag -->
+    <rect x="0" y="0" width="218" height="34" rx="17" fill="#17373B" stroke="#79F5BD" stroke-opacity="0.35" stroke-width="1.2"/>
+    <circle cx="20" cy="17" r="5" fill="#79F5BD"/>
+    <text x="36" y="22" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="14" font-weight="600" letter-spacing="0.8" fill="#B4F8D4">RUST + GPUI · NATIVE</text>
+
+    <!-- Title -->
+    <text x="0" y="114" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="84" font-weight="700" letter-spacing="-1.5" fill="#F2FFFC">GitHalo</text>
+
+    <!-- Subtitle -->
+    <text x="0" y="166" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="26" font-weight="400" fill="#B7D4D6">Fast, GPU-accelerated desktop Git client for multi-repo teams.</text>
+    <text x="0" y="204" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="22" font-weight="400" fill="#82A7AE">Grouped sync dashboard · Interactive Rebase · 3-Way Merge · Word Diff · Shelf</text>
+
+    <!-- Feature pills -->
+    <g transform="translate(0, 244)">
+      <rect x="0" y="0" width="166" height="40" rx="10" fill="#132B33" stroke="#8CE8D8" stroke-opacity="0.22"/>
+      <text x="20" y="26" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif" font-size="16" font-weight="600" fill="#D5FFFA">↓1 ↑2 Sync Board</text>
+
+      <rect x="182" y="0" width="164" height="40" rx="10" fill="#132B33" stroke="#8CE8D8" stroke-opacity="0.22"/>
+      <text x="202" y="26" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif" font-size="16" font-weight="600" fill="#D5FFFA">Git Worktrees</text>
+
+      <rect x="362" y="0" width="188" height="40" rx="10" fill="#132B33" stroke="#8CE8D8" stroke-opacity="0.22"/>
+      <text x="382" y="26" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif" font-size="16" font-weight="600" fill="#D5FFFA">100% Native Git</text>
+
+      <rect x="566" y="0" width="136" height="40" rx="10" fill="#132B33" stroke="#8CE8D8" stroke-opacity="0.22"/>
+      <text x="588" y="26" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif" font-size="16" font-weight="600" fill="#9DE2FC">Apache-2.0</text>
+    </g>
+  </g>
+</svg>

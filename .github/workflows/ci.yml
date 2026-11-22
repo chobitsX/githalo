@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  data-layer:
+    name: Core & Data Layer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client -> target
+      - name: Check formatting
+        working-directory: client
+        run: cargo fmt --all -- --check
+      - name: Check & Clippy (headless data layer)
+        working-directory: client
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - name: Run headless tests
+        working-directory: client
+        run: cargo test --locked --no-default-features
+
+  macos-desktop:
+    name: macOS Desktop (Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client -> target
+      - name: Clippy (desktop)
+        working-directory: client
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Run full tests
+        working-directory: client
+        run: cargo test --locked
+      - name: Build release binary
+        working-directory: client
+        run: cargo build --release --locked

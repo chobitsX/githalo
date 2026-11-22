@@ -1,0 +1,11 @@
+.DS_Store
+/rebased/
+/client/target/
+/PRD.md
+/TASKS.md
+/AGENTS.md
+/docs/rebased-parity.md
+/docs/design/drafts/
+/docs/design/first-screen-v04.png
+/docs/verification/
+!/client/src/git/fixtures/sync.bundle

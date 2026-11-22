@@ -1,0 +1,24 @@
+name: Feature Request
+description: Suggest a new feature or workflow improvement for GitHalo
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or Workflow Need
+      description: Describe the Git workflow problem you are trying to solve.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe how you envision this feature working in GitHalo.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives / References
+      description: Mention how other Git tools handle this, if relevant.
