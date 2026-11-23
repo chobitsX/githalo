@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::worktree::{SyncCounts, UpstreamConfig, WorktreeId, WorktreeTarget};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_V1: &str = "
     CREATE TABLE worktrees (
@@ -71,6 +71,27 @@ const MIGRATION_V2: &str = "
     ) STRICT, WITHOUT ROWID;
 ";
 
+const MIGRATION_V3: &str = "
+    CREATE TABLE nested_repos (
+        parent_id INTEGER NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+        child_id INTEGER NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+        PRIMARY KEY (parent_id, child_id),
+        CHECK (parent_id != child_id)
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX nested_repos_by_child ON nested_repos(child_id);
+
+    CREATE TABLE nested_preferences (
+        parent_id INTEGER PRIMARY KEY REFERENCES worktrees(id) ON DELETE CASCADE,
+        expanded INTEGER NOT NULL DEFAULT 1 CHECK (expanded IN (0, 1))
+    ) STRICT;
+
+    CREATE TABLE dismissed_nested (
+        parent_id INTEGER NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+        child_root BLOB NOT NULL,
+        PRIMARY KEY (parent_id, child_root)
+    ) STRICT, WITHOUT ROWID;
+";
+
 /// Stable identity of a custom group. The built-in ungrouped section has no group ID.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GroupId(i64);
@@ -89,11 +110,19 @@ pub struct RegistryGroup {
     pub members: Vec<WorktreeId>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RegistryNested {
+    pub expanded: bool,
+    pub children: Vec<WorktreeId>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistryBoard {
     pub worktrees: Vec<WorktreeTarget>,
     pub groups: Vec<RegistryGroup>,
     pub ungrouped_expanded: bool,
+    pub nested: BTreeMap<WorktreeId, RegistryNested>,
+    pub dismissed_nested: BTreeMap<WorktreeId, Vec<PathBuf>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,19 +197,29 @@ impl Registry {
 
         match schema_version(&connection)? {
             SCHEMA_VERSION => {}
-            0 | 1 => {
+            0..SCHEMA_VERSION => {
                 // Another instance may already have migrated the database while we wait to write.
                 let transaction =
                     connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let version = schema_version(&transaction)?;
                 match version {
-                    0 => transaction.execute_batch(SCHEMA_V1)?,
-                    1 | SCHEMA_VERSION => {}
+                    0 => {
+                        transaction.execute_batch(SCHEMA_V1)?;
+                        transaction.execute_batch(MIGRATION_V2)?;
+                        transaction.execute_batch(MIGRATION_V3)?;
+                        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                    }
+                    1 => {
+                        transaction.execute_batch(MIGRATION_V2)?;
+                        transaction.execute_batch(MIGRATION_V3)?;
+                        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                    }
+                    2 => {
+                        transaction.execute_batch(MIGRATION_V3)?;
+                        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+                    }
+                    SCHEMA_VERSION => {}
                     version => return Err(RegistryError::UnsupportedSchema(version)),
-                }
-                if version < SCHEMA_VERSION {
-                    transaction.execute_batch(MIGRATION_V2)?;
-                    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 }
                 transaction.commit()?;
             }
@@ -237,12 +276,57 @@ impl Registry {
             [],
             |row| row.get(0),
         )?;
+        let mut nested: BTreeMap<WorktreeId, RegistryNested> = BTreeMap::new();
+        {
+            let mut statement = transaction.prepare(
+                "SELECT parent_id, child_id FROM nested_repos ORDER BY parent_id, child_id",
+            )?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let parent = read_worktree_id(row, 0)?;
+                let child = read_worktree_id(row, 1)?;
+                nested
+                    .entry(parent)
+                    .or_insert_with(|| RegistryNested {
+                        expanded: true,
+                        children: Vec::new(),
+                    })
+                    .children
+                    .push(child);
+            }
+        }
+        {
+            let mut statement =
+                transaction.prepare("SELECT parent_id, expanded FROM nested_preferences")?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let parent = read_worktree_id(row, 0)?;
+                let expanded: bool = row.get(1)?;
+                if let Some(entry) = nested.get_mut(&parent) {
+                    entry.expanded = expanded;
+                }
+            }
+        }
+        let mut dismissed_nested: BTreeMap<WorktreeId, Vec<PathBuf>> = BTreeMap::new();
+        {
+            let mut statement = transaction.prepare(
+                "SELECT parent_id, child_root FROM dismissed_nested ORDER BY parent_id, child_root",
+            )?;
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                let parent = read_worktree_id(row, 0)?;
+                let path = PathBuf::from(read_os_string(row, 1)?);
+                dismissed_nested.entry(parent).or_default().push(path);
+            }
+        }
         transaction.commit()?;
 
         Ok(RegistryBoard {
             worktrees,
             groups: groups.into_values().collect(),
             ungrouped_expanded,
+            nested,
+            dismissed_nested,
         })
     }
 
@@ -348,6 +432,114 @@ impl Registry {
 
     pub fn remove_member(&mut self, worktree: WorktreeId, group: GroupId) -> Result<()> {
         delete_member(&self.connection, worktree, group)?;
+        Ok(())
+    }
+
+    /// Registers child repository roots and attaches them as nested repositories under `parent`.
+    pub fn attach_nested_repos(
+        &mut self,
+        parent: WorktreeId,
+        child_roots: &[PathBuf],
+    ) -> Result<Vec<WorktreeId>> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let parent_exists: bool = transaction
+            .query_row(
+                "SELECT 1 FROM worktrees WHERE id = ?1",
+                [parent.get()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !parent_exists {
+            return Err(RegistryError::UnknownWorktree(parent));
+        }
+
+        let mut attached = Vec::with_capacity(child_roots.len());
+        for root in child_roots {
+            let encoded_root = encode_root(root)?;
+            let child_id = match worktree_id_at(&transaction, &encoded_root)? {
+                Some(id) => id,
+                None => transaction.query_row(
+                    "INSERT INTO worktrees (root) VALUES (?1) RETURNING id",
+                    [encoded_root.as_ref()],
+                    |row| read_worktree_id(row, 0),
+                )?,
+            };
+            if child_id == parent {
+                continue;
+            }
+            transaction.execute(
+                "INSERT OR IGNORE INTO nested_repos (parent_id, child_id) VALUES (?1, ?2)",
+                params![parent.get(), child_id.get()],
+            )?;
+            transaction.execute(
+                "DELETE FROM dismissed_nested WHERE parent_id = ?1 AND child_root = ?2",
+                params![parent.get(), encoded_root.as_ref()],
+            )?;
+            attached.push(child_id);
+        }
+        if !attached.is_empty() {
+            transaction.execute(
+                "INSERT INTO nested_preferences (parent_id, expanded) VALUES (?1, 1)
+                 ON CONFLICT(parent_id) DO UPDATE SET expanded = 1",
+                [parent.get()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(attached)
+    }
+
+    pub fn detach_nested_repo(&mut self, parent: WorktreeId, child: WorktreeId) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM nested_repos WHERE parent_id = ?1 AND child_id = ?2",
+            params![parent.get(), child.get()],
+        )?;
+        Ok(())
+    }
+
+    pub fn toggle_nested_expanded(&mut self, parent: WorktreeId) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: Option<bool> = transaction
+            .query_row(
+                "SELECT expanded FROM nested_preferences WHERE parent_id = ?1",
+                [parent.get()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let next = !current.unwrap_or(true);
+        transaction.execute(
+            "INSERT INTO nested_preferences (parent_id, expanded) VALUES (?1, ?2)
+             ON CONFLICT(parent_id) DO UPDATE SET expanded = excluded.expanded",
+            params![parent.get(), next],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn dismiss_nested_paths(&mut self, parent: WorktreeId, roots: &[PathBuf]) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for root in roots {
+            let encoded = encode_root(root)?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO dismissed_nested (parent_id, child_root) VALUES (?1, ?2)",
+                params![parent.get(), encoded.as_ref()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn clear_dismissed_nested(&mut self, parent: WorktreeId) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM dismissed_nested WHERE parent_id = ?1",
+            [parent.get()],
+        )?;
         Ok(())
     }
 

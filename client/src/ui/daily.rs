@@ -204,8 +204,8 @@ impl DesktopView {
     pub(super) fn commit_panel(&self, cx: &mut Context<Self>) -> Div {
         let Some(draft) = self.draft() else {
             return empty(tr(
-                "选择工作树后查看本地变更",
-                "Select a worktree to view local changes",
+                "选择仓库后查看本地变更",
+                "Select a repository to view local changes",
             ));
         };
         let state = &self.workspace.daily;

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use githalo::branch_ops::BranchSnapshot;
 use githalo::conflict_ops::{ConflictSide, ConflictStrategy};
 use githalo::history_ops::{ResetMode, RevertOptions, RevertStatus};
+use githalo::i18n::tr;
 use githalo::merge_ops::{MergeMode, MergeRelation, MergeStatus};
 use githalo::staging::{ChangesHead, DiffSide, FileChange};
 use githalo::workspace::{Action, Panel, RepoOpAction, RepoOpPreview};
@@ -1021,7 +1022,7 @@ impl DesktopView {
             .flex_col()
             .gap(px(10.))
             .child(dialog_heading("撤销最近提交（Undo Commit）"))
-            .child(review_detail("工作树", dialog.target.root.display().to_string()))
+            .child(review_detail(tr("仓库", "Repository"), dialog.target.root.display().to_string()))
             .child(review_detail(
                 "撤销提交",
                 format!("{}  {}", short_oid(&dialog.oid), dialog.subject),
@@ -1250,7 +1251,7 @@ impl DesktopView {
                     .flex_col()
                     .gap(px(8.))
                     .child(review_detail(
-                        "工作树",
+                        tr("仓库", "Repository"),
                         form.target.root.display().to_string(),
                     ))
                     .child(body),
@@ -1425,7 +1426,7 @@ impl DesktopView {
                     .flex_col()
                     .gap(px(8.))
                     .child(review_detail(
-                        "工作树",
+                        tr("仓库", "Repository"),
                         form.target.root.display().to_string(),
                     ))
                     .child(body),
@@ -1600,7 +1601,7 @@ impl DesktopView {
                     .flex_col()
                     .gap(px(8.))
                     .child(review_detail(
-                        "工作树",
+                        tr("仓库", "Repository"),
                         form.target.root.display().to_string(),
                     ))
                     .child(body),
@@ -1644,7 +1645,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("中止合并"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 status.worktree().root.display().to_string(),
             ))
             .child(review_detail(
@@ -1697,7 +1698,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("中止 Revert"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 status.worktree().root.display().to_string(),
             ))
             .child(review_detail(
@@ -2508,7 +2509,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("回滚本地改动（Rollback）"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 dialog.target.root.display().to_string(),
             ))
             .child(review_detail(
@@ -2571,7 +2572,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("确认 Amend（修改最近提交）"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 dialog.target.root.display().to_string(),
             ))
             .child(

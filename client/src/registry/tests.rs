@@ -26,6 +26,8 @@ fn reopening_preserves_cross_group_memberships_and_expansion() {
             worktrees: Vec::new(),
             groups: Vec::new(),
             ungrouped_expanded: true,
+            nested: BTreeMap::new(),
+            dismissed_nested: BTreeMap::new(),
         }
     );
 
@@ -473,11 +475,25 @@ fn version_one_migration_preserves_registrations_and_fetch_times() {
             .record_fetch_success(&target, &upstream, tracking, at)
             .unwrap()
     );
-    let expected_board = legacy.board().unwrap();
+    let expected_board = RegistryBoard {
+        worktrees: vec![target.clone()],
+        groups: vec![RegistryGroup {
+            id: group,
+            name: "Repositories".into(),
+            expanded: false,
+            members: vec![id],
+        }],
+        ungrouped_expanded: false,
+        nested: BTreeMap::new(),
+        dismissed_nested: BTreeMap::new(),
+    };
     drop(legacy);
 
     let mut upgraded = Registry::open(&database).unwrap();
-    assert_eq!(schema_version(&upgraded.connection).unwrap(), 2);
+    assert_eq!(
+        schema_version(&upgraded.connection).unwrap(),
+        SCHEMA_VERSION
+    );
     assert_eq!(upgraded.board().unwrap(), expected_board);
     assert_eq!(
         upgraded
@@ -625,4 +641,53 @@ fn comparison_cache_is_scoped_to_the_branch_and_ref_and_expires_on_path_changes(
             .record_comparison(&repaired, branch, &upstream, tracking, later_at, counts)
             .unwrap()
     );
+}
+
+#[test]
+fn nested_repos_persist_expansion_dismissals_and_cascade_on_remove() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("nested.sqlite");
+    let parent_root = root_in(&directory, "fuxing-octo");
+    let child_a = root_in(&directory, "fuxing-octo/code/octo-web");
+    let child_b = root_in(&directory, "fuxing-octo/code/octo-server");
+    let ignored_c = root_in(&directory, "fuxing-octo/code/octo-old");
+
+    let mut registry = Registry::open(&database).unwrap();
+    let parent = registry.register(&parent_root, None).unwrap();
+    let attached = registry
+        .attach_nested_repos(parent, &[child_a.clone(), child_b.clone()])
+        .unwrap();
+    assert_eq!(attached.len(), 2);
+    registry.toggle_nested_expanded(parent).unwrap();
+    registry
+        .dismiss_nested_paths(parent, std::slice::from_ref(&ignored_c))
+        .unwrap();
+    drop(registry);
+
+    let mut reopened = Registry::open(&database).unwrap();
+    let board = reopened.board().unwrap();
+    let nested = board.nested.get(&parent).unwrap();
+    assert!(!nested.expanded);
+    assert_eq!(nested.children, attached);
+    assert_eq!(
+        board.dismissed_nested.get(&parent).map(Vec::as_slice),
+        Some(std::slice::from_ref(&ignored_c))
+    );
+
+    reopened.detach_nested_repo(parent, attached[0]).unwrap();
+    assert_eq!(
+        reopened
+            .board()
+            .unwrap()
+            .nested
+            .get(&parent)
+            .unwrap()
+            .children,
+        vec![attached[1]]
+    );
+
+    reopened.unregister(parent).unwrap();
+    let after_delete = reopened.board().unwrap();
+    assert!(!after_delete.nested.contains_key(&parent));
+    assert!(!after_delete.dismissed_nested.contains_key(&parent));
 }

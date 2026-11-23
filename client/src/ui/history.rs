@@ -375,18 +375,18 @@ impl DesktopView {
                 tr("正在打开工作区…", "Opening workspace…")
             } else if self.workspace.selected.is_none() {
                 tr(
-                    "添加或选择工作树后查看提交历史",
-                    "Add or select a worktree to view commit history",
+                    "添加或选择仓库后查看提交历史",
+                    "Add or select a repository to view commit history",
                 )
             } else if filtered {
                 tr("没有匹配的提交", "No matching commits")
             } else if self.workspace.message.is_some() {
                 tr(
-                    "无法显示该工作树的提交",
-                    "Unable to display commits for this worktree",
+                    "无法显示该仓库的提交",
+                    "Unable to display commits for this repository",
                 )
             } else {
-                tr("此工作树暂无提交", "No commits yet in this worktree")
+                tr("此仓库暂无提交", "No commits yet in this repository")
             };
             empty(message).into_any_element()
         } else {

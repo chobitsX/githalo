@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::sync::Arc;
 
+use githalo::i18n::tr;
 use githalo::rebase_ops::{RebaseStatus, RebaseTodoAction, RebaseTodoItem};
 use githalo::workspace::{Action, Panel, RepoOpAction, RepoOpPreview};
 use githalo::worktree::WorktreeTarget;
@@ -630,7 +631,7 @@ impl DesktopView {
                     .flex_col()
                     .gap(px(8.))
                     .child(review_detail(
-                        "工作树",
+                        tr("仓库", "Repository"),
                         form.target.root.display().to_string(),
                     ))
                     .child(body),
@@ -974,7 +975,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("中止 Rebase"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 status.worktree().root.display().to_string(),
             ))
             .child(review_detail("原分支", status.head_name().to_owned()))

@@ -146,8 +146,8 @@ impl DesktopView {
     pub(super) fn stash_panel(&self, cx: &mut Context<Self>) -> Div {
         if self.active_worktree().is_none() {
             return empty(tr(
-                "选择工作树后查看 Stash",
-                "Select a worktree to view stashes",
+                "选择仓库后查看 Stash",
+                "Select a repository to view stashes",
             ));
         }
         let state = &self.workspace.stashes;
@@ -579,7 +579,7 @@ impl DesktopView {
             }))
             .child(dialog_heading("保存 Stash"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 form.snapshot.worktree().root.display().to_string(),
             ))
             .child(review_detail(
@@ -694,8 +694,8 @@ impl DesktopView {
 
     pub(super) fn stash_review_dialog(&self, review: &StashReview, cx: &mut Context<Self>) -> Div {
         let description = match review.operation {
-            StashOperation::Apply => "将改动应用到所示工作树，保留此 Stash 条目。",
-            StashOperation::Pop => "将改动应用到所示工作树，成功后移除条目。发生冲突时保留条目。",
+            StashOperation::Apply => "将改动应用到当前仓库，保留此 Stash 条目。",
+            StashOperation::Pop => "将改动应用到当前仓库，成功后移除条目。发生冲突时保留条目。",
             StashOperation::Drop => "从仓库的 Stash 列表中移除此条目。关联工作树也会看到这项变化。",
             StashOperation::Branch => {
                 "从 Stash 的基点创建并切换分支，恢复改动及暂存状态。成功后移除条目。"
@@ -705,7 +705,7 @@ impl DesktopView {
         stash_dialog_body()
             .child(dialog_heading(review.title()))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 review.snapshot.worktree().root.display().to_string(),
             ))
             .child(review_detail(

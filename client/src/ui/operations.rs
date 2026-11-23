@@ -146,7 +146,7 @@ impl DesktopView {
                 snapshot
                     .head_oid()
                     .is_none()
-                    .then(|| tr("工作树尚无提交", "No commits yet").into()),
+                    .then(|| tr("当前仓库尚无提交", "No commits yet").into()),
             )
         };
         let mut items = vec![
@@ -434,7 +434,7 @@ impl DesktopView {
             return;
         };
         if target.as_ref() != Some(form.snapshot.worktree()) {
-            form.error = Some("选中的工作树已变更，请重新打开分支菜单".into());
+            form.error = Some("选中的仓库已变更，请重新打开分支菜单".into());
             cx.notify();
             return;
         }
@@ -474,7 +474,7 @@ impl DesktopView {
             .on_action(cx.listener(|view, _: &Confirm, window, cx| view.create_branch(window, cx)))
             .child(dialog_heading("新建分支"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 form.snapshot.worktree().root.display().to_string(),
             ))
             .child(review_detail("起点", source))
@@ -562,7 +562,7 @@ impl DesktopView {
             return;
         };
         if target.as_ref() != Some(form.snapshot.worktree()) {
-            form.error = Some("选中的工作树已变更，请重新打开".into());
+            form.error = Some("选中的仓库已变更，请重新打开".into());
             cx.notify();
             return;
         }
@@ -972,7 +972,7 @@ impl DesktopView {
             },
             None => {
                 let (message, color) = if !current {
-                    ("选中的工作树已变更，请重新选择操作", ERROR)
+                    ("选中的仓库已变更，请重新选择操作", ERROR)
                 } else if daily.preparing {
                     ("正在读取操作预览…", SUBTLE)
                 } else if let Some(error) = &daily.error {
@@ -1021,7 +1021,7 @@ impl DesktopView {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(review_detail(tr("工作树", "Worktree"), path))
+                    .child(review_detail(tr("仓库", "Repository"), path))
                     .child(content),
             )
             .child(

@@ -333,7 +333,7 @@ impl DesktopView {
             )
             .child(self.review_buttons(
                 "confirm-init-repo",
-                "初始化并登记",
+                "初始化并添加",
                 enabled,
                 Self::submit_init,
                 cx,
@@ -446,7 +446,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("管理远端仓库（Remotes）"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 form.target.root.display().to_string(),
             ))
             .child(list_view)
@@ -636,7 +636,7 @@ impl DesktopView {
                         .when(!already_registered && !is_prunable, |row| {
                             let add_path = wt_path.clone();
                             row.child(
-                                command_button(("wt-register", idx), "登记", false, writable)
+                                command_button(("wt-register", idx), "添加到列表", false, writable)
                                     .h(px(23.))
                                     .text_size(px(11.5))
                                     .when(writable, |btn| {
@@ -762,7 +762,7 @@ impl DesktopView {
                         div()
                             .id("wt-register-toggle")
                             .role(Role::CheckBox)
-                            .aria_label("创建后登记到工作区")
+                            .aria_label("创建后添加到仓库列表")
                             .aria_toggled(if form.register_in_board {
                                 Toggled::True
                             } else {
@@ -774,7 +774,7 @@ impl DesktopView {
                             .gap(px(6.))
                             .cursor_pointer()
                             .child(check_indicator(form.register_in_board))
-                            .child("创建后自动登记到客户端工作区")
+                            .child("创建后自动添加到仓库列表")
                             .on_click(cx.listener(|view, _, _, cx| {
                                 if let Some(Overlay::Dialog(Dialog::Worktrees(form))) =
                                     &mut view.overlay
@@ -1452,7 +1452,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("标签管理与推送（Tags）"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 dialog.target.root.display().to_string(),
             ))
             .child(remote_selector)

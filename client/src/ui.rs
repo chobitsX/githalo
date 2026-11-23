@@ -4,6 +4,7 @@ mod components;
 mod daily;
 mod graph;
 mod history;
+mod nested;
 mod operations;
 mod overlay;
 mod rebase;
@@ -347,14 +348,14 @@ impl DesktopView {
             .workspace
             .selected
             .and_then(|id| self.workspace.repo(id));
-        let title = selected.map_or(tr("选择工作树", "Select Worktree"), |repo| {
+        let title = selected.map_or(tr("选择仓库", "Select Repository"), |repo| {
             repo.name.as_str()
         });
         let worktree_tooltip = selected.map_or_else(
             || {
                 tr(
-                    "选择已登记的工作树，或添加本地工作树",
-                    "Select a registered worktree or add a local worktree",
+                    "选择已有仓库，或添加本地仓库",
+                    "Select a repository or add a local repository",
                 )
                 .to_owned()
             },
@@ -424,7 +425,7 @@ impl DesktopView {
                 div()
                     .id("worktree-picker")
                     .role(Role::Button)
-                    .aria_label(format!("{} {title}", tr("选择工作树，当前", "Worktree:")))
+                    .aria_label(format!("{} {title}", tr("选择仓库，当前", "Repository:")))
                     .tab_index(0)
                     .flex()
                     .items_center()
@@ -629,6 +630,7 @@ impl DesktopView {
 
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_container_discovery_dialog(window, cx);
         let viewport = window.viewport_size().width;
         let sidebar_width = self.sidebar_width_for(viewport);
         let available = viewport

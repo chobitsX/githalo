@@ -146,8 +146,8 @@ impl DesktopView {
     pub(super) fn shelf_panel(&self, cx: &mut Context<Self>) -> Div {
         if self.active_worktree().is_none() {
             return empty(tr(
-                "选择工作树后查看 Shelf",
-                "Select a worktree to view shelves",
+                "选择仓库后查看 Shelf",
+                "Select a repository to view shelves",
             ));
         }
         let state = &self.workspace.shelves;
@@ -476,7 +476,7 @@ impl DesktopView {
     pub(super) fn shelve_dialog(&self, form: &ShelveForm, cx: &mut Context<Self>) -> Div {
         let enabled = self.daily_can_write() && self.active_worktree() == Some(&form.target);
         let scope = if form.paths.is_empty() {
-            "当前工作树全部非冲突改动".to_owned()
+            "当前仓库全部非冲突改动".to_owned()
         } else {
             form.paths
                 .iter()
@@ -492,7 +492,7 @@ impl DesktopView {
             .on_action(cx.listener(|view, _: &Confirm, window, cx| view.submit_shelve(window, cx)))
             .child(dialog_heading("搁置改动到 Shelf"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 form.target.root.display().to_string(),
             ))
             .child(review_detail("搁置范围", scope))
@@ -570,7 +570,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("从 Shelf 恢复改动（Unshelve）"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 dialog.snapshot.worktree().root.display().to_string(),
             ))
             .child(review_detail("Shelf 条目", dialog.entry.name.clone()))

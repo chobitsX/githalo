@@ -1,8 +1,9 @@
 use githalo::i18n::{is_zh, tr};
 use githalo::workspace::{Action, GroupId, GroupView, Panel, RepoRow, format_fetch_time};
+use githalo::worktree::WorktreeId;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Pixels, Role, SharedString, TextAlign, div, prelude::*,
-    px, rgb,
+    AnyElement, Context, Div, ExternalPaths, FontWeight, Pixels, Render, Role, SharedString,
+    TextAlign, Window, div, prelude::*, px, rgb, transparent_black,
 };
 
 use super::DesktopView;
@@ -10,6 +11,30 @@ use super::components::*;
 use super::overlay::{MenuKind, PathOperation};
 
 const COUNT_WIDTH: f32 = 42.;
+
+#[derive(Clone)]
+struct DraggedRepo {
+    id: WorktreeId,
+    from: Option<GroupId>,
+    name: String,
+}
+
+struct DragRepoBadge(String);
+
+impl Render for DragRepoBadge {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(10.))
+            .py(px(5.))
+            .rounded(px(6.))
+            .bg(rgb(0x1c353a))
+            .border_1()
+            .border_color(rgb(0x69e8ce))
+            .text_size(px(12.))
+            .text_color(rgb(TEXT))
+            .child(self.0.clone())
+    }
+}
 
 impl DesktopView {
     pub(super) fn sidebar(&self, width: Pixels, cx: &mut Context<Self>) -> Div {
@@ -85,7 +110,7 @@ impl DesktopView {
                 icon_button(
                     "add",
                     Icon::Add,
-                    tr("添加工作树或新建分组", "Add Worktree or New Group"),
+                    tr("添加仓库或新建分组", "Add Repository or New Group"),
                 )
                 .on_click(cx.listener(
                     |view, event: &gpui::ClickEvent, window, cx| {
@@ -106,11 +131,16 @@ impl DesktopView {
             .child(count_cell(tr("↑ 领先", "↑ Out"), MUTED).text_size(px(11.)));
         let selected = self.workspace.selected;
         let visible_group = selected.and_then(|id| {
-            let mut expanded = self
-                .workspace
-                .groups
-                .iter()
-                .filter(|group| group.expanded && group.members.contains(&id));
+            let mut expanded = self.workspace.groups.iter().filter(|group| {
+                group.expanded
+                    && (group.members.contains(&id)
+                        || group.members.iter().any(|member| {
+                            self.workspace
+                                .nested
+                                .get(member)
+                                .is_some_and(|n| n.expanded && n.children.contains(&id))
+                        }))
+            });
             let first = expanded.clone().next().map(|group| group.id);
             self.preferred_group
                 .filter(|preferred| expanded.any(|group| group.id == *preferred))
@@ -124,18 +154,27 @@ impl DesktopView {
         let board = div()
             .id("repository-board")
             .role(Role::Tree)
-            .aria_label(tr("工作树分组", "Worktree Groups"))
+            .aria_label(tr("仓库分组", "Repository Groups"))
             .flex_1()
             .min_h_0()
             .px(px(7.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(transparent_black())
             .overflow_y_scroll()
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.bg(rgb(0x16262a)).border_color(rgb(0x4ea89b))
+            })
+            .on_drop::<ExternalPaths>(cx.listener(|view, paths: &ExternalPaths, _, cx| {
+                view.drop_external_paths(paths, None, cx);
+            }))
             .children(groups.map(|group| self.group(group, visible_group, cx)))
             .when(!self.workspace.ready, |list| {
                 list.child(div().py(px(14.)).px(px(7.)).text_color(rgb(SUBTLE)).child(
                     if self.workspace.message.is_some() {
-                        tr("无法读取工作树登记", "Failed to load registered worktrees")
+                        tr("无法读取仓库列表", "Failed to load repositories")
                     } else {
-                        tr("正在读取工作树登记…", "Loading registered worktrees…")
+                        tr("正在读取仓库列表…", "Loading repositories…")
                     },
                 ))
             })
@@ -150,15 +189,14 @@ impl DesktopView {
                             .gap(px(8.))
                             .py(px(14.))
                             .px(px(7.))
-                            .child(
-                                div()
-                                    .text_color(rgb(SUBTLE))
-                                    .child(tr("还没有登记的工作树", "No registered worktrees yet")),
-                            )
+                            .child(div().text_color(rgb(SUBTLE)).child(tr(
+                                "还没有添加仓库，可点击下方按钮或直接拖入本地文件夹",
+                                "No repositories yet — click below or drag folders here",
+                            )))
                             .child(
                                 text_button(
                                     "add-first-worktree",
-                                    tr("添加本地工作树…", "Add Local Worktree…"),
+                                    tr("添加本地仓库…", "Add Local Repository…"),
                                     true,
                                 )
                                 .on_click(cx.listener(
@@ -320,26 +358,266 @@ impl DesktopView {
             .id(("repo-group", group_key))
             .role(Role::Group)
             .aria_label(group_title)
-            .border_b_1()
-            .border_color(rgb(0x292b2e))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(transparent_black())
             .pb(px(3.))
+            .mb(px(2.))
+            .drag_over::<ExternalPaths>(|style, _, _, _| {
+                style.bg(rgb(0x1c353a)).border_color(rgb(0x69e8ce))
+            })
+            .drag_over::<DraggedRepo>(|style, _, _, _| {
+                style.bg(rgb(0x1c353a)).border_color(rgb(0x69e8ce))
+            })
+            .on_drop::<ExternalPaths>(cx.listener(move |view, paths: &ExternalPaths, _, cx| {
+                view.drop_external_paths(paths, id, cx);
+            }))
+            .on_drop::<DraggedRepo>(cx.listener(move |view, dragged: &DraggedRepo, _, cx| {
+                view.drop_repo_to_group(dragged, id, cx);
+            }))
             .child(header)
             .when(group.expanded, |entry| {
                 entry.children(group.members.iter().filter_map(|repo_id| {
-                    self.workspace.repo(*repo_id).map(|repo| {
-                        let selected =
-                            self.workspace.selected == Some(*repo_id) && visible_group == Some(id);
-                        self.repo_row(repo, id, selected, cx)
-                    })
+                    self.workspace
+                        .repo(*repo_id)
+                        .map(|repo| self.repo_with_nested(repo, id, visible_group, cx))
                 }))
             })
+            .child(div().h(px(1.)).mt(px(3.)).bg(rgb(0x292b2e)))
             .into_any_element()
+    }
+
+    fn drop_external_paths(
+        &mut self,
+        paths: &ExternalPaths,
+        group: Option<GroupId>,
+        cx: &mut Context<Self>,
+    ) {
+        let paths = paths.paths().to_vec();
+        if paths.is_empty() {
+            return;
+        }
+        self.notice = None;
+        self.dispatch(Action::AddRepos { paths, group }, cx);
+    }
+
+    fn drop_repo_to_group(
+        &mut self,
+        dragged: &DraggedRepo,
+        target: Option<GroupId>,
+        cx: &mut Context<Self>,
+    ) {
+        if dragged.from == target {
+            return;
+        }
+        self.notice = None;
+        match (dragged.from, target) {
+            (Some(from), Some(to)) => {
+                self.dispatch(
+                    Action::MoveMember {
+                        id: dragged.id,
+                        from,
+                        to,
+                    },
+                    cx,
+                );
+            }
+            (None, Some(to)) => {
+                self.dispatch(
+                    Action::AddMember {
+                        id: dragged.id,
+                        group: to,
+                    },
+                    cx,
+                );
+            }
+            (Some(from), None) => {
+                self.dispatch(
+                    Action::RemoveMember {
+                        id: dragged.id,
+                        group: from,
+                    },
+                    cx,
+                );
+            }
+            (None, None) => {}
+        }
+    }
+
+    fn repo_with_nested(
+        &self,
+        repo: &RepoRow,
+        group: Option<GroupId>,
+        visible_group: Option<Option<GroupId>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = repo.target.id;
+        let selected = self.workspace.selected == Some(id) && visible_group == Some(group);
+        let nested = self.workspace.nested.get(&id);
+        let discovered = self.workspace.discovered_nested.get(&id);
+        let scanning = self.workspace.scanning_nested.contains(&id);
+
+        let parent_row = self.repo_row(repo, group, None, selected, cx);
+        let has_children = nested.is_some_and(|n| !n.children.is_empty());
+        let has_discovery = discovered.is_some_and(|d| !d.is_empty());
+        if !has_children && !has_discovery && !scanning {
+            return parent_row;
+        }
+
+        let mut container = div().flex().flex_col().min_w_0().child(parent_row);
+
+        if scanning {
+            container = container.child(
+                div()
+                    .ml(px(22.))
+                    .mr(px(4.))
+                    .my(px(2.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(5.))
+                    .bg(rgb(CARD))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_size(px(11.))
+                    .text_color(rgb(SUBTLE))
+                    .child(tr("正在扫描子仓库…", "Scanning nested repositories…")),
+            );
+        } else if let Some(found) = discovered.filter(|d| !d.is_empty()) {
+            let count = found.len();
+            let dismiss_paths: Vec<_> = found.iter().map(|r| r.root.clone()).collect();
+            let banner_label = if is_zh() {
+                format!("发现 {count} 个子仓库")
+            } else {
+                format!("{count} nested repos found")
+            };
+            let banner_tip = if is_zh() {
+                format!(
+                    "在 {} 子目录下检测到 {count} 个 Git 仓库，点击“纳管”可选择性挂载或建组",
+                    repo.name
+                )
+            } else {
+                format!(
+                    "Detected {count} Git repositories under {}. Click Adopt to manage them.",
+                    repo.name
+                )
+            };
+            container = container.child(
+                div()
+                    .id(("nested-banner", id.get() as usize))
+                    .ml(px(20.))
+                    .mr(px(3.))
+                    .my(px(3.))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .bg(rgb(0x14292e))
+                    .border_1()
+                    .border_color(rgb(0x2d646d))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .min_w_0()
+                    .tooltip(tooltip(banner_tip))
+                    .child(
+                        div()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .flex_shrink_0()
+                            .rounded(px(3.))
+                            .bg(rgb(0x69e8ce)),
+                    )
+                    .child(
+                        elide(banner_label)
+                            .flex_1()
+                            .text_size(px(11.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(0xc6f6ec)),
+                    )
+                    .child(
+                        div()
+                            .id(("nested-adopt-btn", id.get() as usize))
+                            .role(Role::Button)
+                            .tab_index(0)
+                            .flex_shrink_0()
+                            .px(px(7.))
+                            .h(px(20.))
+                            .rounded(px(4.))
+                            .bg(rgb(0x1f4d52))
+                            .border_1()
+                            .border_color(rgb(0x4db8a8))
+                            .flex()
+                            .items_center()
+                            .text_size(px(10.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(0xdffcf5))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x286268)))
+                            .child(tr("纳管…", "Adopt…"))
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                cx.stop_propagation();
+                                view.open_adopt_nested_dialog(id, window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(("nested-dismiss-btn", id.get() as usize))
+                            .role(Role::Button)
+                            .aria_label(tr("忽略子仓库提示", "Dismiss nested repos"))
+                            .tab_index(0)
+                            .flex_shrink_0()
+                            .w(px(18.))
+                            .h(px(18.))
+                            .rounded(px(4.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x213d42)))
+                            .tooltip(tooltip(tr("忽略本次发现", "Ignore these").to_owned()))
+                            .child(icon(Icon::Close, SUBTLE))
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.dispatch(
+                                    Action::DismissNested {
+                                        parent: id,
+                                        paths: dismiss_paths.clone(),
+                                    },
+                                    cx,
+                                );
+                            })),
+                    ),
+            );
+        }
+
+        if let Some(nested) = nested.filter(|n| n.expanded && !n.children.is_empty()) {
+            let children_view = div()
+                .ml(px(16.))
+                .pl(px(6.))
+                .my(px(2.))
+                .border_l_1()
+                .border_color(rgb(0x2d3b42))
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .min_w_0()
+                .children(nested.children.iter().filter_map(|child_id| {
+                    self.workspace.repo(*child_id).map(|child| {
+                        let child_selected = self.workspace.selected == Some(*child_id)
+                            && visible_group == Some(group);
+                        self.repo_row(child, group, Some(id), child_selected, cx)
+                    })
+                }));
+            container = container.child(children_view);
+        }
+
+        container.into_any_element()
     }
 
     fn repo_row(
         &self,
         repo: &RepoRow,
         group: Option<GroupId>,
+        nested_parent: Option<WorktreeId>,
         selected: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -357,13 +635,79 @@ impl DesktopView {
             || ("—".to_owned(), "—".to_owned()),
             |counts| (counts.behind.to_string(), counts.ahead.to_string()),
         );
-        let name = div()
-            .flex()
-            .min_w_0()
-            .flex_1()
-            .gap(px(5.))
-            .items_start()
-            .child(icon(Icon::Folder, MUTED))
+        let nested_info = if nested_parent.is_none() {
+            self.workspace
+                .nested
+                .get(&id)
+                .filter(|n| !n.children.is_empty())
+        } else {
+            None
+        };
+        let nested_summary = nested_info.map(|nested| {
+            let total = nested.children.len();
+            let mut diverged = 0usize;
+            for child_id in &nested.children {
+                if let Some(counts) = self
+                    .workspace
+                    .repo(*child_id)
+                    .and_then(|r| r.counts.filter(|_| r.issue.is_none() && !r.historical))
+                    && (counts.behind > 0 || counts.ahead > 0)
+                {
+                    diverged += 1;
+                }
+            }
+            let text = if diverged > 0 {
+                if is_zh() {
+                    format!("{total} 个子仓库 · {diverged} 个有差异")
+                } else {
+                    format!("{total} sub-repos · {diverged} diverged")
+                }
+            } else if is_zh() {
+                format!("{total} 个子仓库 · 已同步")
+            } else {
+                format!("{total} sub-repos · synced")
+            };
+            (nested.expanded, diverged > 0, text)
+        });
+
+        let mut name = div().flex().min_w_0().flex_1().gap(px(4.)).items_center();
+        if let Some((expanded, _, _)) = &nested_summary {
+            let arrow = if *expanded {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            };
+            name = name.child(
+                div()
+                    .id(("toggle-nested", id.get() as usize))
+                    .role(Role::Button)
+                    .aria_label(tr("展开或折叠子仓库", "Toggle nested repositories"))
+                    .tab_index(0)
+                    .w(px(16.))
+                    .h(px(16.))
+                    .flex_shrink_0()
+                    .rounded(px(3.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(0x324048)))
+                    .child(icon(arrow, 0x69e8ce))
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        cx.stop_propagation();
+                        view.dispatch(Action::ToggleNested(id), cx);
+                    })),
+            );
+        }
+        name = name
+            .child(icon(
+                Icon::Folder,
+                if nested_parent.is_some() {
+                    0x7ab8c4
+                } else {
+                    MUTED
+                },
+            ))
             .child(elide(repo.name.clone()));
         let first = div()
             .flex()
@@ -373,9 +717,14 @@ impl DesktopView {
             .child(name)
             .child(count_cell(behind, count_color))
             .child(count_cell(ahead, count_color));
+        let branch_indent = if nested_summary.is_some() {
+            px(36.)
+        } else {
+            px(20.)
+        };
         let second = div()
             .flex()
-            .ml(px(21.))
+            .ml(branch_indent)
             .items_center()
             .justify_between()
             .min_w_0()
@@ -394,14 +743,18 @@ impl DesktopView {
                 icon_button(
                     "repo-options",
                     Icon::More,
-                    tr("工作树操作", "Worktree actions"),
+                    tr("仓库操作", "Repository actions"),
                 )
                 .h(px(17.))
                 .on_click(cx.listener(
                     move |view, event: &gpui::ClickEvent, window, cx| {
                         cx.stop_propagation();
                         view.open_menu(
-                            MenuKind::Repository { id, group },
+                            MenuKind::Repository {
+                                id,
+                                group,
+                                nested_parent,
+                            },
                             event.position(),
                             window,
                             cx,
@@ -409,8 +762,17 @@ impl DesktopView {
                     },
                 )),
             );
+        let drag_name = repo.name.clone();
+        let row_pl = if nested_parent.is_some() || nested_summary.is_some() {
+            px(6.)
+        } else {
+            px(22.)
+        };
         div()
-            .id(("repository", id.get() as usize))
+            .id((
+                "repository",
+                (id.get() as usize) * 4 + usize::from(nested_parent.is_some()),
+            ))
             .role(Role::TreeItem)
             .aria_label(repo.name.clone())
             .aria_description(details.clone())
@@ -419,19 +781,63 @@ impl DesktopView {
             .tooltip(tooltip(details))
             .min_w_0()
             .rounded(px(4.))
-            .pl(px(22.))
+            .pl(row_pl)
             .py(px(2.))
             .text_size(px(12.5))
             .line_height(px(17.))
             .cursor_pointer()
+            .on_drag(
+                DraggedRepo {
+                    id,
+                    from: group,
+                    name: drag_name,
+                },
+                |dragged, _, _, cx| cx.new(|_| DragRepoBadge(dragged.name.clone())),
+            )
             .when(selected, |row| row.bg(rgb(ACTIVE)))
             .hover(move |s| s.bg(rgb(if selected { ACTIVE } else { HOVER })))
             .focus_visible(|s| s.bg(rgb(ACTIVE)))
             .child(first)
             .child(second)
+            .children(nested_summary.map(|(_, has_diverged, summary_text)| {
+                div()
+                    .id(("nested-pill", id.get() as usize))
+                    .ml(branch_indent)
+                    .mr(px(4.))
+                    .mt(px(2.))
+                    .mb(px(1.))
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(rgb(if has_diverged { 0x26291e } else { 0x1b272a }))
+                    .border_1()
+                    .border_color(rgb(if has_diverged { 0x5c5328 } else { 0x2b454c }))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .cursor_pointer()
+                    .hover(|s| s.border_color(rgb(0x69e8ce)))
+                    .child(
+                        div()
+                            .w(px(5.))
+                            .h(px(5.))
+                            .flex_shrink_0()
+                            .rounded(px(3.))
+                            .bg(rgb(if has_diverged { WARNING } else { 0x69e8ce })),
+                    )
+                    .child(
+                        elide(summary_text)
+                            .text_size(px(10.5))
+                            .text_color(rgb(if has_diverged { WARNING } else { 0x9fd8cf })),
+                    )
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        cx.stop_propagation();
+                        view.dispatch(Action::ToggleNested(id), cx);
+                    }))
+            }))
             .children(status_label.map(|status| {
                 elide(status)
-                    .ml(px(21.))
+                    .ml(branch_indent)
                     .pr(px(5.))
                     .text_size(px(10.5))
                     .text_color(rgb(if repo.fetching || repo.loading {
@@ -446,7 +852,7 @@ impl DesktopView {
                     tr("历史计数", "Cached"),
                     format_fetch_time(time)
                 ))
-                .ml(px(21.))
+                .ml(branch_indent)
                 .pr(px(5.))
                 .text_size(px(10.5))
                 .text_color(rgb(WARNING))
@@ -459,7 +865,11 @@ impl DesktopView {
                     if event.is_right_click() {
                         cx.stop_propagation();
                         view.open_menu(
-                            MenuKind::Repository { id, group },
+                            MenuKind::Repository {
+                                id,
+                                group,
+                                nested_parent,
+                            },
                             event.position(),
                             window,
                             cx,
@@ -477,8 +887,8 @@ impl DesktopView {
             .and_then(|id| self.workspace.repo(id))
         else {
             return empty(tr(
-                "选择工作树后查看项目文件",
-                "Select a worktree to browse project files",
+                "选择仓库后查看项目文件",
+                "Select a repository to browse project files",
             ));
         };
         let path = repo.target.root.to_string_lossy().into_owned();
@@ -487,8 +897,8 @@ impl DesktopView {
             .id("project-tree")
             .role(Role::Tree)
             .aria_label(tr(
-                "当前工作树的项目文件",
-                "Project files in current worktree",
+                "当前仓库的项目文件",
+                "Project files in current repository",
             ))
             .flex()
             .flex_col()
@@ -588,8 +998,8 @@ impl DesktopView {
                     tr("项目文件不可用", "Project files unavailable")
                 } else {
                     tr(
-                        "工作树中没有可显示的文件",
-                        "No files to display in worktree",
+                        "仓库中没有可显示的文件",
+                        "No files to display in repository",
                     )
                 })
                 .into_any_element()

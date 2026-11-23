@@ -889,6 +889,168 @@ fn completed_fetch_from_an_old_branch_only_updates_its_original_upstream() {
 }
 
 #[test]
+fn dropping_multiple_folders_registers_repos_into_target_group_and_skips_non_git() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let remote = bare_remote(&root);
+    let first = clone_worktree(&root, &remote, "octo-web", "base");
+    let second = clone_worktree(&root, &remote, "octo-server", "local");
+    let non_git = root.join("plain-folder");
+    fs::create_dir_all(&non_git).unwrap();
+    let file_inside_second = second.join("Cargo.toml");
+
+    let mut harness = Harness::open(&root.join("workspace.sqlite3"));
+    let group_id = harness.create_group("Octo");
+    // Collapse the group first to confirm dropping into it automatically expands it.
+    harness
+        .workspace
+        .dispatch(Action::ToggleGroup(Some(group_id)));
+    harness.wait("collapse group", |ws| {
+        ws.groups
+            .iter()
+            .find(|g| g.id == Some(group_id))
+            .is_some_and(|g| !g.expanded)
+    });
+
+    harness.workspace.dispatch(Action::AddRepos {
+        paths: vec![
+            first.clone(),
+            file_inside_second,
+            first.clone(),
+            non_git.clone(),
+        ],
+        group: Some(group_id),
+    });
+    harness.wait("register dropped repos into target group", |ws| {
+        ws.repos.len() == 2
+            && ws
+                .groups
+                .iter()
+                .find(|g| g.id == Some(group_id))
+                .is_some_and(|g| g.expanded && g.members.len() == 2)
+    });
+
+    assert!(harness.workspace.message.is_some());
+    assert!(
+        harness
+            .workspace
+            .repos
+            .iter()
+            .any(|r| r.target.root == first)
+    );
+    assert!(
+        harness
+            .workspace
+            .repos
+            .iter()
+            .any(|r| r.target.root == second)
+    );
+
+    // Dropping a new repo onto empty list area (group: None) puts it into Ungrouped.
+    let third = clone_worktree(&root, &remote, "octo-fleet", "upstream");
+    harness.workspace.dispatch(Action::AddRepos {
+        paths: vec![third.clone()],
+        group: None,
+    });
+    harness.wait("register dropped repo into ungrouped", |ws| {
+        ws.repos.len() == 3
+            && ws
+                .groups
+                .iter()
+                .find(|g| g.id.is_none())
+                .is_some_and(|g| g.members.len() == 1)
+    });
+    assert!(
+        harness
+            .workspace
+            .repos
+            .iter()
+            .any(|r| r.target.root == third)
+    );
+}
+
+#[test]
+fn nested_repositories_discover_async_adopt_under_parent_and_support_container_folders() {
+    use githalo::workspace::NestedAdoptMode;
+
+    let directory = tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let remote = bare_remote(&root);
+
+    // 1. Parent repo with 2 nested sub-repos under code/services/
+    let parent_repo = clone_worktree(&root, &remote, "fuxing-octo", "base");
+    let sub_root = parent_repo.join("code/services");
+    fs::create_dir_all(&sub_root).unwrap();
+    let child_web = clone_worktree(&sub_root, &remote, "octo-web", "local");
+    let child_api = clone_worktree(&sub_root, &remote, "octo-server", "upstream");
+
+    let mut harness = Harness::open(&root.join("workspace.sqlite3"));
+    let parent_id = harness.add_repo(&parent_repo, None);
+
+    // Async discovery should surface both nested repos without blocking parent registration.
+    harness.wait("discover nested repositories asynchronously", |ws| {
+        ws.discovered_nested
+            .get(&parent_id)
+            .is_some_and(|items| items.len() == 2)
+    });
+
+    // Adopt both under parent repo as a collapsible sub-tree.
+    harness.workspace.dispatch(Action::AdoptNested {
+        parent: parent_id,
+        paths: vec![child_web.clone(), child_api.clone()],
+        mode: NestedAdoptMode::UnderParent,
+    });
+    harness.wait("attach adopted nested repositories under parent", |ws| {
+        ws.nested
+            .get(&parent_id)
+            .is_some_and(|n| n.expanded && n.children.len() == 2)
+            && !ws.discovered_nested.contains_key(&parent_id)
+    });
+
+    // Nested children should not duplicate into top-level Ungrouped.
+    let ungrouped = harness
+        .workspace
+        .groups
+        .iter()
+        .find(|g| g.id.is_none())
+        .unwrap();
+    assert_eq!(ungrouped.members, vec![parent_id]);
+
+    // 2. Dropping a non-Git container folder scans it and yields ContainerDiscovery.
+    let container = root.join("fosunpharma-container");
+    fs::create_dir_all(&container).unwrap();
+    let c1 = clone_worktree(&container, &remote, "svc-alpha", "base");
+    let c2 = clone_worktree(&container, &remote, "svc-beta", "local");
+
+    harness.workspace.dispatch(Action::AddRepos {
+        paths: vec![container.clone()],
+        group: None,
+    });
+    harness.wait(
+        "discover repositories inside non-Git container folder",
+        |ws| {
+            ws.container_discovery
+                .as_ref()
+                .is_some_and(|d| d.repos.len() == 2 && d.folder_name == "fosunpharma-container")
+        },
+    );
+
+    harness.workspace.dispatch(Action::ImportContainerRepos {
+        paths: vec![c1.clone(), c2.clone()],
+        new_group_name: Some("fosunpharma-container".into()),
+        group: None,
+    });
+    harness.wait("import container repositories into new group", |ws| {
+        ws.container_discovery.is_none()
+            && ws
+                .groups
+                .iter()
+                .find(|g| g.name == "fosunpharma-container")
+                .is_some_and(|g| g.members.len() == 2)
+    });
+}
+
+#[test]
 #[ignore = "manual timing benchmark"]
 fn first_release_timings() {
     const WORKTREES: usize = 8;

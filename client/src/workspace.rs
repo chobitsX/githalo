@@ -15,6 +15,9 @@ use std::time::SystemTime;
 
 use crate::git::{self, FetchOutcome};
 pub use crate::history::{BlameLine, ChangedFile, Commit, CommitRef, CommitRefKind};
+pub use crate::nested::{
+    DEFAULT_MAX_DEPTH, DEFAULT_MAX_DIRS, DiscoveredNestedRepo, NestedScanOutcome,
+};
 pub use crate::project_files::ProjectEntry;
 pub use crate::registry::GroupId;
 use crate::registry::{Registry, RegistryBoard, RegistryError};
@@ -46,6 +49,27 @@ pub struct GroupView {
     pub members: Vec<WorktreeId>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NestedChildrenView {
+    pub expanded: bool,
+    pub children: Vec<WorktreeId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContainerDiscovery {
+    pub container: PathBuf,
+    pub folder_name: String,
+    pub group: Option<GroupId>,
+    pub repos: Vec<DiscoveredNestedRepo>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NestedAdoptMode {
+    UnderParent,
+    NewGroup(String),
+}
+
 #[derive(Clone, Debug)]
 pub enum Action {
     Daily(DailyAction),
@@ -61,6 +85,10 @@ pub enum Action {
     Reload,
     AddRepo {
         path: PathBuf,
+        group: Option<GroupId>,
+    },
+    AddRepos {
+        paths: Vec<PathBuf>,
         group: Option<GroupId>,
     },
     RemoveRepo(WorktreeId),
@@ -92,6 +120,28 @@ pub enum Action {
     SelectFile(PathBuf),
     CloseDiff,
     ToggleDir(PathBuf),
+    ToggleNested(WorktreeId),
+    ScanNested(WorktreeId),
+    AdoptNested {
+        parent: WorktreeId,
+        paths: Vec<PathBuf>,
+        mode: NestedAdoptMode,
+    },
+    DismissNested {
+        parent: WorktreeId,
+        paths: Vec<PathBuf>,
+    },
+    DetachNested {
+        parent: WorktreeId,
+        child: WorktreeId,
+    },
+    RefreshWithNested(WorktreeId),
+    ImportContainerRepos {
+        paths: Vec<PathBuf>,
+        new_group_name: Option<String>,
+        group: Option<GroupId>,
+    },
+    ClearContainerDiscovery,
     ClearMessage,
 }
 
@@ -107,6 +157,7 @@ enum Event {
     Board {
         board: RegistryBoard,
         reload: bool,
+        notice: Option<String>,
     },
     Error(String),
     Status {
@@ -130,6 +181,16 @@ enum Event {
     Changes(u64, Result<Vec<ChangedFile>, String>),
     Patch(u64, Result<String, String>),
     Directory(u64, PathBuf, Result<Vec<ProjectEntry>, String>),
+    NestedScan {
+        target: WorktreeTarget,
+        outcome: NestedScanOutcome,
+        manual: bool,
+    },
+    ContainerScan {
+        container: PathBuf,
+        group: Option<GroupId>,
+        outcome: NestedScanOutcome,
+    },
 }
 
 pub struct Workspace {
@@ -143,6 +204,12 @@ pub struct Workspace {
     pub ready: bool,
     pub groups: Vec<GroupView>,
     pub repos: Vec<RepoRow>,
+    pub nested: BTreeMap<WorktreeId, NestedChildrenView>,
+    dismissed_nested: BTreeMap<WorktreeId, BTreeSet<PathBuf>>,
+    pub discovered_nested: BTreeMap<WorktreeId, Vec<DiscoveredNestedRepo>>,
+    pub scanning_nested: BTreeSet<WorktreeId>,
+    scanned_nested: BTreeSet<(WorktreeId, u64)>,
+    pub container_discovery: Option<ContainerDiscovery>,
     pub selected: Option<WorktreeId>,
     pub panel: Panel,
     pub commits: Vec<Commit>,
@@ -200,6 +267,12 @@ impl Workspace {
                 ready: false,
                 groups: vec![],
                 repos: vec![],
+                nested: BTreeMap::new(),
+                dismissed_nested: BTreeMap::new(),
+                discovered_nested: BTreeMap::new(),
+                scanning_nested: BTreeSet::new(),
+                scanned_nested: BTreeSet::new(),
+                container_discovery: None,
                 selected: None,
                 panel: Panel::Repositories,
                 commits: vec![],
@@ -259,6 +332,7 @@ impl Workspace {
             Ok(Event::Board {
                 board: db.board().map_err(|e| e.to_string())?,
                 reload: false,
+                notice: None,
             })
         })
     }
@@ -303,8 +377,14 @@ impl Workspace {
             Action::RefreshRepo(id) => self.start_fetch(id),
             Action::RefreshGroup(id) => {
                 if let Some(group) = self.groups.iter().find(|g| g.id == id) {
-                    for member in group.members.clone() {
+                    let members = group.members.clone();
+                    for member in members {
                         self.start_fetch(member);
+                        if let Some(nested) = self.nested.get(&member) {
+                            for child in nested.children.clone() {
+                                self.start_fetch(child);
+                            }
+                        }
                     }
                 }
             }
@@ -312,6 +392,7 @@ impl Workspace {
                 Ok(Event::Board {
                     board: db.board().map_err(|e| e.to_string())?,
                     reload: true,
+                    notice: None,
                 })
             }),
             Action::CreateGroup(name) => {
@@ -326,6 +407,98 @@ impl Workspace {
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             }),
+            Action::AddRepos { paths, group } => {
+                if paths.is_empty() {
+                    return;
+                }
+                let scan_pool = self.runtime.scan.clone();
+                self.runtime.store(move |db| {
+                    let mut roots = BTreeSet::new();
+                    let mut non_git_dirs = Vec::new();
+                    let mut skipped = 0usize;
+                    let mut first_error = None;
+                    for path in paths {
+                        let candidate = if path.is_file() {
+                            path.parent().map(PathBuf::from).unwrap_or(path)
+                        } else {
+                            path
+                        };
+                        match git::discover(&candidate) {
+                            Ok(root) => {
+                                roots.insert(root);
+                            }
+                            Err(err) => {
+                                if candidate.is_dir() {
+                                    non_git_dirs.push(candidate);
+                                }
+                                skipped += 1;
+                                if first_error.is_none() {
+                                    first_error = Some(err);
+                                }
+                            }
+                        }
+                    }
+                    if roots.is_empty() {
+                        if let Some(container) = non_git_dirs.into_iter().next() {
+                            let container_scan = container.clone();
+                            scan_pool.run(move || {
+                                let outcome = crate::nested::scan_nested_repos(
+                                    &container_scan,
+                                    DEFAULT_MAX_DEPTH,
+                                    DEFAULT_MAX_DIRS,
+                                );
+                                Event::ContainerScan {
+                                    container: container_scan,
+                                    group,
+                                    outcome,
+                                }
+                            });
+                            return Ok(Event::Board {
+                                board: db.board().map_err(|e| e.to_string())?,
+                                reload: false,
+                                notice: Some(
+                                    crate::i18n::tr(
+                                        "正在扫描文件夹内的 Git 仓库…",
+                                        "Scanning folder for Git repositories…",
+                                    )
+                                    .to_owned(),
+                                ),
+                            });
+                        }
+                        return Err(first_error.unwrap_or_else(|| {
+                            crate::i18n::tr(
+                                "所选路径不是有效的 Git 仓库目录",
+                                "Dropped path is not a valid Git repository",
+                            )
+                            .to_owned()
+                        }));
+                    }
+                    for root in &roots {
+                        db.register(root, group).map_err(|e| e.to_string())?;
+                    }
+                    let _ = db.set_group_expanded(group, true);
+                    let notice = (skipped > 0).then(|| {
+                        if crate::i18n::is_zh() {
+                            format!(
+                                "已添加 {} 个仓库，跳过 {} 个非 Git 目录",
+                                roots.len(),
+                                skipped
+                            )
+                        } else {
+                            format!(
+                                "Added {} repositories; skipped {} non-Git item(s)",
+                                roots.len(),
+                                skipped
+                            )
+                        }
+                    });
+                    Ok(Event::Board {
+                        board: db.board().map_err(|e| e.to_string())?,
+                        reload: false,
+                        notice,
+                    })
+                });
+            }
             Action::RepairRepo { id, .. } | Action::RemoveRepo(id) if self.writing(id) => {
                 self.message = Some("此工作树正在执行 Git 操作，完成后可修改登记".into());
             }
@@ -354,6 +527,128 @@ impl Workspace {
             Action::SelectFile(path) => self.select_file(&path),
             Action::CloseDiff => self.close_diff(),
             Action::ToggleDir(path) => self.toggle_dir(&path),
+            Action::ToggleNested(parent) => {
+                self.edit_catalog(move |db| db.toggle_nested_expanded(parent));
+            }
+            Action::ScanNested(parent) => {
+                if let Some(target) = self.repo(parent).map(|r| r.target.clone()) {
+                    self.dismissed_nested.remove(&parent);
+                    self.discovered_nested.remove(&parent);
+                    self.scanning_nested.insert(parent);
+                    self.edit_catalog(move |db| db.clear_dismissed_nested(parent));
+                    self.start_nested_scan(target, true);
+                }
+            }
+            Action::AdoptNested {
+                parent,
+                paths,
+                mode,
+            } => {
+                if paths.is_empty() {
+                    return;
+                }
+                self.discovered_nested.remove(&parent);
+                self.runtime.store(move |db| {
+                    let mut roots = Vec::new();
+                    let mut seen = BTreeSet::new();
+                    for path in paths {
+                        if let Ok(root) = git::discover(&path)
+                            && seen.insert(root.clone())
+                        {
+                            roots.push(root);
+                        }
+                    }
+                    if roots.is_empty() {
+                        return Err(crate::i18n::tr(
+                            "没有可纳管的有效 Git 仓库",
+                            "No valid Git repositories to adopt",
+                        )
+                        .to_owned());
+                    }
+                    match mode {
+                        NestedAdoptMode::UnderParent => {
+                            db.attach_nested_repos(parent, &roots)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        NestedAdoptMode::NewGroup(name) => {
+                            let group_id = db.create_group(&name).map_err(|e| e.to_string())?;
+                            for root in &roots {
+                                db.register(root, Some(group_id))
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            let _ = db.set_group_expanded(Some(group_id), true);
+                            // Remember these paths as handled for the parent so the banner won't re-appear.
+                            let _ = db.dismiss_nested_paths(parent, &roots);
+                        }
+                    }
+                    Ok(Event::Board {
+                        board: db.board().map_err(|e| e.to_string())?,
+                        reload: false,
+                        notice: None,
+                    })
+                });
+            }
+            Action::DismissNested { parent, paths } => {
+                self.discovered_nested.remove(&parent);
+                if !paths.is_empty() {
+                    self.edit_catalog(move |db| db.dismiss_nested_paths(parent, &paths));
+                }
+            }
+            Action::DetachNested { parent, child } => {
+                self.edit_catalog(move |db| db.detach_nested_repo(parent, child));
+            }
+            Action::RefreshWithNested(parent) => {
+                self.start_fetch(parent);
+                if let Some(nested) = self.nested.get(&parent) {
+                    for child in nested.children.clone() {
+                        self.start_fetch(child);
+                    }
+                }
+            }
+            Action::ImportContainerRepos {
+                paths,
+                new_group_name,
+                group,
+            } => {
+                self.container_discovery = None;
+                if paths.is_empty() {
+                    return;
+                }
+                self.runtime.store(move |db| {
+                    let target_group = if let Some(name) = new_group_name {
+                        Some(db.create_group(&name).map_err(|e| e.to_string())?)
+                    } else {
+                        group
+                    };
+                    let mut count = 0usize;
+                    let mut seen = BTreeSet::new();
+                    for path in paths {
+                        if let Ok(root) = git::discover(&path)
+                            && seen.insert(root.clone())
+                        {
+                            db.register(&root, target_group)
+                                .map_err(|e| e.to_string())?;
+                            count += 1;
+                        }
+                    }
+                    if count == 0 {
+                        return Err(crate::i18n::tr(
+                            "没有可导入的有效 Git 仓库",
+                            "No valid Git repositories to import",
+                        )
+                        .to_owned());
+                    }
+                    let _ = db.set_group_expanded(target_group, true);
+                    Ok(Event::Board {
+                        board: db.board().map_err(|e| e.to_string())?,
+                        reload: false,
+                        notice: None,
+                    })
+                });
+            }
+            Action::ClearContainerDiscovery => {
+                self.container_discovery = None;
+            }
             Action::ClearMessage => self.clear_daily_message(),
         }
     }
@@ -365,7 +660,16 @@ impl Workspace {
             Event::CherryPick(event) => self.apply_cherry_pick(*event),
             Event::RepoOp(event) => self.apply_repo_op(*event),
             Event::Shelf(event) => self.apply_shelf(*event),
-            Event::Board { board, reload } => self.apply_board(board, reload),
+            Event::Board {
+                board,
+                reload,
+                notice,
+            } => {
+                self.apply_board(board, reload);
+                if notice.is_some() {
+                    self.message = notice;
+                }
+            }
             Event::Error(message) => {
                 self.ready = true;
                 self.message = Some(message);
@@ -393,6 +697,16 @@ impl Workspace {
             Event::Directory(tag, path, data) if self.dir_requests.get(&path) == Some(&tag) => {
                 self.apply_directory(path, data)
             }
+            Event::NestedScan {
+                target,
+                outcome,
+                manual,
+            } => self.apply_nested_scan(target, outcome, manual),
+            Event::ContainerScan {
+                container,
+                group,
+                outcome,
+            } => self.apply_container_scan(container, group, outcome),
             _ => {} // The selected worktree, commit, file or directory changed in the meantime.
         }
     }
@@ -440,11 +754,64 @@ impl Workspace {
                 }
             })
             .collect();
+        let mut nested_children = BTreeSet::new();
+        self.nested = board
+            .nested
+            .into_iter()
+            .map(|(parent, entry)| {
+                nested_children.extend(entry.children.iter().copied());
+                (
+                    parent,
+                    NestedChildrenView {
+                        expanded: entry.expanded,
+                        children: entry.children,
+                    },
+                )
+            })
+            .collect();
+        self.dismissed_nested = board
+            .dismissed_nested
+            .into_iter()
+            .map(|(parent, paths)| (parent, paths.into_iter().collect()))
+            .collect();
+
+        // Filter out already-attached or dismissed paths from pending discovery banners.
+        let valid_ids: BTreeSet<WorktreeId> = self.repos.iter().map(|r| r.target.id).collect();
+        self.discovered_nested
+            .retain(|parent, _| valid_ids.contains(parent));
+        self.scanning_nested
+            .retain(|parent| valid_ids.contains(parent));
+        let repo_roots: BTreeMap<WorktreeId, PathBuf> = self
+            .repos
+            .iter()
+            .map(|r| (r.target.id, r.target.root.clone()))
+            .collect();
+        let parent_keys: Vec<_> = self.discovered_nested.keys().copied().collect();
+        for parent in parent_keys {
+            let attached_roots: BTreeSet<&PathBuf> = self
+                .nested
+                .get(&parent)
+                .into_iter()
+                .flat_map(|n| n.children.iter())
+                .filter_map(|child| repo_roots.get(child))
+                .collect();
+            let dismissed = self.dismissed_nested.get(&parent);
+            if let Some(items) = self.discovered_nested.get_mut(&parent) {
+                items.retain(|item| {
+                    !attached_roots.contains(&item.root)
+                        && !dismissed.is_some_and(|set| set.contains(&item.root))
+                });
+                if items.is_empty() {
+                    self.discovered_nested.remove(&parent);
+                }
+            }
+        }
+
         let members: Vec<_> = self
             .repos
             .iter()
             .map(|r| r.target.id)
-            .filter(|id| !assigned.contains(id))
+            .filter(|id| !assigned.contains(id) && !nested_children.contains(id))
             .collect();
         if !members.is_empty() {
             self.groups.push(GroupView {
@@ -480,5 +847,123 @@ impl Workspace {
         for id in reads {
             self.start_status(id);
         }
+        // Trigger low-priority async nested scan once per top-level worktree revision.
+        let targets_to_scan: Vec<WorktreeTarget> = self
+            .repos
+            .iter()
+            .filter(|r| !nested_children.contains(&r.target.id))
+            .filter(|r| {
+                self.scanned_nested
+                    .insert((r.target.id, r.target.path_revision))
+            })
+            .map(|r| r.target.clone())
+            .collect();
+        for target in targets_to_scan {
+            self.start_nested_scan(target, false);
+        }
+    }
+
+    fn start_nested_scan(&self, target: WorktreeTarget, manual: bool) {
+        let root = target.root.clone();
+        if manual {
+            self.runtime.scan.run(move || {
+                let outcome =
+                    crate::nested::scan_nested_repos(&root, DEFAULT_MAX_DEPTH, DEFAULT_MAX_DIRS);
+                Event::NestedScan {
+                    target,
+                    outcome,
+                    manual: true,
+                }
+            });
+        } else {
+            let events = self.runtime.events_sender();
+            self.runtime.scan.execute(move || {
+                let outcome =
+                    crate::nested::scan_nested_repos(&root, DEFAULT_MAX_DEPTH, DEFAULT_MAX_DIRS);
+                if !outcome.repos.is_empty() {
+                    let _ = events.send_blocking(Update(Event::NestedScan {
+                        target,
+                        outcome,
+                        manual: false,
+                    }));
+                }
+            });
+        }
+    }
+
+    fn apply_nested_scan(
+        &mut self,
+        target: WorktreeTarget,
+        outcome: NestedScanOutcome,
+        manual: bool,
+    ) {
+        self.scanning_nested.remove(&target.id);
+        let Some(current) = self.repo(target.id) else {
+            return;
+        };
+        if current.target != target {
+            return;
+        }
+        let attached_roots: BTreeSet<PathBuf> = self
+            .nested
+            .get(&target.id)
+            .into_iter()
+            .flat_map(|n| n.children.iter())
+            .filter_map(|child| self.repo(*child).map(|r| r.target.root.clone()))
+            .collect();
+        let dismissed = self.dismissed_nested.get(&target.id);
+        let fresh: Vec<DiscoveredNestedRepo> = outcome
+            .repos
+            .into_iter()
+            .filter(|item| {
+                !attached_roots.contains(&item.root)
+                    && !dismissed.is_some_and(|set| set.contains(&item.root))
+            })
+            .collect();
+        if fresh.is_empty() {
+            self.discovered_nested.remove(&target.id);
+            if manual {
+                self.message = Some(
+                    crate::i18n::tr(
+                        "未在子目录中发现新的 Git 仓库",
+                        "No new nested Git repositories found",
+                    )
+                    .to_owned(),
+                );
+            }
+        } else {
+            self.discovered_nested.insert(target.id, fresh);
+        }
+    }
+
+    fn apply_container_scan(
+        &mut self,
+        container: PathBuf,
+        group: Option<GroupId>,
+        outcome: NestedScanOutcome,
+    ) {
+        if outcome.repos.is_empty() {
+            self.message = Some(
+                crate::i18n::tr(
+                    "所选文件夹及其子目录中未找到 Git 仓库",
+                    "No Git repositories found in the dropped folder",
+                )
+                .to_owned(),
+            );
+            return;
+        }
+        self.message = None;
+        let folder_name = container
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| "Repositories".to_owned());
+        self.container_discovery = Some(ContainerDiscovery {
+            container,
+            folder_name,
+            group,
+            repos: outcome.repos,
+            truncated: outcome.truncated,
+        });
     }
 }

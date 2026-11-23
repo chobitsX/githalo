@@ -151,12 +151,12 @@ impl DesktopView {
             .and_then(|id| self.workspace.repo(id))
             .map(|repo| {
                 if repo.branch.is_empty() {
-                    tr("当前工作树", "current worktree").to_owned()
+                    tr("当前仓库", "current repository").to_owned()
                 } else {
                     repo.branch.clone()
                 }
             })
-            .unwrap_or_else(|| tr("当前工作树", "current worktree").to_owned());
+            .unwrap_or_else(|| tr("当前仓库", "current repository").to_owned());
 
         let mut items = Vec::new();
         let is_head = commit.refs.iter().any(|r| r.kind == CommitRefKind::Head);
@@ -261,7 +261,7 @@ impl DesktopView {
                     "Another Git operation is in progress; continue or abort it first",
                 )
             } else {
-                tr("当前工作树正在执行其他操作", "Worktree is currently busy")
+                tr("当前仓库正在执行其他操作", "Repository is currently busy")
             };
             items.push(
                 div()
@@ -844,7 +844,7 @@ impl DesktopView {
             Some(preview) => self.cherry_pick_preview_body(preview, form, viewport_height, cx),
             None => {
                 let (message, color) = if !current {
-                    ("选中的工作树已变更，请重新选择提交", ERROR)
+                    ("选中的仓库已变更，请重新选择提交", ERROR)
                 } else if state.preparing {
                     ("正在读取 Cherry-pick 预览…", SUBTLE)
                 } else if let Some(error) = &state.error {
@@ -871,7 +871,7 @@ impl DesktopView {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(review_detail("工作树", path))
+                    .child(review_detail(tr("仓库", "Repository"), path))
                     .child(body),
             )
             .child(self.review_buttons(
@@ -1118,7 +1118,7 @@ impl DesktopView {
             .gap(px(10.))
             .child(dialog_heading("中止 Cherry-pick"))
             .child(review_detail(
-                "工作树",
+                tr("仓库", "Repository"),
                 status.worktree().root.display().to_string(),
             ))
             .child(review_detail("当前分支", branch))

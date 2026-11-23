@@ -8,6 +8,7 @@ pub mod history;
 pub mod history_ops;
 pub mod i18n;
 pub mod merge_ops;
+pub mod nested;
 pub mod project_files;
 pub mod rebase_ops;
 pub mod registry;

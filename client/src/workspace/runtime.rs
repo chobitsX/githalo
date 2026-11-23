@@ -49,6 +49,7 @@ pub(super) struct Runtime {
     pub(super) detail: Pool,
     pub(super) fetch: Pool,
     pub(super) write: Pool,
+    pub(super) scan: Pool,
     pub(super) db_path: PathBuf,
     store_queue: Sender<StoreJob>,
     events: Sender<Update>,
@@ -86,6 +87,7 @@ impl Runtime {
                     Ok(Event::Board {
                         board: db.board().map_err(|e| e.to_string())?,
                         reload: false,
+                        notice: None,
                     })
                 })) {
                     return;
@@ -103,6 +105,7 @@ impl Runtime {
                 detail: Pool::new("details", 2, events.clone()),
                 fetch: Pool::new("fetch", 3, events.clone()),
                 write: Pool::new("write", 1, events.clone()),
+                scan: Pool::new("scan", 1, events.clone()),
                 db_path,
                 store_queue,
                 events,
@@ -110,6 +113,10 @@ impl Runtime {
             receiver,
         )
     }
+    pub(super) fn events_sender(&self) -> Sender<Update> {
+        self.events.clone()
+    }
+
     pub(super) fn store(
         &self,
         op: impl FnOnce(&mut Registry) -> Result<Event, String> + Send + 'static,

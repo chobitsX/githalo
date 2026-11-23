@@ -22,6 +22,7 @@ use super::admin::{
 };
 use super::cherry_pick::{CherryPickAbortDialog, CherryPickDialog};
 use super::components::*;
+use super::nested::AdoptNestedDialog;
 use super::operations::{BranchForm, ReviewDialog, SetUpstreamForm};
 use super::rebase::{InteractiveRebaseDialog, RebaseDialog};
 use super::repo_ops::{
@@ -50,6 +51,7 @@ pub(super) enum MenuKind {
     Repository {
         id: WorktreeId,
         group: Option<GroupId>,
+        nested_parent: Option<WorktreeId>,
     },
     Membership {
         id: WorktreeId,
@@ -115,6 +117,7 @@ pub(super) enum Dialog {
     FileInspect(FileInspectDialog),
     CompareRevisions(CompareRevisionsDialog),
     Tags(TagsDialog),
+    AdoptNested(AdoptNestedDialog),
     Settings,
 }
 
@@ -174,6 +177,11 @@ impl DesktopView {
         {
             self.dispatch_repo_op(RepoOpAction::CloseConflict, cx);
         }
+        if matches!(previous, Some(Overlay::Dialog(Dialog::AdoptNested(_))))
+            && self.workspace.container_discovery.is_some()
+        {
+            self.workspace.dispatch(Action::ClearContainerDiscovery);
+        }
         self.previous_focus
             .take()
             .unwrap_or_else(|| self.focus.clone())
@@ -219,12 +227,14 @@ impl DesktopView {
         let prompt = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
-            multiple: false,
+            multiple: matches!(operation, PathOperation::Add(_)),
             prompt: Some(
                 match operation {
-                    PathOperation::Add(_) => tr("选择工作树目录", "Select worktree directory"),
+                    PathOperation::Add(_) => {
+                        tr("选择本地仓库目录", "Select local repository directory")
+                    }
                     PathOperation::Repair(_) => {
-                        tr("选择新的工作树目录", "Select new worktree directory")
+                        tr("选择新的仓库目录", "Select new repository directory")
                     }
                 }
                 .into(),
@@ -235,15 +245,17 @@ impl DesktopView {
             let _ = view.update(cx, |view, cx| {
                 view.path_prompt_open = false;
                 match result {
-                    Ok(Ok(Some(paths))) => {
-                        if let Some(path) = paths.into_iter().next() {
-                            let action = match operation {
-                                PathOperation::Add(group) => Action::AddRepo { path, group },
-                                PathOperation::Repair(id) => Action::RepairRepo { id, path },
-                            };
-                            view.dispatch(action, cx);
+                    Ok(Ok(Some(paths))) => match operation {
+                        PathOperation::Add(group) if !paths.is_empty() => {
+                            view.dispatch(Action::AddRepos { paths, group }, cx);
                         }
-                    }
+                        PathOperation::Repair(id) => {
+                            if let Some(path) = paths.into_iter().next() {
+                                view.dispatch(Action::RepairRepo { id, path }, cx);
+                            }
+                        }
+                        PathOperation::Add(_) => {}
+                    },
                     Ok(Ok(None)) => {}
                     Ok(Err(error)) => view.notice = Some(format!("目录选择失败：{error}")),
                     Err(_) => view.notice = Some("目录选择器已关闭，请重试".into()),
@@ -393,21 +405,27 @@ impl DesktopView {
             MenuKind::Commit(oid) => self.commit_menu_items(oid, cx),
             MenuKind::RepoAdmin => self.repo_admin_menu_items(cx),
             MenuKind::Worktrees => {
-                let mut items: Vec<_> = self
+                let nested_children: std::collections::BTreeSet<WorktreeId> = self
                     .workspace
-                    .repos
-                    .iter()
-                    .map(|repo| {
+                    .nested
+                    .values()
+                    .flat_map(|n| n.children.iter().copied())
+                    .collect();
+                let mut items = Vec::new();
+                let mut push_repo =
+                    |repo: &githalo::workspace::RepoRow, indent: bool, idx_salt: usize| {
                         let id = repo.target.id;
                         let path = repo.target.root.to_string_lossy().into_owned();
                         let selected = self.workspace.selected == Some(id);
-                        let label = if selected {
-                            format!("✓   {}", repo.name)
-                        } else {
-                            repo.name.clone()
+                        let prefix = match (selected, indent) {
+                            (true, true) => "✓  ↳ ",
+                            (true, false) => "✓   ",
+                            (false, true) => "    ↳ ",
+                            (false, false) => "",
                         };
-                        menu_item(
-                            ("worktree-option", id.get() as usize),
+                        let label = format!("{prefix}{}", repo.name);
+                        items.push(menu_item(
+                            ("worktree-option", (id.get() as usize) * 2 + idx_salt),
                             label,
                             Some(path),
                             cx,
@@ -415,9 +433,22 @@ impl DesktopView {
                                 view.close_overlay(window, cx);
                                 view.select_repo(id, None, window, cx);
                             },
-                        )
-                    })
-                    .collect();
+                        ));
+                    };
+
+                for repo in &self.workspace.repos {
+                    if nested_children.contains(&repo.target.id) {
+                        continue;
+                    }
+                    push_repo(repo, false, 0);
+                    if let Some(nested) = self.workspace.nested.get(&repo.target.id) {
+                        for child_id in &nested.children {
+                            if let Some(child) = self.workspace.repo(*child_id) {
+                                push_repo(child, true, 1);
+                            }
+                        }
+                    }
+                }
                 if !items.is_empty() {
                     items.push(menu_rule());
                 }
@@ -480,25 +511,56 @@ impl DesktopView {
                 }
                 items
             }
-            &MenuKind::Repository { id, group } => {
+            &MenuKind::Repository {
+                id,
+                group,
+                nested_parent,
+            } => {
                 let Some(repo) = self.workspace.repo(id) else {
                     return vec![];
                 };
                 let path = repo.target.root.to_string_lossy().into_owned();
-                let mut items = vec![
-                    menu_item(
-                        "refresh-repo",
-                        tr("刷新本仓", "Fetch Repository"),
+                let has_nested = self
+                    .workspace
+                    .nested
+                    .get(&id)
+                    .is_some_and(|n| !n.children.is_empty());
+                let mut items = vec![menu_item(
+                    "refresh-repo",
+                    tr("刷新本仓", "Fetch Repository"),
+                    None,
+                    cx,
+                    move |view, _, window, cx| {
+                        view.close_overlay(window, cx);
+                        view.dispatch(Action::RefreshRepo(id), cx);
+                    },
+                )];
+                if has_nested {
+                    items.push(menu_item(
+                        "refresh-with-nested",
+                        tr("刷新主仓及全部子仓库", "Fetch Repo & All Nested"),
                         None,
                         cx,
                         move |view, _, window, cx| {
                             view.close_overlay(window, cx);
-                            view.dispatch(Action::RefreshRepo(id), cx);
+                            view.dispatch(Action::RefreshWithNested(id), cx);
+                        },
+                    ));
+                }
+                items.extend([
+                    menu_item(
+                        "scan-nested",
+                        tr("扫描子仓库…", "Scan Nested Repositories…"),
+                        None,
+                        cx,
+                        move |view, _, window, cx| {
+                            view.close_overlay(window, cx);
+                            view.dispatch(Action::ScanNested(id), cx);
                         },
                     ),
                     menu_item(
                         "copy-path",
-                        tr("复制工作树路径", "Copy Worktree Path"),
+                        tr("复制仓库路径", "Copy Repository Path"),
                         None,
                         cx,
                         move |view, _, window, cx| {
@@ -508,14 +570,32 @@ impl DesktopView {
                     ),
                     menu_item(
                         "repair-path",
-                        tr("修正工作树路径…", "Relocate Worktree Path…"),
+                        tr("重新定位仓库路径…", "Relocate Repository Path…"),
                         None,
                         cx,
                         move |view, _, window, cx| {
                             view.select_path(PathOperation::Repair(id), window, cx);
                         },
                     ),
-                ];
+                ]);
+                if let Some(parent_id) = nested_parent {
+                    items.push(menu_item(
+                        "detach-nested",
+                        tr("移出父仓库子树", "Detach from Parent Repo"),
+                        None,
+                        cx,
+                        move |view, _, window, cx| {
+                            view.close_overlay(window, cx);
+                            view.dispatch(
+                                Action::DetachNested {
+                                    parent: parent_id,
+                                    child: id,
+                                },
+                                cx,
+                            );
+                        },
+                    ));
+                }
                 if self.workspace.groups.iter().any(|group| group.id.is_some()) {
                     items.extend([
                         menu_rule(),
@@ -574,7 +654,7 @@ impl DesktopView {
                     menu_rule(),
                     menu_item(
                         "remove-repo",
-                        tr("移除工作树登记…", "Unregister Worktree…"),
+                        tr("从列表移除仓库…", "Remove Repository…"),
                         None,
                         cx,
                         move |view, _, window, cx| {
@@ -712,8 +792,8 @@ impl DesktopView {
                     .aria_label(tr("删除分组", "Delete Group"))
                     .child(dialog_heading(format!("{} \"{name}\"", tr("删除", "Delete"))))
                     .child(div().text_color(rgb(MUTED)).child(tr(
-                        "解除该组的成员关系。没有其他分组的工作树将移入“未分组”。",
-                        "Remove group memberships. Worktrees with no other groups move to Ungrouped.",
+                        "解除该组的成员关系。没有其他分组的仓库将移入“未分组”。",
+                        "Remove group memberships. Repositories with no other groups move to Ungrouped.",
                     )))
                     .child(
                         buttons.child(
@@ -733,16 +813,16 @@ impl DesktopView {
                     .repo(id)
                     .map(|repo| repo.target.root.to_string_lossy().into_owned());
                 container = container
-                    .aria_label(tr("移除工作树登记", "Unregister Worktree"))
-                    .child(dialog_heading(tr("移除工作树登记", "Unregister Worktree")))
+                    .aria_label(tr("从列表移除仓库", "Remove Repository"))
+                    .child(dialog_heading(tr("从列表移除仓库", "Remove Repository")))
                     .children(path.map(|path| div().text_color(rgb(MUTED)).child(path)))
                     .child(div().text_color(rgb(MUTED)).child(tr(
-                        "移除后，仍可通过添加工作树重新登记。",
-                        "Files on disk are untouched. You can add this worktree again later.",
+                        "仅从应用列表移除，不会删除磁盘文件。之后可随时重新添加。",
+                        "Files on disk are untouched. You can add this repository again later.",
                     )))
                     .child(
                         buttons.child(
-                            text_button("dialog-remove-repo", tr("移除登记", "Unregister"), false)
+                            text_button("dialog-remove-repo", tr("移除", "Remove"), false)
                                 .text_color(rgb(ERROR))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.close_overlay(window, cx);
@@ -953,6 +1033,15 @@ impl DesktopView {
                     .w(px(560.))
                     .child(self.tags_dialog(dialog, viewport_height, cx));
             }
+            Dialog::AdoptNested(form) => {
+                container = container
+                    .aria_label(tr("纳管子仓库", "Adopt Nested Repositories"))
+                    .w(px(580.))
+                    .on_action(cx.listener(|view, _: &Confirm, window, cx| {
+                        view.submit_adopt_nested(window, cx);
+                    }))
+                    .child(self.adopt_nested_dialog(form, viewport_height, cx));
+            }
             Dialog::Settings => {
                 container = container
                     .aria_label("视图与偏好设置")
@@ -1003,7 +1092,7 @@ pub(super) fn menu_item(
 fn add_worktree(group: Option<GroupId>, cx: &mut Context<DesktopView>) -> AnyElement {
     menu_item(
         "add-worktree",
-        tr("添加本地工作树…", "Add Local Worktree…"),
+        tr("添加本地仓库…", "Add Local Repository…"),
         None,
         cx,
         move |view, _, window, cx| {

@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/UI-GPUI%20(GPU%20Accelerated)-2ea043" alt="GPUI" />
   <img src="https://img.shields.io/badge/License-Apache--2.0-blue" alt="Apache-2.0 License" />
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20Verified-1f6feb?logo=apple" alt="macOS Apple Silicon" />
-  <img src="https://img.shields.io/badge/Tests-145%20Passing-brightgreen" alt="145 Tests Passing" />
+  <img src="https://img.shields.io/badge/Tests-150%20Passing-brightgreen" alt="150 Tests Passing" />
 </p>
 
 ---
@@ -44,6 +44,8 @@ Modern developers rarely work on a single repository. Between microservices, fro
 | **Open Source & Free** | Apache-2.0 | Apache-2.0 | Proprietary | Proprietary | MIT |
 | **Engine & Rendering** | **Rust + GPUI (GPU)** | JVM | Electron | Native / C++ | Electron |
 | **Multi-Repo Grouped Sync Board (`↓ / ↑`)** | **Built-in** | Single project | Favorites | Tabs | Single repo |
+| **Async Nested Repo Discovery & Sub-Tree** | **Built-in** | Flat roots | None | None | None |
+| **Drag-and-Drop Folder & Group Import** | **Built-in** | Manual | Basic | Basic | Basic |
 | **First-Class Git Worktrees** | **Full** | Full | Limited | Limited | None |
 | **Hunk Staging & Partial Hunk Commit** | **Full** | Full | Pro | Full | Line-level |
 | **Interactive Rebase & 3-Way Resolver** | **Full** | Full | Pro | Full | None |
@@ -56,10 +58,12 @@ Modern developers rarely work on a single repository. Between microservices, fro
 
 ## Core Highlights
 
-### 1. Multi-Repo Sync Cockpit & First-Class Worktrees
-- **Business-Oriented Repo Groups**: Organize worktrees into custom groups (one repository can belong to multiple groups with shared live state). Group headers summarize totals even when collapsed (e.g., `3 repos · 2 diverged · 1 needs attention`).
+### 1. Multi-Repo Sync Cockpit, Nested Sub-Repos & First-Class Worktrees
+- **Business-Oriented Repo Groups & Drag-and-Drop**: Organize repositories into custom groups (one repo can belong to multiple groups with shared live state). Drag single or multiple local folders straight from Finder onto any group (or onto the empty list area), drag rows between groups in-app, and see live totals even when collapsed (e.g., `3 repos · 2 diverged · 1 pending`).
+- **Async Nested Repository Discovery & Collapsible Sub-Trees**: Add a parent repo that contains dozens of nested service repos underneath — GitHalo adds the parent immediately with zero wait, then runs a pruned, low-priority background scan (skipping `node_modules`, `target`, symlinks, and stopping at `.git` roots). Adopt discovered sub-repos via a clean checklist modal either as a **collapsible sub-tree under the parent** (with aggregated sync badges & one-click `Fetch Repo & All Nested`) or into a new group. Every sub-repo gets 100% first-class Git capabilities.
+- **Smart Container Folder Import**: Drop a plain non-Git parent folder containing multiple Git repositories — GitHalo automatically scans it in the background and offers one-click grouped import by folder name.
 - **Live Upstream Counts Without Opening Details**: Every row displays the active branch alongside exact `↓ behind` and `↑ ahead` counts against its configured `@{upstream}` (plus clear states for detached `HEAD`, unborn branches, missing/deleted upstreams, auth failures, or broken paths).
-- **Concurrent, Fault-Isolated Refresh**: Fetch a single repository or an entire group in the background with concurrency limiting and request deduplication. Offline or HTTP 401 repositories never block healthy ones and can be retried individually.
+- **Concurrent, Fault-Isolated Refresh**: Fetch a single repository, a parent with all its nested sub-repos, or an entire group in the background with concurrency limiting and request deduplication. Offline or HTTP 401 repositories never block healthy ones and can be retried individually.
 - **Snapshot-Verified Async Ownership**: Every background read/write is bound to its originating worktree, branch, and upstream. Switching repositories or branches mid-flight never leaks stale results or overwrites another workspace's draft.
 - **Native Git Worktrees Manager**: List, create (with optional new branch + auto-registration), lock/unlock, remove (with main worktree protection), and prune linked worktrees directly from the top bar. Linked worktrees appear independently and automatically recalculate when shared tracking refs update.
 
