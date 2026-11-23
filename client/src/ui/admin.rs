@@ -57,6 +57,9 @@ pub(super) struct CompareRevisionsDialog {
     pub(super) target: WorktreeTarget,
     pub(super) from_oid: String,
     pub(super) to_oid: String,
+    pub(super) from_label: Option<String>,
+    pub(super) to_label: Option<String>,
+    pub(super) to_working_tree: bool,
 }
 
 pub(super) struct TagsDialog {
@@ -241,12 +244,23 @@ impl DesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_worktrees_dialog_with_ref(target, None, window, cx);
+    }
+
+    pub(super) fn open_worktrees_dialog_with_ref(
+        &mut self,
+        target: WorktreeTarget,
+        start_ref: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_ref = start_ref.unwrap_or_else(|| "HEAD".to_owned());
         let path_input = cx
             .new(|cx| TextField::new("新关联工作树目录路径（绝对路径）", String::new(), false, cx));
         let new_branch_input =
             cx.new(|cx| TextField::new("可选：新建分支名（-b）", String::new(), false, cx));
         let start_ref_input =
-            cx.new(|cx| TextField::new("检出分支或起点引用", "HEAD".to_owned(), false, cx));
+            cx.new(|cx| TextField::new("检出分支或起点引用", initial_ref, false, cx));
         self.open_confirmation(
             Dialog::Worktrees(WorktreesDialog {
                 target: target.clone(),
@@ -845,6 +859,17 @@ impl DesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_file_inspect_dialog_mode(revision, path, true, window, cx);
+    }
+
+    pub(super) fn open_file_inspect_dialog_mode(
+        &mut self,
+        revision: String,
+        path: PathBuf,
+        show_blame: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.active_worktree().cloned() else {
             return;
         };
@@ -853,7 +878,7 @@ impl DesktopView {
                 target: target.clone(),
                 revision: revision.clone(),
                 path: path.clone(),
-                show_blame: true,
+                show_blame,
             }),
             window,
             cx,
@@ -875,6 +900,18 @@ impl DesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_compare_revisions_labeled(from_oid, to_oid, None, None, window, cx);
+    }
+
+    pub(super) fn open_compare_revisions_labeled(
+        &mut self,
+        from_oid: String,
+        to_oid: String,
+        from_label: Option<String>,
+        to_label: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(target) = self.active_worktree().cloned() else {
             return;
         };
@@ -883,6 +920,9 @@ impl DesktopView {
                 target: target.clone(),
                 from_oid: from_oid.clone(),
                 to_oid: to_oid.clone(),
+                from_label,
+                to_label,
+                to_working_tree: false,
             }),
             window,
             cx,
@@ -893,6 +933,34 @@ impl DesktopView {
                 from_oid,
                 to_oid,
             },
+            cx,
+        );
+    }
+
+    pub(super) fn open_compare_working_tree_dialog(
+        &mut self,
+        from_oid: String,
+        from_label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(target) = self.active_worktree().cloned() else {
+            return;
+        };
+        self.open_confirmation(
+            Dialog::CompareRevisions(CompareRevisionsDialog {
+                target: target.clone(),
+                from_oid: from_oid.clone(),
+                to_oid: String::new(),
+                from_label: Some(from_label),
+                to_label: Some(tr("当前工作树", "Working Tree").to_owned()),
+                to_working_tree: true,
+            }),
+            window,
+            cx,
+        );
+        self.dispatch_repo_op(
+            RepoOpAction::LoadCompareWorkingTree { target, from_oid },
             cx,
         );
     }
@@ -1092,15 +1160,27 @@ impl DesktopView {
     ) -> Div {
         let state = &self.workspace.repo_ops;
         let data = state.compare.as_ref().filter(|c| {
-            c.target == dialog.target && c.from_oid == dialog.from_oid && c.to_oid == dialog.to_oid
+            c.target == dialog.target
+                && c.from_oid == dialog.from_oid
+                && c.to_oid == dialog.to_oid
+                && c.to_working_tree == dialog.to_working_tree
         });
         let body_h = (viewport_height * 0.56).clamp(px(220.), px(480.));
-        let from_short = dialog
-            .from_oid
-            .get(..8)
-            .unwrap_or(&dialog.from_oid)
-            .to_owned();
-        let to_short = dialog.to_oid.get(..8).unwrap_or(&dialog.to_oid).to_owned();
+        let from_short = dialog.from_label.clone().unwrap_or_else(|| {
+            dialog
+                .from_oid
+                .get(..8)
+                .unwrap_or(&dialog.from_oid)
+                .to_owned()
+        });
+        let to_short = dialog.to_label.clone().unwrap_or_else(|| {
+            if dialog.to_working_tree {
+                tr("当前工作树", "Working Tree").to_owned()
+            } else {
+                dialog.to_oid.get(..8).unwrap_or(&dialog.to_oid).to_owned()
+            }
+        });
+        let to_wt = dialog.to_working_tree;
 
         let body: AnyElement = match data {
             Some(data) => {
@@ -1151,19 +1231,40 @@ impl DesktopView {
                             )
                             .child(elide(file.path.display().to_string()).flex_1())
                             .on_click(cx.listener(move |view, _, _, cx| {
-                                view.dispatch_repo_op(
-                                    RepoOpAction::LoadCompareDiff {
-                                        target: target.clone(),
-                                        from_oid: from.clone(),
-                                        to_oid: to.clone(),
-                                        file: f.clone(),
-                                    },
-                                    cx,
-                                );
+                                if to_wt {
+                                    view.dispatch_repo_op(
+                                        RepoOpAction::LoadCompareWorkingTreeDiff {
+                                            target: target.clone(),
+                                            from_oid: from.clone(),
+                                            file: f.clone(),
+                                        },
+                                        cx,
+                                    );
+                                } else {
+                                    view.dispatch_repo_op(
+                                        RepoOpAction::LoadCompareDiff {
+                                            target: target.clone(),
+                                            from_oid: from.clone(),
+                                            to_oid: to.clone(),
+                                            file: f.clone(),
+                                        },
+                                        cx,
+                                    );
+                                }
                             }))
                     }))
                     .when(data.files.is_empty(), |box_div| {
-                        box_div.child(empty("两次提交之间没有文件差异"))
+                        box_div.child(empty(if to_wt {
+                            tr(
+                                "与当前工作树没有文件差异",
+                                "No differences with Working Tree",
+                            )
+                        } else {
+                            tr(
+                                "两次修订之间没有文件差异",
+                                "No file differences between revisions",
+                            )
+                        }))
                     });
 
                 let right = div()
@@ -1176,18 +1277,47 @@ impl DesktopView {
                     .bg(rgb(PANEL))
                     .border_1()
                     .border_color(rgb(BORDER))
-                    .p(px(8.))
+                    .p(px(6.))
                     .font_family("Menlo")
                     .text_size(px(11.5))
-                    .line_height(px(16.5))
+                    .line_height(px(17.))
                     .child(if state.compare_diff_loading {
-                        div().text_color(rgb(SUBTLE)).child("正在读取差异…")
-                    } else if let Some(diff) = &data.diff {
-                        div().child(diff.clone())
-                    } else {
                         div()
+                            .p(px(4.))
                             .text_color(rgb(SUBTLE))
-                            .child("点击左侧文件查看统一 Diff")
+                            .child(tr("正在读取差异…", "Loading diff…"))
+                    } else if let Some(diff) = &data.diff {
+                        div().flex().flex_col().children(diff.lines().map(|line| {
+                            let (bg, fg) = if line.starts_with("@@") {
+                                (Some(ACCENT_BG), LINK)
+                            } else if line.starts_with('+') && !line.starts_with("+++") {
+                                (Some(SUCCESS_BG), SUCCESS)
+                            } else if line.starts_with('-') && !line.starts_with("---") {
+                                (Some(DANGER_BG), ERROR)
+                            } else if line.starts_with("diff ")
+                                || line.starts_with("index ")
+                                || line.starts_with("---")
+                                || line.starts_with("+++")
+                            {
+                                (None, SUBTLE)
+                            } else {
+                                (None, TEXT)
+                            };
+                            div()
+                                .px(px(6.))
+                                .when_some(bg, |row, color| row.bg(rgb(color)))
+                                .text_color(rgb(fg))
+                                .child(if line.is_empty() {
+                                    " ".to_owned()
+                                } else {
+                                    line.to_owned()
+                                })
+                        }))
+                    } else {
+                        div().p(px(4.)).text_color(rgb(SUBTLE)).child(tr(
+                            "点击左侧文件查看差异",
+                            "Select a file on the left to inspect diff",
+                        ))
                     });
 
                 div()
@@ -1200,11 +1330,14 @@ impl DesktopView {
             }
             None if state.compare_loading => div()
                 .h(body_h)
-                .child(empty("正在比较两次修订之间的文件变更…"))
+                .child(empty(tr("正在比较文件变更…", "Comparing file changes…")))
                 .into_any_element(),
             None => div()
                 .h(body_h)
-                .child(empty("无法读取修订比较结果"))
+                .child(empty(tr(
+                    "无法读取比较结果",
+                    "Unable to load comparison result",
+                )))
                 .into_any_element(),
         };
 
@@ -1217,7 +1350,14 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .gap(px(7.))
-                    .child(dialog_heading("修订比较（Compare Revisions）"))
+                    .child(dialog_heading(if to_wt {
+                        tr(
+                            "与工作树对比（Diff with Working Tree）",
+                            "Diff with Working Tree",
+                        )
+                    } else {
+                        tr("修订比较（Compare Revisions）", "Compare Revisions")
+                    }))
                     .child(pill(from_short, REMOTE_BG, REMOTE_BORDER, REMOTE_TEXT))
                     .child(div().text_color(rgb(SUBTLE)).child("→"))
                     .child(pill(to_short, ACCENT_BG, ACCENT_BORDER, LINK)),
@@ -1225,7 +1365,7 @@ impl DesktopView {
             .child(body)
             .child(
                 div().flex().justify_end().child(
-                    text_button("close-compare-revisions", "关闭", false).on_click(
+                    text_button("close-compare-revisions", tr("关闭", "Close"), false).on_click(
                         cx.listener(|view, _, window, cx| view.close_overlay(window, cx)),
                     ),
                 ),
@@ -1517,6 +1657,20 @@ impl DesktopView {
                 ),
             ),
             (
+                format!("{mod_label}B"),
+                tr(
+                    "展开或折叠 Log 左侧 Branches 分支面板",
+                    "Toggle Branches sidebar in Log view",
+                ),
+            ),
+            (
+                "F2 / ⌫".to_owned(),
+                tr(
+                    "在 Branches 树中重命名或删除选中分支",
+                    "Rename or delete selected branch in Branches tree",
+                ),
+            ),
+            (
                 format!("{mod_label}L"),
                 tr(
                     "聚焦提交日志搜索与筛选框",
@@ -1652,6 +1806,40 @@ impl DesktopView {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(MUTED))
                             .child(tr("日志界面布局", "Log Layout")),
+                    )
+                    .child(
+                        div()
+                            .id("settings-toggle-branches-panel")
+                            .role(Role::CheckBox)
+                            .aria_label(tr(
+                                "在 Log 视图左侧显示 Branches 分支树面板",
+                                "Show Branches tree sidebar in Log view",
+                            ))
+                            .aria_toggled(if self.show_branches_panel {
+                                Toggled::True
+                            } else {
+                                Toggled::False
+                            })
+                            .tab_index(0)
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .px(px(8.))
+                            .py(px(6.))
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(CARD))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(HOVER)))
+                            .child(check_indicator(self.show_branches_panel))
+                            .child(tr(
+                                "在 Log 视图左侧显示 Branches 分支树面板",
+                                "Show Branches tree sidebar in Log view",
+                            ))
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.toggle_branches_panel(cx);
+                            })),
                     )
                     .child(
                         div()

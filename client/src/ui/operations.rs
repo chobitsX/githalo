@@ -402,7 +402,7 @@ impl DesktopView {
         items
     }
 
-    fn open_branch_form(
+    pub(super) fn open_branch_form(
         &mut self,
         snapshot: Arc<BranchSnapshot>,
         window: &mut Window,
@@ -828,7 +828,13 @@ impl DesktopView {
                 } else {
                     self.pending_push_commit = None;
                 }
-                self.dispatch_daily(DailyAction::Confirm(review_id), cx);
+                self.dispatch_daily(
+                    DailyAction::ConfirmCommit {
+                        id: review_id,
+                        options: self.commit_options(),
+                    },
+                    cx,
+                );
             }
             ReviewDialog::Pull { strategy } => {
                 self.default_pull_strategy = strategy;

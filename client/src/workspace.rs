@@ -18,7 +18,9 @@ pub use crate::history::{BlameLine, ChangedFile, Commit, CommitRef, CommitRefKin
 pub use crate::nested::{
     DEFAULT_MAX_DEPTH, DEFAULT_MAX_DIRS, DiscoveredNestedRepo, NestedScanOutcome,
 };
-pub use crate::project_files::ProjectEntry;
+pub use crate::project_files::{
+    FileGitStatus, GutterDiffHunk, GutterDiffKind, GutterDiffMap, ProjectEntry, ProjectFileContent,
+};
 pub use crate::registry::GroupId;
 use crate::registry::{Registry, RegistryBoard, RegistryError};
 pub use crate::worktree::WorktreeId;
@@ -70,6 +72,18 @@ pub enum NestedAdoptMode {
     NewGroup(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenProjectFile {
+    pub path: PathBuf,
+    pub loading: bool,
+    pub content: Option<ProjectFileContent>,
+    pub error: Option<String>,
+    pub revision: u64,
+    pub gutter_diff: GutterDiffMap,
+    pub inline_blame: Option<Vec<BlameLine>>,
+    pub inline_blame_loading: bool,
+}
+
 #[derive(Clone, Debug)]
 pub enum Action {
     Daily(DailyAction),
@@ -116,10 +130,29 @@ pub enum Action {
         to: GroupId,
     },
     SelectCommit(String),
+    SetBranchFilter(Option<String>),
     LoadMoreHistory,
     SelectFile(PathBuf),
     CloseDiff,
     ToggleDir(PathBuf),
+    ReloadProjectTree,
+    CollapseAllProjectDirs,
+    OpenProjectFile(PathBuf),
+    ReloadProjectFile(PathBuf),
+    LoadProjectFileBlame(PathBuf),
+    ActivateProjectFile(Option<PathBuf>),
+    CloseProjectFile(PathBuf),
+    SaveProjectFile {
+        path: PathBuf,
+        content: String,
+    },
+    CreateProjectFile(PathBuf),
+    CreateProjectDir(PathBuf),
+    RenameProjectEntry {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    DeleteProjectEntry(PathBuf),
     ToggleNested(WorktreeId),
     ScanNested(WorktreeId),
     AdoptNested {
@@ -181,6 +214,27 @@ enum Event {
     Changes(u64, Result<Vec<ChangedFile>, String>),
     Patch(u64, Result<String, String>),
     Directory(u64, PathBuf, Result<Vec<ProjectEntry>, String>),
+    ProjectGitStatus(u64, BTreeMap<PathBuf, FileGitStatus>),
+    ProjectFileLoaded {
+        request: u64,
+        path: PathBuf,
+        result: Result<ProjectFileContent, String>,
+        gutter: GutterDiffMap,
+    },
+    ProjectFileBlameLoaded {
+        request: u64,
+        path: PathBuf,
+        result: Result<Vec<BlameLine>, String>,
+    },
+    ProjectFileGutterLoaded {
+        request: u64,
+        path: PathBuf,
+        gutter: GutterDiffMap,
+    },
+    ProjectFileMutated {
+        target: WorktreeTarget,
+        result: Result<ProjectFileMutation, String>,
+    },
     NestedScan {
         target: WorktreeTarget,
         outcome: NestedScanOutcome,
@@ -191,6 +245,14 @@ enum Event {
         group: Option<GroupId>,
         outcome: NestedScanOutcome,
     },
+}
+
+enum ProjectFileMutation {
+    Saved { path: PathBuf, content: String },
+    CreatedFile(PathBuf),
+    CreatedDir(PathBuf),
+    Renamed { from: PathBuf, to: PathBuf },
+    Deleted(PathBuf),
 }
 
 pub struct Workspace {
@@ -213,12 +275,16 @@ pub struct Workspace {
     pub selected: Option<WorktreeId>,
     pub panel: Panel,
     pub commits: Vec<Commit>,
+    pub branch_filter: Option<String>,
     pub history_limit: usize,
     pub selected_commit: Option<String>,
     pub changes: Vec<ChangedFile>,
     pub selected_file: Option<PathBuf>,
     pub diff: Option<String>,
     pub tree: Vec<ProjectEntry>,
+    pub project_git_status: BTreeMap<PathBuf, FileGitStatus>,
+    pub open_project_files: Vec<OpenProjectFile>,
+    pub active_project_file: Option<PathBuf>,
     pub message: Option<String>,
     pub history_loading: bool,
     pub changes_loading: bool,
@@ -229,6 +295,10 @@ pub struct Workspace {
     changes_request: u64,
     patch_request: u64,
     dir_requests: BTreeMap<PathBuf, u64>,
+    project_status_request: u64,
+    project_file_requests: BTreeMap<PathBuf, u64>,
+    project_blame_requests: BTreeMap<PathBuf, u64>,
+    project_gutter_requests: BTreeMap<PathBuf, u64>,
     dirs: BTreeMap<PathBuf, Vec<ProjectEntry>>,
     expanded_dirs: BTreeSet<PathBuf>,
     runtime: Runtime,
@@ -276,12 +346,16 @@ impl Workspace {
                 selected: None,
                 panel: Panel::Repositories,
                 commits: vec![],
+                branch_filter: None,
                 history_limit: crate::history::RECENT_LIMIT,
                 selected_commit: None,
                 changes: vec![],
                 selected_file: None,
                 diff: None,
                 tree: vec![],
+                project_git_status: BTreeMap::new(),
+                open_project_files: vec![],
+                active_project_file: None,
                 message: None,
                 history_loading: false,
                 changes_loading: false,
@@ -292,6 +366,10 @@ impl Workspace {
                 changes_request: 0,
                 patch_request: 0,
                 dir_requests: BTreeMap::new(),
+                project_status_request: 0,
+                project_file_requests: BTreeMap::new(),
+                project_blame_requests: BTreeMap::new(),
+                project_gutter_requests: BTreeMap::new(),
                 dirs: BTreeMap::new(),
                 expanded_dirs: BTreeSet::new(),
                 runtime,
@@ -518,6 +596,13 @@ impl Workspace {
                 self.edit_catalog(move |db| db.move_member(id, from, to))
             }
             Action::SelectCommit(oid) => self.select_commit(&oid),
+            Action::SetBranchFilter(filter) => {
+                if self.branch_filter != filter {
+                    self.branch_filter = filter;
+                    self.history_limit = crate::history::RECENT_LIMIT;
+                    self.load_history();
+                }
+            }
             Action::LoadMoreHistory => {
                 self.history_limit = self
                     .history_limit
@@ -527,6 +612,18 @@ impl Workspace {
             Action::SelectFile(path) => self.select_file(&path),
             Action::CloseDiff => self.close_diff(),
             Action::ToggleDir(path) => self.toggle_dir(&path),
+            Action::ReloadProjectTree => self.reload_tree(),
+            Action::CollapseAllProjectDirs => self.collapse_all_dirs(),
+            Action::OpenProjectFile(path) => self.open_project_file(path, false),
+            Action::ReloadProjectFile(path) => self.open_project_file(path, true),
+            Action::LoadProjectFileBlame(path) => self.load_project_file_blame(path),
+            Action::ActivateProjectFile(path) => self.activate_project_file(path),
+            Action::CloseProjectFile(path) => self.close_project_file(&path),
+            Action::SaveProjectFile { path, content } => self.save_project_file(path, content),
+            Action::CreateProjectFile(path) => self.create_project_file(path),
+            Action::CreateProjectDir(path) => self.create_project_dir(path),
+            Action::RenameProjectEntry { from, to } => self.rename_project_entry(from, to),
+            Action::DeleteProjectEntry(path) => self.delete_project_entry(path),
             Action::ToggleNested(parent) => {
                 self.edit_catalog(move |db| db.toggle_nested_expanded(parent));
             }
@@ -697,6 +794,37 @@ impl Workspace {
             Event::Directory(tag, path, data) if self.dir_requests.get(&path) == Some(&tag) => {
                 self.apply_directory(path, data)
             }
+            Event::ProjectGitStatus(tag, map) if tag == self.project_status_request => {
+                self.project_git_status = map;
+            }
+            Event::ProjectFileLoaded {
+                request,
+                path,
+                result,
+                gutter,
+            } if self.project_file_requests.get(&path) == Some(&request) => {
+                self.apply_project_file_loaded(path, result, gutter);
+            }
+            Event::ProjectFileBlameLoaded {
+                request,
+                path,
+                result,
+            } if self.project_blame_requests.get(&path) == Some(&request) => {
+                self.apply_project_file_blame_loaded(path, result);
+            }
+            Event::ProjectFileGutterLoaded {
+                request,
+                path,
+                gutter,
+            } if self.project_gutter_requests.get(&path) == Some(&request) => {
+                self.project_gutter_requests.remove(&path);
+                if let Some(entry) = self.open_project_files.iter_mut().find(|f| f.path == path) {
+                    entry.gutter_diff = gutter;
+                }
+            }
+            Event::ProjectFileMutated { target, result } => {
+                self.apply_project_file_mutated(target, result);
+            }
             Event::NestedScan {
                 target,
                 outcome,
@@ -829,6 +957,7 @@ impl Workspace {
         self.select(id, target_changed);
         if reload && !target_changed {
             self.load_history();
+            self.load_branches();
             self.load_cherry_pick_state();
             self.load_repo_op_states();
             if self.panel == Panel::ProjectFiles {

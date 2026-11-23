@@ -20,12 +20,18 @@ Third-Party & Reference Notices
    clean-room implementation written from scratch in Rust + GPUI and
    contains no source code from Rebased or JetBrains.
 
-3. Offline Git Test Fixture (Scap)
+3. syntect (Syntax Highlighting Engine)
+   GitHalo uses `syntect` (https://github.com/trishume/syntect) and its
+   default TextMate syntax and theme bundles for multi-language code and
+   Diff syntax highlighting.
+   Licensed under the MIT License.
+
+4. Offline Git Test Fixture (Scap)
    `client/src/git/fixtures/sync.bundle` is derived from the public Git
    history of `zed-industries/scap` (MIT License). See
    `client/src/git/fixtures/SCAP-LICENSE.txt` and
    `client/src/git/fixtures/README.md` for full attribution details.
 
-4. Other Rust Dependencies
+5. Other Rust Dependencies
    All Cargo dependencies are listed in `client/Cargo.toml` and pinned in
    `client/Cargo.lock`, subject to their respective open-source licenses.

@@ -1,13 +1,17 @@
 use githalo::i18n::{is_zh, tr};
-use githalo::workspace::{Action, GroupId, GroupView, Panel, RepoRow, format_fetch_time};
+use githalo::workspace::{
+    Action, FileGitStatus, GroupId, GroupView, Panel, RepoRow, format_fetch_time,
+};
 use githalo::worktree::WorktreeId;
 use gpui::{
-    AnyElement, Context, Div, ExternalPaths, FontWeight, Pixels, Render, Role, SharedString,
-    TextAlign, Window, div, prelude::*, px, rgb, transparent_black,
+    AnyElement, Context, Div, ExternalPaths, FontWeight, MouseButton, Pixels, Render, Role,
+    SharedString, TextAlign, Window, div, prelude::*, px, rgb, transparent_black,
 };
 
 use super::DesktopView;
 use super::components::*;
+use super::file_icons::{file_type_icon, folder_type_icon};
+use super::file_viewer::{ProjectEntryFormKind, ProjectEntryMenuTarget};
 use super::overlay::{MenuKind, PathOperation};
 
 const COUNT_WIDTH: f32 = 42.;
@@ -282,7 +286,6 @@ impl DesktopView {
             .cursor_pointer()
             .hover(|s| s.bg(rgb(HOVER)))
             .focus_visible(|s| s.bg(rgb(HOVER)))
-            .tooltip(tooltip(format!("{group_title}\n{summary}")))
             .child(
                 div()
                     .flex()
@@ -778,7 +781,7 @@ impl DesktopView {
             .aria_description(details.clone())
             .aria_selected(selected)
             .tab_index(0)
-            .tooltip(tooltip(details))
+            .when_some(repo.issue.clone(), |row, issue| row.tooltip(tooltip(issue)))
             .min_w_0()
             .rounded(px(4.))
             .pl(row_pl)
@@ -891,7 +894,30 @@ impl DesktopView {
                 "Select a repository to browse project files",
             ));
         };
-        let path = repo.target.root.to_string_lossy().into_owned();
+        let query = self
+            .file_viewer_ui
+            .tree_filter
+            .read(cx)
+            .text()
+            .trim()
+            .to_lowercase();
+        let filtering = !query.is_empty();
+        let visible_indices: Vec<usize> = self
+            .workspace
+            .tree
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| {
+                if !filtering {
+                    return Some(idx);
+                }
+                let matches = entry.name.to_lowercase().contains(&query)
+                    || entry.path.to_string_lossy().to_lowercase().contains(&query);
+                matches.then_some(idx)
+            })
+            .collect();
+        let visible_empty = visible_indices.is_empty();
+        let selected_tree_path = self.file_viewer_ui.selected_tree_path.clone();
         let weak_view = cx.weak_entity();
         let tree = div()
             .id("project-tree")
@@ -907,63 +933,139 @@ impl DesktopView {
             .child(
                 gpui::uniform_list(
                     "project-entries",
-                    self.workspace.tree.len(),
+                    visible_indices.len(),
                     move |range, window, cx| {
                         let Some(entity) = weak_view.upgrade() else {
                             return Vec::new();
                         };
                         let view = entity.read(cx);
                         range
-                            .filter_map(|index| {
-                                let entry = view.workspace.tree.get(index)?;
-                                let path = entry.path.clone();
+                            .filter_map(|row_idx| {
+                                let source_idx = *visible_indices.get(row_idx)?;
+                                let entry = view.workspace.tree.get(source_idx)?;
+                                let entry_path = entry.path.clone();
                                 let name = entry.name.clone();
                                 let folder = entry.is_dir;
                                 let expanded = entry.expanded;
-                                Some(
-                                    div()
-                                        .id(("project-entry", index))
-                                        .role(Role::TreeItem)
-                                        .aria_label(name.clone())
-                                        .aria_level(entry.depth + 1)
-                                        .tooltip(tooltip(path.to_string_lossy().into_owned()))
-                                        .flex()
-                                        .items_center()
-                                        .min_w_0()
-                                        .h(px(23.))
-                                        .pl(px(7. + 15. * entry.depth.min(8) as f32))
-                                        .pr(px(7.))
-                                        .gap(px(4.))
-                                        .child(optional_icon(
-                                            folder.then_some(if expanded {
-                                                Icon::ChevronDown
-                                            } else {
-                                                Icon::ChevronRight
-                                            }),
-                                            SUBTLE,
-                                        ))
-                                        .child(icon(
-                                            if folder { Icon::Folder } else { Icon::File },
-                                            MUTED,
-                                        ))
-                                        .child(elide(name))
-                                        .when(folder, |row| {
-                                            row.aria_expanded(expanded)
-                                                .tab_index(0)
-                                                .hover(|s| s.bg(rgb(HOVER)))
-                                                .focus_visible(|s| s.bg(rgb(HOVER)))
-                                                .cursor_pointer()
-                                                .on_click(window.listener_for(
-                                                    &entity,
-                                                    move |view, _, _, cx| {
-                                                        view.dispatch(
-                                                            Action::ToggleDir(path.clone()),
-                                                            cx,
-                                                        );
-                                                    },
-                                                ))
+                                let is_selected = selected_tree_path.as_ref() == Some(&entry_path);
+                                let status = if folder {
+                                    None
+                                } else {
+                                    view.workspace.project_git_status.get(&entry_path).copied()
+                                };
+                                let status_color = match status {
+                                    Some(FileGitStatus::Modified) => LINK,
+                                    Some(FileGitStatus::Added | FileGitStatus::Untracked) => {
+                                        SUCCESS
+                                    }
+                                    Some(FileGitStatus::Conflicted) => ERROR,
+                                    None => TEXT,
+                                };
+                                let click_path = entry_path.clone();
+                                let menu_path = entry_path.clone();
+                                let entry_icon: AnyElement = if folder {
+                                    folder_type_icon(&name, expanded).into_any_element()
+                                } else {
+                                    file_type_icon(&entry_path).into_any_element()
+                                };
+                                let row = div()
+                                    .id(("project-entry", source_idx))
+                                    .role(Role::TreeItem)
+                                    .aria_label(name.clone())
+                                    .aria_level(entry.depth + 1)
+                                    .aria_selected(is_selected)
+                                    .tab_index(0)
+                                    .flex()
+                                    .items_center()
+                                    .min_w_0()
+                                    .h(px(24.))
+                                    .mx(px(4.))
+                                    .pl(px(5. + 14. * entry.depth.min(8) as f32))
+                                    .pr(px(6.))
+                                    .gap(px(5.))
+                                    .rounded(px(4.))
+                                    .cursor_pointer()
+                                    .when(is_selected, |el| el.bg(rgb(ACTIVE)))
+                                    .hover(move |s| {
+                                        s.bg(rgb(if is_selected { ACTIVE } else { HOVER }))
+                                    })
+                                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                                    .child(optional_icon(
+                                        folder.then_some(if expanded {
+                                            Icon::ChevronDown
+                                        } else {
+                                            Icon::ChevronRight
                                         }),
-                                )
+                                        SUBTLE,
+                                    ))
+                                    .child(entry_icon)
+                                    .child(elide(name).flex_1().text_color(rgb(status_color)))
+                                    .when_some(status, |el, st| {
+                                        el.child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .text_size(px(10.5))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(rgb(status_color))
+                                                .child(st.badge()),
+                                        )
+                                    })
+                                    .on_mouse_down(
+                                        MouseButton::Right,
+                                        window.listener_for(
+                                            &entity,
+                                            move |view,
+                                                  event: &gpui::MouseDownEvent,
+                                                  window,
+                                                  cx| {
+                                                view.file_viewer_ui.selected_tree_path =
+                                                    Some(menu_path.clone());
+                                                let menu_target = if folder {
+                                                    ProjectEntryMenuTarget::Dir(menu_path.clone())
+                                                } else {
+                                                    ProjectEntryMenuTarget::File(menu_path.clone())
+                                                };
+                                                view.open_menu(
+                                                    MenuKind::ProjectEntry(menu_target),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
+                                            },
+                                        ),
+                                    );
+                                Some(if folder {
+                                    row.aria_expanded(expanded).on_click(window.listener_for(
+                                        &entity,
+                                        move |view, _, _, cx| {
+                                            view.file_viewer_ui.selected_tree_path =
+                                                Some(click_path.clone());
+                                            view.dispatch(
+                                                Action::ToggleDir(click_path.clone()),
+                                                cx,
+                                            );
+                                        },
+                                    ))
+                                } else {
+                                    row.on_click(window.listener_for(
+                                        &entity,
+                                        move |view, event: &gpui::ClickEvent, window, cx| {
+                                            view.file_viewer_ui.selected_tree_path =
+                                                Some(click_path.clone());
+                                            if event.click_count() >= 2 {
+                                                view.open_project_file_tab(
+                                                    click_path.clone(),
+                                                    true,
+                                                    window,
+                                                    cx,
+                                                );
+                                            } else {
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                })
                             })
                             .collect::<Vec<_>>()
                     },
@@ -983,17 +1085,111 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .min_w_0()
-                    .h(px(31.))
+                    .h(px(32.))
                     .flex_shrink_0()
-                    .px(px(10.))
-                    .gap(px(5.))
-                    .tooltip(tooltip(path))
-                    .child(icon(Icon::Folder, MUTED))
-                    .child(elide(repo.name.clone()).font_weight(FontWeight::SEMIBOLD)),
+                    .pl(px(10.))
+                    .pr(px(6.))
+                    .gap(px(4.))
+                    .child(folder_type_icon(&repo.name, true))
+                    .child(
+                        elide(repo.name.clone())
+                            .flex_1()
+                            .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        icon_button("project-new-file", Icon::Add, tr("新建文件…", "New File…"))
+                            .size(px(22.))
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.open_project_entry_form(
+                                    ProjectEntryFormKind::NewFile,
+                                    std::path::PathBuf::new(),
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        icon_button(
+                            "project-reload-tree",
+                            Icon::Reload,
+                            tr("刷新项目文件树", "Refresh project files"),
+                        )
+                        .size(px(22.))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.dispatch(Action::ReloadProjectTree, cx);
+                        })),
+                    )
+                    .child(
+                        icon_button(
+                            "project-collapse-all",
+                            Icon::CollapseAll,
+                            tr("折叠全部目录", "Collapse all folders"),
+                        )
+                        .size(px(22.))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.dispatch(Action::CollapseAllProjectDirs, cx);
+                        })),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|view, event: &gpui::MouseDownEvent, window, cx| {
+                            view.open_menu(
+                                MenuKind::ProjectEntry(ProjectEntryMenuTarget::Root),
+                                event.position,
+                                window,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }),
+                    ),
             )
-            .child(if self.workspace.tree.is_empty() {
+            .child(
+                div().px(px(8.)).pb(px(6.)).flex_shrink_0().child(
+                    div()
+                        .h(px(25.))
+                        .px(px(6.))
+                        .gap(px(4.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.))
+                        .bg(rgb(PANEL))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .child(icon(Icon::Search, SUBTLE))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(self.file_viewer_ui.tree_filter.clone()),
+                        )
+                        .when(filtering, |bar| {
+                            bar.child(
+                                icon_button(
+                                    "clear-project-filter",
+                                    Icon::Close,
+                                    tr("清除文件筛选", "Clear file filter"),
+                                )
+                                .size(px(17.))
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.file_viewer_ui
+                                            .tree_filter
+                                            .update(cx, |f, cx| f.clear(window, cx));
+                                    },
+                                )),
+                            )
+                        }),
+                ),
+            )
+            .child(if visible_empty {
                 empty(if self.workspace.tree_loading {
                     tr("正在读取项目文件…", "Loading project files…")
+                } else if filtering {
+                    tr(
+                        "当前已展开目录中没有匹配的文件",
+                        "No matching files in expanded folders",
+                    )
                 } else if self.workspace.message.is_some() {
                     tr("项目文件不可用", "Project files unavailable")
                 } else {
@@ -1091,7 +1287,6 @@ fn repo_metadata(repo: &RepoRow) -> AnyElement {
     };
     div()
         .id("selected-repo-metadata")
-        .tooltip(tooltip(repo_description(repo)))
         .mx(px(7.))
         .px(px(5.))
         .py(px(6.))

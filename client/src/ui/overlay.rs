@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use githalo::branch_ops::BranchSnapshot;
@@ -20,8 +21,15 @@ use super::admin::{
     CloneRepoForm, CompareRevisionsDialog, FileInspectDialog, InitRepoForm, RemotesDialog,
     TagsDialog, WorktreesDialog,
 };
+use super::branches::{
+    BranchMenuTarget, CheckoutAndRebaseDialog, CheckoutRemoteForm, DeleteRemoteBranchDialog,
+};
 use super::cherry_pick::{CherryPickAbortDialog, CherryPickDialog};
 use super::components::*;
+use super::daily::WorkingChangeMenuTarget;
+use super::file_viewer::{
+    DeleteProjectEntryDialog, GutterHunkPreviewDialog, ProjectEntryForm, ProjectEntryMenuTarget,
+};
 use super::nested::AdoptNestedDialog;
 use super::operations::{BranchForm, ReviewDialog, SetUpstreamForm};
 use super::rebase::{InteractiveRebaseDialog, RebaseDialog};
@@ -44,6 +52,22 @@ pub(super) enum MenuKind {
         is_current: bool,
         occupied: bool,
     },
+    BranchTreeItem(BranchMenuTarget),
+    BranchTreeSettings,
+    ProjectEntry(ProjectEntryMenuTarget),
+    EditorGutter {
+        path: PathBuf,
+        line_idx: usize,
+    },
+    EditorBlameCommit {
+        oid: String,
+        path: PathBuf,
+        line_idx: usize,
+    },
+    WorkingChange(WorkingChangeMenuTarget),
+    CommitViewOptions,
+    CommitHistory,
+    CommitOptions,
     Commit(String),
     RepoAdmin,
     Add,
@@ -101,6 +125,12 @@ pub(super) enum Dialog {
     CreateBranchAt(BranchAtForm),
     RenameBranch(RenameBranchForm),
     DeleteBranch(DeleteBranchForm),
+    CheckoutRemote(CheckoutRemoteForm),
+    DeleteRemoteBranch(DeleteRemoteBranchDialog),
+    CheckoutAndRebase(CheckoutAndRebaseDialog),
+    ProjectEntryName(ProjectEntryForm),
+    DeleteProjectEntry(DeleteProjectEntryDialog),
+    GutterHunkPreview(GutterHunkPreviewDialog),
     ResolveConflict(ResolveConflictDialog),
     RollbackFile(RollbackDialog),
     AmendCommit(AmendDialog),
@@ -363,6 +393,15 @@ impl DesktopView {
                                     .occlude()
                                     .w(px(match kind {
                                         MenuKind::Worktrees | MenuKind::Branches => 360.,
+                                        MenuKind::BranchTreeItem(_) => 320.,
+                                        MenuKind::BranchTreeSettings => 272.,
+                                        MenuKind::ProjectEntry(_) => 264.,
+                                        MenuKind::EditorGutter { .. } => 272.,
+                                        MenuKind::EditorBlameCommit { .. } => 260.,
+                                        MenuKind::WorkingChange(_) => 268.,
+                                        MenuKind::CommitViewOptions => 260.,
+                                        MenuKind::CommitHistory => 360.,
+                                        MenuKind::CommitOptions => 286.,
                                         MenuKind::Commit(_) => 272.,
                                         _ => 242.,
                                     }))
@@ -402,6 +441,21 @@ impl DesktopView {
                 is_current,
                 occupied,
             } => self.branch_action_items(snapshot, reference, name, *is_current, *occupied, cx),
+            MenuKind::BranchTreeItem(target) => self.branch_tree_item_menu(target, cx),
+            MenuKind::BranchTreeSettings => self.branch_tree_settings_menu(cx),
+            MenuKind::ProjectEntry(target) => self.project_entry_menu_items(target, cx),
+            MenuKind::EditorGutter { path, line_idx } => {
+                self.editor_gutter_menu_items(path, *line_idx, cx)
+            }
+            MenuKind::EditorBlameCommit {
+                oid,
+                path,
+                line_idx,
+            } => self.editor_blame_commit_menu_items(oid, path, *line_idx, cx),
+            MenuKind::WorkingChange(target) => self.working_change_menu_items(target, cx),
+            MenuKind::CommitViewOptions => self.commit_view_options_menu(cx),
+            MenuKind::CommitHistory => self.commit_history_menu(cx),
+            MenuKind::CommitOptions => self.commit_options_menu(cx),
             MenuKind::Commit(oid) => self.commit_menu_items(oid, cx),
             MenuKind::RepoAdmin => self.repo_admin_menu_items(cx),
             MenuKind::Worktrees => {
@@ -937,6 +991,42 @@ impl DesktopView {
                     .w(px(440.))
                     .child(self.delete_branch_dialog(form, cx));
             }
+            Dialog::CheckoutRemote(form) => {
+                container = container
+                    .aria_label(tr("检出远端分支", "Checkout Remote Branch"))
+                    .w(px(460.))
+                    .child(self.checkout_remote_dialog(form, cx));
+            }
+            Dialog::DeleteRemoteBranch(dialog) => {
+                container = container
+                    .aria_label(tr("删除远端分支", "Delete Remote Branch"))
+                    .w(px(460.))
+                    .child(self.delete_remote_branch_dialog(dialog, cx));
+            }
+            Dialog::CheckoutAndRebase(dialog) => {
+                container = container
+                    .aria_label(tr("检出并 Rebase", "Checkout and Rebase"))
+                    .w(px(480.))
+                    .child(self.checkout_and_rebase_dialog(dialog, cx));
+            }
+            Dialog::ProjectEntryName(form) => {
+                container = container
+                    .aria_label(tr("文件或文件夹名称", "File or Folder Name"))
+                    .w(px(460.))
+                    .child(self.project_entry_form_dialog(form, cx));
+            }
+            Dialog::DeleteProjectEntry(dialog) => {
+                container = container
+                    .aria_label(tr("删除文件或文件夹", "Delete File or Folder"))
+                    .w(px(460.))
+                    .child(self.delete_project_entry_dialog(dialog, cx));
+            }
+            Dialog::GutterHunkPreview(dialog) => {
+                container = container
+                    .aria_label(tr("行级变更对比", "Line Change Diff"))
+                    .w(px(640.))
+                    .child(self.gutter_hunk_preview_dialog(dialog, cx));
+            }
             Dialog::ResolveConflict(dialog) => {
                 container = container
                     .aria_label("三方冲突解决")
@@ -1078,8 +1168,7 @@ pub(super) fn menu_item(
         .focus_visible(|s| s.bg(rgb(ACTIVE)))
         .child(elide(label))
         .when_some(subtitle, |item, subtitle| {
-            item.tooltip(tooltip(subtitle.clone()))
-                .aria_description(subtitle.clone())
+            item.aria_description(subtitle.clone())
                 .child(elide(subtitle).text_color(rgb(SUBTLE)).text_size(px(11.)))
         })
         .on_click(cx.listener(move |view, event, window, cx| {

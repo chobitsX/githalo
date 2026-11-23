@@ -6,16 +6,20 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use githalo::i18n::{is_zh, tr};
+use githalo::syntax::{self, SyntaxSpan};
 use githalo::workspace::{
     Action, ChangedFile, Commit, CommitRef, CommitRefKind, DailyAction, Workspace, WorktreeId,
 };
 use gpui::{
-    AnyElement, ClipboardItem, Context, Div, FontWeight, ListHorizontalSizingBehavior, MouseButton,
-    Pixels, Role, ScrollStrategy, SharedString, TextAlign, div, prelude::*, px, rgb, uniform_list,
+    AnyElement, ClipboardItem, Context, Div, FontStyle, FontWeight, HighlightStyle,
+    ListHorizontalSizingBehavior, MouseButton, Pixels, Role, ScrollStrategy, SharedString,
+    StyledText, TextAlign, div, prelude::*, px, rgb, uniform_list,
 };
 
 use super::DesktopView;
+use super::branches::{BRANCHES_STRIPE_WIDTH, short_branch_display};
 use super::components::*;
+use super::file_icons::{file_type_icon, folder_type_icon};
 use super::graph;
 use super::overlay::MenuKind;
 
@@ -30,12 +34,30 @@ impl DesktopView {
             && !working_diff
             && !stash_diff
             && !shelf_diff;
-        let details_width = if has_commit_file {
-            (available * 0.50).clamp(px(230.), px(680.))
+        let active_project_file = self.active_open_project_file().cloned();
+        let project_file_active = active_project_file.is_some()
+            && !working_diff
+            && !stash_diff
+            && !shelf_diff
+            && !commit_diff;
+        let log_active =
+            !working_diff && !stash_diff && !shelf_diff && !commit_diff && !project_file_active;
+        let branches_panel_width = self.branches_ui.panel_width(available);
+        let branches_occupied = if self.show_branches_panel {
+            branches_panel_width + px(4.)
         } else {
-            (available * 0.30).clamp(px(206.), px(364.))
+            px(BRANCHES_STRIPE_WIDTH)
         };
-        let log_active = !working_diff && !stash_diff && !shelf_diff && !commit_diff;
+        let log_and_details_width = (available - branches_occupied).max(px(280.));
+        let details_width = if has_commit_file {
+            (log_and_details_width * 0.48).clamp(px(220.), px(640.))
+        } else {
+            (log_and_details_width * 0.32).clamp(px(200.), px(348.))
+        };
+        let log_tab_title = match self.workspace.branch_filter.as_deref() {
+            Some(reference) => format!("Log: {}", short_branch_display(reference)),
+            None => "Log".to_owned(),
+        };
         div()
             .flex()
             .flex_col()
@@ -56,12 +78,15 @@ impl DesktopView {
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(
-                        workspace_tab("log-tab", "Log", log_active)
+                        workspace_tab("log-tab", log_tab_title.clone(), log_active)
                             .child(icon(Icon::Branch, TEXT))
-                            .child("Log")
+                            .child(elide(log_tab_title).max_w(px(240.)))
                             .when(!log_active, |tab| {
                                 tab.on_click(cx.listener(|view, _, _, cx| {
                                     view.commit_diff_expanded = false;
+                                    if view.workspace.active_project_file.is_some() {
+                                        view.dispatch(Action::ActivateProjectFile(None), cx);
+                                    }
                                     if view.stash_patch_open() {
                                         view.show_stash_patch(false, cx);
                                     } else if view.shelf_patch_open() {
@@ -74,6 +99,90 @@ impl DesktopView {
                                 }))
                             }),
                     )
+                    .children(self.workspace.open_project_files.iter().enumerate().map(
+                        |(idx, open)| {
+                            let is_active = project_file_active
+                                && self.workspace.active_project_file.as_ref() == Some(&open.path);
+                            let name = file_name(&open.path);
+                            let dirty = self.file_viewer_ui.is_dirty(&open.path, cx);
+                            let label = if dirty {
+                                format!("● {name}")
+                            } else {
+                                name.clone()
+                            };
+                            let tip = open.path.display().to_string();
+                            let p_open = open.path.clone();
+                            let p_close = open.path.clone();
+                            div()
+                                .flex()
+                                .flex_shrink_0()
+                                .items_center()
+                                .gap(px(2.))
+                                .child(
+                                    div()
+                                        .id(("project-file-tab", idx))
+                                        .role(Role::Tab)
+                                        .aria_label(tip)
+                                        .aria_selected(is_active)
+                                        .tab_index(0)
+                                        .flex()
+                                        .flex_shrink_0()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .h(px(25.))
+                                        .pl(px(7.))
+                                        .pr(px(4.))
+                                        .rounded(px(4.))
+                                        .border_1()
+                                        .border_color(rgb(if is_active {
+                                            ACTIVE_BORDER
+                                        } else {
+                                            PANEL
+                                        }))
+                                        .bg(rgb(if is_active { 0x203351 } else { PANEL }))
+                                        .cursor_pointer()
+                                        .hover(move |tab| {
+                                            tab.bg(rgb(if is_active { 0x203351 } else { HOVER }))
+                                        })
+                                        .child(file_type_icon(&open.path))
+                                        .child(
+                                            elide(label).max_w(px(150.)).text_color(rgb(
+                                                if dirty { WARNING } else { TEXT },
+                                            )),
+                                        )
+                                        .child(
+                                            div()
+                                                .id(("close-project-file-tab", idx))
+                                                .role(Role::Button)
+                                                .aria_label(tr("关闭文件标签", "Close file tab"))
+                                                .size(px(16.))
+                                                .rounded(px(3.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(SUBTLE))
+                                                .hover(|s| s.bg(rgb(ACTIVE)).text_color(rgb(TEXT)))
+                                                .child("×")
+                                                .on_click(cx.listener(move |view, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    view.dispatch(
+                                                        Action::CloseProjectFile(p_close.clone()),
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.open_project_file_tab(
+                                                p_open.clone(),
+                                                true,
+                                                window,
+                                                cx,
+                                            );
+                                        })),
+                                )
+                        },
+                    ))
                     .when(has_commit_file, |tabs| {
                         let tab_label = self
                             .workspace
@@ -211,21 +320,33 @@ impl DesktopView {
                 self.shelf_patch(available, cx)
             } else if commit_diff && let Some(path) = self.workspace.selected_file.as_deref() {
                 self.expanded_commit_patch(path, cx)
-            } else if self.show_commit_details {
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .child(self.log(available - details_width, cx))
-                    .child(self.details(details_width, cx))
+            } else if let Some(open) = active_project_file.as_ref() {
+                self.project_file_viewer(open, cx)
             } else {
-                div()
-                    .flex()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .child(self.log(available, cx))
+                let branches_column: AnyElement = if self.show_branches_panel {
+                    self.branches_panel(branches_panel_width, cx)
+                        .into_any_element()
+                } else {
+                    self.branches_collapsed_stripe(cx)
+                };
+                if self.show_commit_details {
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .child(branches_column)
+                        .child(self.log((log_and_details_width - details_width).max(px(200.)), cx))
+                        .child(self.details(details_width, cx))
+                } else {
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .child(branches_column)
+                        .child(self.log(log_and_details_width, cx))
+                }
             })
     }
 
@@ -317,6 +438,54 @@ impl DesktopView {
                     })),
                 )
             })
+            .when_some(self.workspace.branch_filter.clone(), |row, active_ref| {
+                let display = short_branch_display(&active_ref).to_owned();
+                row.child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .gap(px(5.))
+                        .h(px(23.))
+                        .pl(px(8.))
+                        .pr(px(4.))
+                        .rounded(px(4.))
+                        .bg(rgb(ACCENT_BG))
+                        .border_1()
+                        .border_color(rgb(ACCENT_BORDER))
+                        .text_size(px(11.5))
+                        .child(div().text_color(rgb(SUBTLE)).child(tr("分支:", "Branch:")))
+                        .child(
+                            elide(display.clone())
+                                .max_w(px(160.))
+                                .text_color(rgb(LINK))
+                                .font_weight(FontWeight::MEDIUM),
+                        )
+                        .child(
+                            div()
+                                .id("clear-branch-filter-chip")
+                                .role(Role::Button)
+                                .aria_label(tr("清除分支筛选", "Clear branch filter"))
+                                .tab_index(0)
+                                .tooltip(tooltip(
+                                    tr("清除分支筛选，显示全部分支", "Clear branch filter")
+                                        .to_owned(),
+                                ))
+                                .size(px(16.))
+                                .rounded(px(3.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .text_color(rgb(MUTED))
+                                .hover(|s| s.bg(rgb(ACTIVE)).text_color(rgb(TEXT)))
+                                .child("×")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.dispatch(Action::SetBranchFilter(None), cx);
+                                })),
+                        ),
+                )
+            })
             .child(div().flex_1().min_w_0())
             .child(
                 command_button(
@@ -328,7 +497,9 @@ impl DesktopView {
                 .h(px(25.))
                 .px(px(8.))
                 .text_size(px(11.5))
-                .tooltip(tooltip(cherry_pick_tip.to_owned()))
+                .when(!cherry_pick_enabled, |button| {
+                    button.tooltip(tooltip(cherry_pick_tip.to_owned()))
+                })
                 .child(icon(
                     Icon::CherryPick,
                     if cherry_pick_enabled { TEXT } else { SUBTLE },
@@ -412,20 +583,6 @@ impl DesktopView {
                         let oid = commit.oid.clone();
                         let context_oid = commit.oid.clone();
                         let graph_row = graph.as_ref().map(|graph| graph.rows[source].clone());
-                        let refs_tip = if commit.refs.is_empty() {
-                            String::new()
-                        } else {
-                            let names: Vec<_> = commit
-                                .refs
-                                .iter()
-                                .map(|r| match r.kind {
-                                    CommitRefKind::Head => format!("HEAD → {}", r.name),
-                                    CommitRefKind::Tag => format!("tag: {}", r.name),
-                                    _ => r.name.clone(),
-                                })
-                                .collect();
-                            format!("{}{}", tr("\n引用：", "\nRefs: "), names.join(", "))
-                        };
                         Some(
                             log_entry()
                                 .id(("commit", source))
@@ -438,13 +595,6 @@ impl DesktopView {
                                 ))
                                 .aria_selected(selected)
                                 .tab_index(0)
-                                .tooltip(tooltip(format!(
-                                    "{}\n{}  {}\n{}{refs_tip}",
-                                    subject(commit),
-                                    commit.author,
-                                    commit.date,
-                                    commit.oid
-                                )))
                                 .cursor_pointer()
                                 .when(selected, |row| row.bg(rgb(ACTIVE)))
                                 .hover(move |s| s.bg(rgb(if selected { ACTIVE } else { HOVER })))
@@ -633,7 +783,7 @@ impl DesktopView {
                 },
                 SUBTLE,
             ))
-            .child(icon(Icon::Folder, MUTED))
+            .child(folder_type_icon(&name, expanded))
             .child(elide(name))
             .on_click(cx.listener(move |view, _, _, cx| {
                 view.history_details.changes.toggle(&path);
@@ -671,13 +821,12 @@ impl DesktopView {
             .aria_description(location.clone())
             .aria_selected(selected)
             .tab_index(0)
-            .tooltip(tooltip(format!("{}  {location}", file.status)))
             .cursor_pointer()
             .when(selected, |row| row.bg(rgb(ACTIVE)))
             .hover(move |s| s.bg(rgb(if selected { ACTIVE } else { HOVER })))
             .focus_visible(|s| s.bg(rgb(ACTIVE)))
             .child(optional_icon(None, SUBTLE))
-            .child(icon(Icon::File, status_color))
+            .child(file_type_icon(&path))
             .child(elide(name).flex_1().text_color(rgb(status_color)))
             .child(
                 div()
@@ -983,13 +1132,6 @@ impl DesktopView {
                             .h(px(22.))
                             .px(px(7.))
                             .text_size(px(11.))
-                            .tooltip(tooltip(
-                                tr(
-                                    "在主编辑区全宽展开左右对比（也可双击变更文件）",
-                                    "Expand full-width side-by-side Diff (or double-click file)",
-                                )
-                                .to_owned(),
-                            ))
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.commit_diff_expanded = true;
                                 cx.notify();
@@ -1009,9 +1151,6 @@ impl DesktopView {
                         .h(px(22.))
                         .px(px(6.))
                         .text_size(px(11.))
-                        .tooltip(tooltip(
-                            tr("切换左右对比 / 统一视图", "Toggle Split / Unified Diff").to_owned(),
-                        ))
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.set_diff_side_by_side(!view.diff_side_by_side, cx);
                         })),
@@ -1262,7 +1401,7 @@ impl HistoryDetails {
         if file || self.selection.diff_loading != selection.diff_loading {
             self.patch = diff
                 .filter(|diff| !diff.is_empty())
-                .map(|diff| Rc::new(ParsedPatch::new(diff)));
+                .map(|diff| Rc::new(ParsedPatch::for_path(diff, selection.file.as_deref())));
         }
         self.selection = selection;
         HistoryScrollReset {
@@ -1371,6 +1510,7 @@ pub(super) struct DiffLine {
     pub(super) text: SharedString,
     color: u32,
     background: u32,
+    syntax: Vec<SyntaxSpan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1388,6 +1528,7 @@ pub(super) struct SplitCell {
     pub(super) prefix: SharedString,
     pub(super) changed: SharedString,
     pub(super) suffix: SharedString,
+    pub(super) syntax: Vec<SyntaxSpan>,
 }
 
 impl SplitCell {
@@ -1398,6 +1539,7 @@ impl SplitCell {
             prefix: SharedString::default(),
             changed: SharedString::default(),
             suffix: SharedString::default(),
+            syntax: Vec::new(),
         }
     }
 
@@ -1408,6 +1550,7 @@ impl SplitCell {
             prefix: text.into(),
             changed: SharedString::default(),
             suffix: SharedString::default(),
+            syntax: Vec::new(),
         }
     }
 
@@ -1424,7 +1567,17 @@ impl SplitCell {
             prefix: prefix.into(),
             changed: changed.into(),
             suffix: suffix.into(),
+            syntax: Vec::new(),
         }
+    }
+
+    fn full_code(&self) -> String {
+        let mut s =
+            String::with_capacity(self.prefix.len() + self.changed.len() + self.suffix.len());
+        s.push_str(&self.prefix);
+        s.push_str(&self.changed);
+        s.push_str(&self.suffix);
+        s
     }
 
     fn render(&self) -> Div {
@@ -1442,20 +1595,31 @@ impl SplitCell {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_color(rgb(fg));
-        if !self.prefix.is_empty() {
-            code = code.child(div().flex_shrink_0().child(self.prefix.clone()));
-        }
-        if !self.changed.is_empty() {
-            code = code.child(
-                div()
-                    .flex_shrink_0()
-                    .rounded(px(2.))
-                    .bg(rgb(highlight_bg))
-                    .child(self.changed.clone()),
-            );
-        }
-        if !self.suffix.is_empty() {
-            code = code.child(div().flex_shrink_0().child(self.suffix.clone()));
+        if !self.syntax.is_empty() {
+            let full = self.full_code();
+            if !full.is_empty() {
+                let changed_range = (!self.changed.is_empty())
+                    .then_some(self.prefix.len()..self.prefix.len() + self.changed.len());
+                let highlights =
+                    merge_diff_highlights(&full, &self.syntax, changed_range, highlight_bg, fg);
+                code = code.child(StyledText::new(full).with_highlights(highlights));
+            }
+        } else {
+            if !self.prefix.is_empty() {
+                code = code.child(div().flex_shrink_0().child(self.prefix.clone()));
+            }
+            if !self.changed.is_empty() {
+                code = code.child(
+                    div()
+                        .flex_shrink_0()
+                        .rounded(px(2.))
+                        .bg(rgb(highlight_bg))
+                        .child(self.changed.clone()),
+                );
+            }
+            if !self.suffix.is_empty() {
+                code = code.child(div().flex_shrink_0().child(self.suffix.clone()));
+            }
         }
         div()
             .w_1_2()
@@ -1642,24 +1806,46 @@ impl DiffLine {
                     .flex_shrink_0()
                     .pl(px(6.))
                     .text_color(rgb(self.color))
-                    .child(self.text.clone()),
+                    .child(if self.syntax.is_empty() {
+                        self.text.clone().into_any_element()
+                    } else {
+                        let highlights = merge_diff_highlights(
+                            &self.text,
+                            &self.syntax,
+                            None,
+                            self.background,
+                            self.color,
+                        );
+                        StyledText::new(self.text.clone())
+                            .with_highlights(highlights)
+                            .into_any_element()
+                    }),
             )
     }
 }
 
 impl ParsedPatch {
     pub(super) fn new(diff: &str) -> Self {
+        Self::for_path(diff, None)
+    }
+
+    pub(super) fn for_path(diff: &str, initial_path: Option<&Path>) -> Self {
         let mut longest = None;
         let mut max_columns = 0;
         let mut hunk: Option<(usize, usize, usize, usize)> = None;
         let mut split_rows = Vec::new();
+        let mut split_row_paths: Vec<Option<PathBuf>> = Vec::new();
         let mut pending_removed: Vec<(Option<usize>, String)> = Vec::new();
         let mut pending_added: Vec<(Option<usize>, String)> = Vec::new();
         let mut hunk_order: usize = 0;
+        let mut current_path: Option<PathBuf> = initial_path.map(Path::to_path_buf);
+        let mut line_meta: Vec<(Option<PathBuf>, bool)> = Vec::new();
 
         let flush_block = |removed: &mut Vec<(Option<usize>, String)>,
                            added: &mut Vec<(Option<usize>, String)>,
-                           rows: &mut Vec<SplitDiffRow>| {
+                           rows: &mut Vec<SplitDiffRow>,
+                           row_paths: &mut Vec<Option<PathBuf>>,
+                           path: &Option<PathBuf>| {
             let count = removed.len().max(added.len());
             for i in 0..count {
                 match (removed.get(i), added.get(i)) {
@@ -1681,6 +1867,7 @@ impl ParsedPatch {
                                 rs,
                             ),
                         });
+                        row_paths.push(path.clone());
                     }
                     (Some((old_no, old_text)), None) => {
                         rows.push(SplitDiffRow::Pair {
@@ -1691,6 +1878,7 @@ impl ParsedPatch {
                             ),
                             right: SplitCell::empty(),
                         });
+                        row_paths.push(path.clone());
                     }
                     (None, Some((new_no, new_text))) => {
                         rows.push(SplitDiffRow::Pair {
@@ -1701,6 +1889,7 @@ impl ParsedPatch {
                                 new_text.clone(),
                             ),
                         });
+                        row_paths.push(path.clone());
                     }
                     (None, None) => {}
                 }
@@ -1709,15 +1898,22 @@ impl ParsedPatch {
             added.clear();
         };
 
-        let lines = diff
+        let mut lines: Vec<DiffLine> = diff
             .lines()
             .enumerate()
             .map(|(index, line)| {
                 let mut old = None;
                 let mut new = None;
+                let mut is_code_line = false;
                 let text = line.replace('\t', "    ");
                 let (color, background) = if line.starts_with("@@ ") {
-                    flush_block(&mut pending_removed, &mut pending_added, &mut split_rows);
+                    flush_block(
+                        &mut pending_removed,
+                        &mut pending_added,
+                        &mut split_rows,
+                        &mut split_row_paths,
+                        &current_path,
+                    );
                     hunk = hunk_range(line);
                     let order = hunk_order;
                     hunk_order += 1;
@@ -1727,6 +1923,7 @@ impl ParsedPatch {
                         background: 0x202b3c,
                         hunk_order: Some(order),
                     });
+                    split_row_paths.push(current_path.clone());
                     (LINK, 0x202b3c)
                 } else if let Some((old_number, new_number, old_left, new_left)) = hunk.as_mut() {
                     let prefix = line.as_bytes().first().copied();
@@ -1746,22 +1943,32 @@ impl ParsedPatch {
                     let stripped = strip_diff_prefix(&text);
                     match (old.is_some(), new.is_some()) {
                         (true, false) => {
+                            is_code_line = true;
                             if !pending_added.is_empty() {
                                 flush_block(
                                     &mut pending_removed,
                                     &mut pending_added,
                                     &mut split_rows,
+                                    &mut split_row_paths,
+                                    &current_path,
                                 );
                             }
                             pending_removed.push((old, stripped));
                             (0xf0aca9, 0x352527)
                         }
                         (false, true) => {
+                            is_code_line = true;
                             pending_added.push((new, stripped));
                             (0xabd5a5, 0x213128)
                         }
                         _ => {
-                            flush_block(&mut pending_removed, &mut pending_added, &mut split_rows);
+                            flush_block(
+                                &mut pending_removed,
+                                &mut pending_added,
+                                &mut split_rows,
+                                &mut split_row_paths,
+                                &current_path,
+                            );
                             if line.starts_with('\\') {
                                 split_rows.push(SplitDiffRow::Banner {
                                     text: text.clone().into(),
@@ -1769,7 +1976,9 @@ impl ParsedPatch {
                                     background: PANEL,
                                     hunk_order: None,
                                 });
+                                split_row_paths.push(current_path.clone());
                             } else {
+                                is_code_line = true;
                                 split_rows.push(SplitDiffRow::Pair {
                                     left: SplitCell::plain(
                                         old,
@@ -1778,12 +1987,22 @@ impl ParsedPatch {
                                     ),
                                     right: SplitCell::plain(new, SplitCellKind::Context, stripped),
                                 });
+                                split_row_paths.push(current_path.clone());
                             }
                             (TEXT, PANEL)
                         }
                     }
                 } else {
-                    flush_block(&mut pending_removed, &mut pending_added, &mut split_rows);
+                    flush_block(
+                        &mut pending_removed,
+                        &mut pending_added,
+                        &mut split_rows,
+                        &mut split_row_paths,
+                        &current_path,
+                    );
+                    if let Some(detected) = extract_diff_header_path(line) {
+                        current_path = Some(detected);
+                    }
                     if !line.starts_with("diff --git ")
                         && !line.starts_with("index ")
                         && !line.starts_with("--- ")
@@ -1795,6 +2014,7 @@ impl ParsedPatch {
                             background: PANEL,
                             hunk_order: None,
                         });
+                        split_row_paths.push(current_path.clone());
                     }
                     (MUTED, PANEL)
                 };
@@ -1803,22 +2023,220 @@ impl ParsedPatch {
                     max_columns = columns;
                     longest = Some(index);
                 }
+                line_meta.push((current_path.clone(), is_code_line));
                 DiffLine {
                     old,
                     new,
                     color,
                     background,
                     text: text.into(),
+                    syntax: Vec::new(),
                 }
             })
             .collect();
-        flush_block(&mut pending_removed, &mut pending_added, &mut split_rows);
+        flush_block(
+            &mut pending_removed,
+            &mut pending_added,
+            &mut split_rows,
+            &mut split_row_paths,
+            &current_path,
+        );
+
+        apply_diff_syntax_highlights(&mut lines, &line_meta, &mut split_rows, &split_row_paths);
+
         Self {
             lines,
             longest,
             split_rows,
         }
     }
+}
+
+fn extract_diff_header_path(line: &str) -> Option<PathBuf> {
+    if let Some(rest) = line.strip_prefix("+++ ") {
+        let trimmed = rest.trim().trim_matches('"');
+        if trimmed == "/dev/null" {
+            return None;
+        }
+        let cleaned = trimmed.strip_prefix("b/").unwrap_or(trimmed);
+        return (!cleaned.is_empty()).then(|| PathBuf::from(cleaned));
+    }
+    if let Some(rest) = line.strip_prefix("--- ") {
+        let trimmed = rest.trim().trim_matches('"');
+        if trimmed == "/dev/null" {
+            return None;
+        }
+        let cleaned = trimmed.strip_prefix("a/").unwrap_or(trimmed);
+        return (!cleaned.is_empty()).then(|| PathBuf::from(cleaned));
+    }
+    if let Some(rest) = line.strip_prefix("diff --git ") {
+        // Parse `a/path b/path`
+        if let Some((_, b_part)) = rest.rsplit_once(" b/") {
+            let cleaned = b_part.trim().trim_matches('"');
+            return (!cleaned.is_empty()).then(|| PathBuf::from(cleaned));
+        }
+    }
+    None
+}
+
+fn apply_diff_syntax_highlights(
+    lines: &mut [DiffLine],
+    line_meta: &[(Option<PathBuf>, bool)],
+    split_rows: &mut [SplitDiffRow],
+    split_row_paths: &[Option<PathBuf>],
+) {
+    // 1. Unified diff lines grouped by file path
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(path) = line_meta[i].0.clone() else {
+            i += 1;
+            continue;
+        };
+        let mut batch_indices = Vec::new();
+        let mut batch_texts: Vec<String> = Vec::new();
+        let mut batch_offsets: Vec<usize> = Vec::new();
+        while i < lines.len() && line_meta[i].0.as_ref() == Some(&path) {
+            if line_meta[i].1 {
+                let raw = lines[i].text.as_ref();
+                let prefix_len = if raw.starts_with(['+', '-', ' ']) {
+                    1
+                } else {
+                    0
+                };
+                batch_indices.push(i);
+                batch_offsets.push(prefix_len);
+                batch_texts.push(raw[prefix_len..].to_owned());
+            }
+            i += 1;
+        }
+        if !batch_texts.is_empty() {
+            let refs: Vec<&str> = batch_texts.iter().map(String::as_str).collect();
+            let highlighted = syntax::highlight_code_lines(&path, &refs);
+            for ((idx, offset), spans) in batch_indices
+                .into_iter()
+                .zip(batch_offsets)
+                .zip(highlighted)
+            {
+                let line_len = lines[idx].text.len();
+                lines[idx].syntax = spans
+                    .into_iter()
+                    .filter_map(|mut s| {
+                        s.start = s.start.saturating_add(offset);
+                        s.end = s.end.saturating_add(offset).min(line_len);
+                        (s.start < s.end).then_some(s)
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    // 2. Side-by-side split rows: highlight left stream and right stream per file path
+    let mut r = 0;
+    while r < split_rows.len() {
+        let Some(path) = split_row_paths[r].clone() else {
+            r += 1;
+            continue;
+        };
+        let mut left_indices = Vec::new();
+        let mut left_texts: Vec<String> = Vec::new();
+        let mut right_indices = Vec::new();
+        let mut right_texts: Vec<String> = Vec::new();
+        while r < split_rows.len() && split_row_paths[r].as_ref() == Some(&path) {
+            if let SplitDiffRow::Pair { left, right } = &split_rows[r] {
+                if left.kind != SplitCellKind::Empty {
+                    left_indices.push(r);
+                    left_texts.push(left.full_code());
+                }
+                if right.kind != SplitCellKind::Empty {
+                    right_indices.push(r);
+                    right_texts.push(right.full_code());
+                }
+            }
+            r += 1;
+        }
+        if !left_texts.is_empty() {
+            let refs: Vec<&str> = left_texts.iter().map(String::as_str).collect();
+            let spans_list = syntax::highlight_code_lines(&path, &refs);
+            for (row_idx, spans) in left_indices.into_iter().zip(spans_list) {
+                if let SplitDiffRow::Pair { left, .. } = &mut split_rows[row_idx] {
+                    left.syntax = spans;
+                }
+            }
+        }
+        if !right_texts.is_empty() {
+            let refs: Vec<&str> = right_texts.iter().map(String::as_str).collect();
+            let spans_list = syntax::highlight_code_lines(&path, &refs);
+            for (row_idx, spans) in right_indices.into_iter().zip(spans_list) {
+                if let SplitDiffRow::Pair { right, .. } = &mut split_rows[row_idx] {
+                    right.syntax = spans;
+                }
+            }
+        }
+    }
+}
+
+/// Merge `syntect` foreground syntax spans with optional inline word-diff background highlight,
+/// guaranteeing sorted, non-overlapping ranges on valid UTF-8 char boundaries.
+fn merge_diff_highlights(
+    text: &str,
+    syntax_spans: &[SyntaxSpan],
+    changed_range: Option<Range<usize>>,
+    highlight_bg: u32,
+    fallback_fg: u32,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let len = text.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    let mut cuts = Vec::with_capacity(syntax_spans.len() * 2 + 4);
+    cuts.push(0);
+    cuts.push(len);
+    for span in syntax_spans {
+        let s = span.start.min(len);
+        let e = span.end.min(len);
+        if s < e && text.is_char_boundary(s) && text.is_char_boundary(e) {
+            cuts.push(s);
+            cuts.push(e);
+        }
+    }
+    if let Some(ref r) = changed_range {
+        let s = r.start.min(len);
+        let e = r.end.min(len);
+        if s < e && text.is_char_boundary(s) && text.is_char_boundary(e) {
+            cuts.push(s);
+            cuts.push(e);
+        }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+
+    let mut out = Vec::with_capacity(cuts.len().saturating_sub(1));
+    for win in cuts.windows(2) {
+        let (a, b) = (win[0], win[1]);
+        if a >= b {
+            continue;
+        }
+        let span = syntax_spans.iter().find(|s| s.start <= a && b <= s.end);
+        let in_changed = changed_range
+            .as_ref()
+            .is_some_and(|r| r.start <= a && b <= r.end);
+        let fg = span.map_or(fallback_fg, |s| s.color);
+        let mut style = HighlightStyle {
+            color: Some(rgb(fg).into()),
+            background_color: in_changed.then(|| rgb(highlight_bg).into()),
+            ..Default::default()
+        };
+        if let Some(s) = span {
+            if s.bold {
+                style.font_weight = Some(FontWeight::SEMIBOLD);
+            }
+            if s.italic {
+                style.font_style = Some(FontStyle::Italic);
+            }
+        }
+        out.push((a..b, style));
+    }
+    out
 }
 
 fn strip_diff_prefix(line: &str) -> String {
@@ -2114,6 +2532,19 @@ mod tests {
                 assert_eq!(right.kind, SplitCellKind::Added);
                 assert_eq!(right.line_no, Some(12));
                 assert_eq!(right.prefix.as_ref(), "const extra = '中文新增';");
+                assert!(!right.syntax.is_empty());
+                let merged = merge_diff_highlights(
+                    &right.full_code(),
+                    &right.syntax,
+                    None,
+                    0x1e5735,
+                    0xabd5a5,
+                );
+                assert!(!merged.is_empty());
+                for (range, _) in &merged {
+                    assert!(right.prefix.is_char_boundary(range.start));
+                    assert!(right.prefix.is_char_boundary(range.end));
+                }
             }
             other => panic!("expected padded add pair, got {other:?}"),
         }

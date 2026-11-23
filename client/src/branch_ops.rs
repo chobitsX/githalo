@@ -18,6 +18,8 @@ pub use remote::{
 };
 
 const HEADS: &[u8] = b"refs/heads/";
+const REMOTES: &[u8] = b"refs/remotes/";
+const TAGS: &[u8] = b"refs/tags/";
 const STALE: &str = "工作树、分支或操作目标已变更，请刷新后重试";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -94,9 +96,31 @@ pub struct LocalBranch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteBranch {
+    /// Full short name including remote prefix, e.g. `origin/main`.
+    pub name: String,
+    /// Remote name, e.g. `origin`.
+    pub remote: String,
+    /// Branch name on the remote without remote prefix, e.g. `main` or `fix/foo`.
+    pub short_name: String,
+    /// Full reference name, e.g. `refs/remotes/origin/main`.
+    pub reference: OsString,
+    pub oid: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TagBranch {
+    pub name: String,
+    pub reference: OsString,
+    pub oid: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchSnapshot {
     state: WorktreeState,
     branches: Vec<LocalBranch>,
+    remote_branches: Vec<RemoteBranch>,
+    tags: Vec<TagBranch>,
 }
 
 impl BranchSnapshot {
@@ -115,6 +139,14 @@ impl BranchSnapshot {
     pub fn branches(&self) -> &[LocalBranch] {
         &self.branches
     }
+
+    pub fn remote_branches(&self) -> &[RemoteBranch] {
+        &self.remote_branches
+    }
+
+    pub fn tags(&self) -> &[TagBranch] {
+        &self.tags
+    }
 }
 
 pub fn read_branches(target: &WorktreeTarget) -> Result<BranchSnapshot, String> {
@@ -123,16 +155,20 @@ pub fn read_branches(target: &WorktreeTarget) -> Result<BranchSnapshot, String> 
         state.command().args([
             "for-each-ref",
             "--sort=refname",
-            "--format=%(refname)%00%(objectname)%00%(upstream)%00%(worktreepath)%00",
+            "--format=%(refname)%00%(objectname)%00%(*objectname)%00%(symref)%00%(upstream)%00%(worktreepath)%00",
             "--",
             "refs/heads/",
+            "refs/remotes/",
+            "refs/tags/",
         ]),
-        "无法读取本地分支",
+        "无法读取分支与标签",
     )?;
     // Git appends a newline even with a NUL-delimited format. A worktree path
     // can itself contain newlines, so consume the separator after the fields.
     let mut remaining = output.as_slice();
     let mut branches = Vec::new();
+    let mut remote_branches = Vec::new();
+    let mut tags = Vec::new();
     while !remaining.is_empty() {
         let mut next = || {
             let (field, tail) = split_at_byte(remaining, 0).ok_or("Git 返回了不完整的分支记录")?;
@@ -140,20 +176,68 @@ pub fn read_branches(target: &WorktreeTarget) -> Result<BranchSnapshot, String> 
             Ok::<_, String>(field)
         };
         let reference = next()?;
-        let branch = LocalBranch {
-            name: os_string(reference.strip_prefix(HEADS).ok_or("无效的本地分支引用")?)?,
-            reference: os_string(reference)?,
-            oid: object_id(next()?)?,
-            upstream: optional_os(next()?)?,
-            worktree_path: optional_os(next()?)?.map(PathBuf::from),
-        };
+        let oid_raw = next()?;
+        let peeled_raw = next()?;
+        let symref = next()?;
+        let upstream = next()?;
+        let worktree_path = next()?;
         remaining = remaining
             .strip_prefix(b"\n")
             .or_else(|| remaining.strip_prefix(b"\r\n"))
             .ok_or("Git 返回了不完整的分支记录")?;
-        branches.push(branch);
+
+        if !symref.is_empty() {
+            continue;
+        }
+
+        if let Some(local_name) = reference.strip_prefix(HEADS) {
+            branches.push(LocalBranch {
+                name: os_string(local_name)?,
+                reference: os_string(reference)?,
+                oid: object_id(oid_raw)?,
+                upstream: optional_os(upstream)?,
+                worktree_path: optional_os(worktree_path)?.map(PathBuf::from),
+            });
+        } else if let Some(remote_tail) = reference.strip_prefix(REMOTES) {
+            let full_short = String::from_utf8_lossy(remote_tail).into_owned();
+            if full_short.ends_with("/HEAD") {
+                continue;
+            }
+            let Some((remote, short_name)) = full_short.split_once('/') else {
+                continue;
+            };
+            if short_name.is_empty() {
+                continue;
+            }
+            remote_branches.push(RemoteBranch {
+                name: full_short.clone(),
+                remote: remote.to_owned(),
+                short_name: short_name.to_owned(),
+                reference: os_string(reference)?,
+                oid: object_id(oid_raw)?,
+            });
+        } else if let Some(tag_tail) = reference.strip_prefix(TAGS) {
+            let target_oid = if is_oid(peeled_raw) {
+                peeled_raw
+            } else {
+                oid_raw
+            };
+            if !is_oid(target_oid) {
+                continue;
+            }
+            tags.push(TagBranch {
+                name: String::from_utf8_lossy(tag_tail).into_owned(),
+                reference: os_string(reference)?,
+                oid: object_id(target_oid)?,
+            });
+        }
     }
-    Ok(BranchSnapshot { state, branches })
+    Ok(BranchSnapshot {
+        state,
+        branches,
+        remote_branches,
+        tags,
+    })
 }
 
 pub fn create_branch(
@@ -413,6 +497,71 @@ pub fn set_branch_upstream(
             },
             &output,
         ));
+    }
+    Ok(())
+}
+
+/// Checkout a remote-tracking branch as a new local tracking branch.
+pub fn checkout_remote_branch(
+    snapshot: &BranchSnapshot,
+    remote_ref: &OsStr,
+    local_name: &str,
+) -> Result<(), String> {
+    let remote = snapshot
+        .remote_branches
+        .iter()
+        .find(|branch| branch.reference == remote_ref)
+        .ok_or("请选择列表中的远端分支")?;
+    let local_name = local_name.trim();
+    if local_name.is_empty() || local_name == "@" || local_name == "-" {
+        return Err("请输入有效的本地分支名".into());
+    }
+    let state = &snapshot.state;
+    state.verify()?;
+    if exact_ref_oid(state, remote_ref)? != remote.oid {
+        return Err(STALE.into());
+    }
+    let checked_name = checked(
+        state
+            .command()
+            .args(["check-ref-format", "--branch", local_name]),
+        "无效的分支名",
+    )?;
+    if line_content(&checked_name)? != local_name.as_bytes() {
+        return Err("请输入有效的本地分支名".into());
+    }
+    let local_ref = OsString::from(format!("refs/heads/{local_name}"));
+    if ref_exists(&state.target.root, &local_ref)? {
+        return Err(format!("本地分支 {local_name} 已存在"));
+    }
+    let mut command = state.command();
+    let output = run(switch_command(&mut command)
+        .args(["--track", "--create", local_name, "--"])
+        .arg(remote_ref))?;
+    if !output.status.success() {
+        return Err(operation_failure("无法检出远端分支", &output));
+    }
+    Ok(())
+}
+
+/// Delete a branch on a remote repository (`git push <remote> --delete <branch>`).
+pub fn delete_remote_branch(
+    target: &WorktreeTarget,
+    remote: &str,
+    branch: &str,
+) -> Result<(), String> {
+    let remote = remote.trim();
+    let branch = branch.trim();
+    if remote.is_empty() || branch.is_empty() {
+        return Err("远端名称与分支名称不能为空".into());
+    }
+    let state = WorktreeState::read(target)?;
+    let output =
+        run(state
+            .command()
+            .args(["push", "--", remote, &format!(":refs/heads/{branch}")]))?;
+    if !output.status.success() {
+        return Err(operation_failure("无法删除远端分支", &output));
     }
     Ok(())
 }

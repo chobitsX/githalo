@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/UI-GPUI%20(GPU%20加速)-2ea043" alt="GPUI" />
   <img src="https://img.shields.io/badge/License-Apache--2.0-blue" alt="Apache-2.0 License" />
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20实机验证-1f6feb?logo=apple" alt="macOS Apple Silicon" />
-  <img src="https://img.shields.io/badge/Tests-150%20项测试通过-brightgreen" alt="150 Tests Passing" />
+  <img src="https://img.shields.io/badge/Tests-160%2B%20项测试通过-brightgreen" alt="160+ Tests Passing" />
 </p>
 
 ---
@@ -68,7 +68,8 @@
 - **原生 Git Worktrees 管理**：顶栏直接管理关联工作树——支持列表查看、新建工作树（可同时建新分支并自动登记）、锁定/解锁、移除（保护主工作树）及 Prune 清理；关联工作树各自独立显示状态，并在共享远端引用更新后自动重算。
 
 ### 2. 完整的专业级 Git 工作流
-- **精准暂存与局部提交**：已暂存 / 未暂存双区视图（同一文件可同时出现在两侧并各自查看 Diff），支持按文件或勾选文本变更块（Hunk）暂存、取消暂存及**仅提交所选变更块**（其余已暂存和未暂存内容完好保留）；支持 Amend 自动预填修订、单文件安全 Rollback 及「提交并推送」组合流。
+- **三态勾选变更树与精准提交（对齐并超越 Rebased）**：支持按「更改 / 未跟踪文件」目录压缩树或经典「已暂存 / 未暂存」双区视图自由切换，文件/目录/分组三态复选框直连 Git Index（局部 Hunk 自动呈现半选态 `−`）；内置 7 键专业工具栏、右键一键添加 `.gitignore` / 回滚 / 搁置 / 编辑器打开、可拖拽提交框高度、提交历史消息下拉、`⌘Enter` 直接提交以及提交选项齿轮（审阅确认、`-s` Signed-off-by、`--no-verify`、Conventional 前缀）。
+- **Log 左侧可折叠 Branches 分支树面板**：按 `HEAD / Local / Remote / Tags` 分组展示并支持 `/` 目录折叠、星标收藏置顶、实时搜索、点击筛选 Log 或跳转定位，内置完整右键菜单（远端分支检出、Checkout & Rebase、修订对比、与工作树 Diff、`F2` 重命名及安全删除）。
 - **可视化交互式 Rebase 与中断恢复**：支持标准 Rebase（含 `--autostash`）与可视化交互式 Rebase（上下调序、切换 `Pick / Reword / Squash / Fixup / Drop` 与自定义提交说明）；冲突中断后展示进度横幅，重启应用后仍可无缝 `Continue / Skip / Abort`。
 - **内置三方冲突解决器**：按操作语义（Merge / Rebase / Cherry-pick / Revert）清晰标注 `Base / Yours / Theirs`，支持一键采用本地、采用传入、保留双方，或使用内置多行合并编辑器手动编辑后直接保存暂存。
 - **Merge、Cherry-pick、Reset 与 Revert**：合并支持快进 / `--no-ff` / `--ff-only` / `--squash`；Cherry-pick 支持 `-x` 与合并提交 `-m`；支持 Undo Commit（`--soft HEAD^`）、Reset（`Soft / Mixed / Hard / Keep`）与 Revert（含冲突恢复）。
@@ -77,11 +78,11 @@
   - **Shelf**：独立补丁存储于 `<git-common-dir>/githalo-shelf/`，完全不触碰 `refs/stash`；支持按文件选择性搁置、Diff 预览、Unshelve（保留或移出）及删除。
 - **远端、分支与标签全管理**：Clone、Init、Remotes 管理、分支上游跟踪绑定/解除、轻量与附注标签的创建/推送/删除；Pull 支持三段策略切换（`--ff-only` / `Merge` / `Rebase --autostash`）；Push 支持 `--force-with-lease` 安全强推与日志右键「推送至此提交」。
 
-### 3. 代码审阅级 Diff 与深度历史检索
-- **左右分栏并排 Diff + 词级行内高亮**：提交 Diff、工作区 Diff、Stash Diff、Shelf Diff 全链路支持实时切换「并排 / 统一」视图；双击任意变更文件即可在主区展开全宽「提交 Diff」标签页，配合 `← / →` 连续审阅。
+### 3. 语法高亮 Diff、内置专业代码编辑器与深度历史检索
+- **全量 Diff 语法高亮 + 词级行内差异**：提交 Diff、工作区 Diff、Stash Diff、Shelf Diff 均接入 `syntect` TextMate 语法高亮并叠加词级行内差异背景，支持实时切换「并排 / 统一」视图与全宽「提交 Diff」标签页连续审阅（`← / →`）。
+- **原生一体化代码编辑器与行号槽 Git 集成**：项目文件树配备 30+ 种彩色矢量文件图标与实时筛选，双击文件直接打开内置专业 GPUI 编辑器，支持 50+ 门语言（含 HTML 内嵌 CSS/JS）实时高亮、撤销/重做、智能缩进、中文 IME、查找/替换（`⌘F`/`⌥⌘F`）、跳转行（`⌘G`）、软换行、书签（`F3`）、**行内嵌入式 Git Blame 栏**以及**行号槽实时变更色条与单块 Diff 预览/可撤销回滚**。
 - **结构化历史筛选**：提交图展示彩色分支 / HEAD / 远端 / 标签胶囊徽章，支持关键词与 `author:`、`branch:`、`after:`、`before:` 组合筛选，并支持突破初始 200 条按需加载更多历史。
 - **单文件历史、逐行 Blame 与任意修订比较**：在 Diff 顶部一键打开「历史 / Blame」双页签弹窗；在提交图右键可将任意提交设为比较基准，跨版本比对文件差异。
-- **随仓联动的项目文件树**：左栏可一键切至当前工作树的磁盘目录按需展开浏览，返回仓库列表后完整保留分组展开与选中态。
 
 ### 4. 为速度、安全感与真实开发环境而生
 - **100% 直接驱动本机 Git CLI**：不依赖 `libgit2` 重写协议层，天然完美兼容你本机的 SSH Agent、GPG 签名、Git Hooks（`pre-commit` / `pre-push` 等）、`.gitconfig` `includeIf` 与凭据管理器。

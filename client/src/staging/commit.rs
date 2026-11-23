@@ -12,6 +12,12 @@ use std::{
     process::Command,
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CommitOptions {
+    pub sign_off: bool,
+    pub no_verify: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CommitScope {
     AllStaged,
@@ -84,6 +90,25 @@ pub fn commit(
     preview: &CommitPreview,
     message: &str,
 ) -> Result<String, String> {
+    commit_with_options(worktree, preview, message, CommitOptions::default())
+}
+
+pub fn quick_commit_staged(
+    worktree: &WorktreeTarget,
+    snapshot: &ChangesSnapshot,
+    message: &str,
+    options: CommitOptions,
+) -> Result<String, String> {
+    let preview = prepare_commit(worktree, snapshot, CommitScope::AllStaged)?;
+    commit_with_options(worktree, &preview, message, options)
+}
+
+pub fn commit_with_options(
+    worktree: &WorktreeTarget,
+    preview: &CommitPreview,
+    message: &str,
+    options: CommitOptions,
+) -> Result<String, String> {
     if message.trim().is_empty() || message.contains('\0') {
         return Err("请输入有效的提交信息".into());
     }
@@ -109,11 +134,14 @@ pub fn commit(
     repo.verify_current(&preview.head)?;
     let mut command = repo.command(Some(&plan.commit_index));
     let guard = repo.guard_commit(&mut command, scratch.path(), &preview.head, &plan)?;
-    let outcome = checked_input(
-        command.args(["commit", "--file=-"]),
-        message.as_bytes(),
-        "提交失败",
-    );
+    command.args(["commit", "--file=-"]);
+    if options.sign_off {
+        command.arg("--signoff");
+    }
+    if options.no_verify {
+        command.arg("--no-verify");
+    }
+    let outcome = checked_input(&mut command, message.as_bytes(), "提交失败");
     let oid = match repo.committed_oid(&guard, &preview.head) {
         Ok(Some(oid)) => oid,
         Ok(None) if let Err(error) = outcome => return Err(error),

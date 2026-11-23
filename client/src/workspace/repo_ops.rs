@@ -103,6 +103,22 @@ pub enum RepoOpAction {
         reference: OsString,
         force: bool,
     },
+    CheckoutRemoteBranch {
+        snapshot: Arc<BranchSnapshot>,
+        remote_ref: OsString,
+        local_name: String,
+    },
+    DeleteRemoteBranch {
+        target: WorktreeTarget,
+        remote: String,
+        branch: String,
+    },
+    CheckoutAndRebase {
+        target: WorktreeTarget,
+        branch_ref: OsString,
+        onto_ref: OsString,
+        autostash: bool,
+    },
     OpenConflict {
         target: WorktreeTarget,
         path: PathBuf,
@@ -228,6 +244,15 @@ pub enum RepoOpAction {
         to_oid: String,
         file: ChangedFile,
     },
+    LoadCompareWorkingTree {
+        target: WorktreeTarget,
+        from_oid: String,
+    },
+    LoadCompareWorkingTreeDiff {
+        target: WorktreeTarget,
+        from_oid: String,
+        file: ChangedFile,
+    },
     LoadTags {
         target: WorktreeTarget,
     },
@@ -255,6 +280,7 @@ pub struct CompareRevisionsData {
     pub target: WorktreeTarget,
     pub from_oid: String,
     pub to_oid: String,
+    pub to_working_tree: bool,
     pub files: Vec<ChangedFile>,
     pub selected_file: Option<ChangedFile>,
     pub diff: Option<String>,
@@ -753,6 +779,74 @@ impl Workspace {
                     Ok(Effect::Changed(format!("已删除分支 {display}")))
                 });
             }
+            RepoOpAction::CheckoutRemoteBranch {
+                snapshot,
+                remote_ref,
+                local_name,
+            } => {
+                if self
+                    .daily
+                    .branches
+                    .as_ref()
+                    .is_none_or(|current| !Arc::ptr_eq(current, &snapshot))
+                {
+                    self.daily_error("分支列表已更新，请重新选择");
+                    return;
+                }
+                let local_display = local_name.trim().to_owned();
+                let remote_display = remote_ref
+                    .to_string_lossy()
+                    .trim_start_matches("refs/remotes/")
+                    .to_owned();
+                self.write(snapshot.worktree().clone(), move || {
+                    branch_ops::checkout_remote_branch(&snapshot, &remote_ref, &local_display)?;
+                    Ok(Effect::Changed(format!(
+                        "已从 {remote_display} 检出并创建追踪分支 {local_display}"
+                    )))
+                });
+            }
+            RepoOpAction::DeleteRemoteBranch {
+                target,
+                remote,
+                branch,
+            } => {
+                let display = format!("{remote}/{branch}");
+                self.write(target.clone(), move || {
+                    branch_ops::delete_remote_branch(&target, &remote, &branch)?;
+                    Ok(Effect::Changed(format!("已删除远端分支 {display}")))
+                });
+            }
+            RepoOpAction::CheckoutAndRebase {
+                target,
+                branch_ref,
+                onto_ref,
+                autostash,
+            } => {
+                let branch_display = branch_ref
+                    .to_string_lossy()
+                    .trim_start_matches("refs/heads/")
+                    .to_owned();
+                let onto_display = onto_ref
+                    .to_string_lossy()
+                    .trim_start_matches("refs/heads/")
+                    .trim_start_matches("refs/remotes/")
+                    .to_owned();
+                self.write(target.clone(), move || {
+                    let message = match rebase_ops::checkout_and_rebase(
+                        &target,
+                        &branch_ref,
+                        &onto_ref,
+                        autostash,
+                    )? {
+                        RebaseOutcome::Completed { new_head_oid } => format!(
+                            "已检出 {branch_display} 并 Rebase 到 {onto_display}，当前 HEAD {}",
+                            short_oid(&new_head_oid)
+                        ),
+                        RebaseOutcome::Stopped { status, .. } => rebase_stopped_message(&status),
+                    };
+                    Ok(Effect::Changed(message))
+                });
+            }
             RepoOpAction::OpenConflict { target, path } => {
                 if !self.check_prepare_target(&target) {
                     return;
@@ -1193,6 +1287,7 @@ impl Workspace {
                                 target,
                                 from_oid,
                                 to_oid,
+                                to_working_tree: false,
                                 files,
                                 selected_file: None,
                                 diff: None,
@@ -1216,6 +1311,47 @@ impl Workspace {
                 self.runtime.detail.run(move || {
                     let result =
                         history::compare_file_diff(&target.root, &from_oid, &to_oid, &file);
+                    event(RepoOpEvent::CompareDiff(request, file, result))
+                });
+            }
+            RepoOpAction::LoadCompareWorkingTree { target, from_oid } => {
+                if self.current_target().as_ref() != Some(&target) {
+                    return;
+                }
+                let request = self.next_id();
+                self.repo_ops.compare_request = request;
+                self.repo_ops.compare_loading = true;
+                self.repo_ops.compare = None;
+                self.runtime.detail.run(move || {
+                    let result =
+                        history::compare_with_working_tree(&target.root, &from_oid).map(|files| {
+                            Box::new(CompareRevisionsData {
+                                target,
+                                from_oid,
+                                to_oid: String::new(),
+                                to_working_tree: true,
+                                files,
+                                selected_file: None,
+                                diff: None,
+                            })
+                        });
+                    event(RepoOpEvent::CompareRevisions(request, result))
+                });
+            }
+            RepoOpAction::LoadCompareWorkingTreeDiff {
+                target,
+                from_oid,
+                file,
+            } => {
+                if self.current_target().as_ref() != Some(&target) {
+                    return;
+                }
+                let request = self.next_id();
+                self.repo_ops.compare_diff_request = request;
+                self.repo_ops.compare_diff_loading = true;
+                self.runtime.detail.run(move || {
+                    let result =
+                        history::compare_working_tree_file_diff(&target.root, &from_oid, &file);
                     event(RepoOpEvent::CompareDiff(request, file, result))
                 });
             }

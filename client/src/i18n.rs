@@ -3,6 +3,7 @@
 //! By default the application follows the host OS language: Chinese locales resolve to
 //! [`Locale::ZhCn`], and all other locales resolve to [`Locale::EnUs`].
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -168,22 +169,75 @@ pub fn parse_locale_hint(raw: &str) -> Option<Locale> {
     }
 }
 
+/// Behavior when clicking a branch in the Log Branches sidebar.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BranchClickMode {
+    #[default]
+    Filter,
+    Navigate,
+}
+
+impl BranchClickMode {
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Filter => "filter",
+            Self::Navigate => "navigate",
+        }
+    }
+
+    pub fn from_key(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "navigate" | "jump" => Self::Navigate,
+            _ => Self::Filter,
+        }
+    }
+}
+
 /// Persisted lightweight desktop preferences stored next to the workspace database.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppPreferences {
     pub language: LanguagePreference,
     pub pull_strategy: PullStrategy,
     pub show_commit_details: bool,
     pub diff_side_by_side: bool,
+    pub show_branches_panel: bool,
+    pub branches_group_by_dir: bool,
+    pub branches_show_tags: bool,
+    pub branches_only_favorites: bool,
+    pub branches_click_mode: BranchClickMode,
+    pub favorite_branches: BTreeSet<String>,
+    pub commit_group_by_dir: bool,
+    pub commit_staging_view: bool,
+    pub commit_review_before: bool,
+    pub commit_sign_off: bool,
+    pub commit_no_verify: bool,
+    pub commit_show_conventional: bool,
 }
 
 impl Default for AppPreferences {
     fn default() -> Self {
+        let mut favorite_branches = BTreeSet::new();
+        favorite_branches.insert("refs/heads/main".to_owned());
+        favorite_branches.insert("refs/heads/master".to_owned());
+        favorite_branches.insert("refs/remotes/origin/main".to_owned());
+        favorite_branches.insert("refs/remotes/origin/master".to_owned());
         Self {
             language: LanguagePreference::System,
             pull_strategy: PullStrategy::FastForwardOnly,
             show_commit_details: true,
             diff_side_by_side: true,
+            show_branches_panel: true,
+            branches_group_by_dir: true,
+            branches_show_tags: false,
+            branches_only_favorites: false,
+            branches_click_mode: BranchClickMode::Filter,
+            favorite_branches,
+            commit_group_by_dir: true,
+            commit_staging_view: false,
+            commit_review_before: false,
+            commit_sign_off: false,
+            commit_no_verify: false,
+            commit_show_conventional: false,
         }
     }
 }
@@ -208,6 +262,8 @@ impl AppPreferences {
             let Some((key, value)) = line.split_once('=') else {
                 continue;
             };
+            let parse_bool =
+                |v: &str| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0");
             match key.trim() {
                 "language" => prefs.language = LanguagePreference::from_key(value),
                 "pull_strategy" => {
@@ -217,14 +273,29 @@ impl AppPreferences {
                         _ => PullStrategy::FastForwardOnly,
                     };
                 }
-                "show_commit_details" => {
-                    prefs.show_commit_details =
-                        !matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "0");
+                "show_commit_details" => prefs.show_commit_details = parse_bool(value),
+                "diff_side_by_side" => prefs.diff_side_by_side = parse_bool(value),
+                "show_branches_panel" => prefs.show_branches_panel = parse_bool(value),
+                "branches_group_by_dir" => prefs.branches_group_by_dir = parse_bool(value),
+                "branches_show_tags" => prefs.branches_show_tags = parse_bool(value),
+                "branches_only_favorites" => prefs.branches_only_favorites = parse_bool(value),
+                "branches_click_mode" => {
+                    prefs.branches_click_mode = BranchClickMode::from_key(value);
                 }
-                "diff_side_by_side" => {
-                    prefs.diff_side_by_side =
-                        !matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "0");
+                "favorite_branches" => {
+                    prefs.favorite_branches = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect();
                 }
+                "commit_group_by_dir" => prefs.commit_group_by_dir = parse_bool(value),
+                "commit_staging_view" => prefs.commit_staging_view = parse_bool(value),
+                "commit_review_before" => prefs.commit_review_before = parse_bool(value),
+                "commit_sign_off" => prefs.commit_sign_off = parse_bool(value),
+                "commit_no_verify" => prefs.commit_no_verify = parse_bool(value),
+                "commit_show_conventional" => prefs.commit_show_conventional = parse_bool(value),
                 _ => {}
             }
         }
@@ -240,12 +311,30 @@ impl AppPreferences {
             PullStrategy::Merge => "merge",
             PullStrategy::Rebase => "rebase",
         };
+        let favorites = self
+            .favorite_branches
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(",");
         let content = format!(
-            "language={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\n",
+            "language={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\n",
             self.language.as_key(),
             pull_key,
             self.show_commit_details,
             self.diff_side_by_side,
+            self.show_branches_panel,
+            self.branches_group_by_dir,
+            self.branches_show_tags,
+            self.branches_only_favorites,
+            self.branches_click_mode.as_key(),
+            favorites,
+            self.commit_group_by_dir,
+            self.commit_staging_view,
+            self.commit_review_before,
+            self.commit_sign_off,
+            self.commit_no_verify,
+            self.commit_show_conventional,
         );
         fs::write(path, content).map_err(|e| e.to_string())
     }
@@ -287,11 +376,26 @@ mod tests {
         let path = dir.path().join("preferences.ini");
         assert_eq!(AppPreferences::load(&path), AppPreferences::default());
 
+        let mut favorites = BTreeSet::new();
+        favorites.insert("refs/heads/main".to_owned());
+        favorites.insert("refs/heads/release/v1".to_owned());
         let saved = AppPreferences {
             language: LanguagePreference::EnUs,
             pull_strategy: PullStrategy::Rebase,
             show_commit_details: false,
             diff_side_by_side: false,
+            show_branches_panel: false,
+            branches_group_by_dir: false,
+            branches_show_tags: true,
+            branches_only_favorites: true,
+            branches_click_mode: BranchClickMode::Navigate,
+            favorite_branches: favorites,
+            commit_group_by_dir: false,
+            commit_staging_view: true,
+            commit_review_before: true,
+            commit_sign_off: true,
+            commit_no_verify: true,
+            commit_show_conventional: true,
         };
         saved.save(&path).unwrap();
         assert_eq!(AppPreferences::load(&path), saved);

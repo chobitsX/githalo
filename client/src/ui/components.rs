@@ -36,15 +36,31 @@ pub(super) enum Icon {
     Branch,
     CherryPick,
     ChevronDown,
+    ChevronLeft,
     ChevronRight,
     Close,
+    CollapseAll,
+    Compare,
+    ExpandAll,
+    Eye,
     File,
     Folder,
+    HeadTag,
+    HistoryClock,
     More,
+    PullArrow,
     Refresh,
     Reload,
     Repositories,
+    Rollback,
     Search,
+    Settings,
+    Shelve,
+    Star,
+    StarFilled,
+    Tag,
+    Target,
+    Trash,
 }
 
 pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
@@ -55,6 +71,7 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
             let color: Hsla = rgb(color).into();
             let at = |x, y| origin + point(px(x), px(y));
             let mut stroke = PathBuilder::stroke(px(1.2));
+            let mut fill_path: Option<PathBuilder> = None;
             let mut draw = |vertices: &[(f32, f32)]| {
                 if let Some((&(x, y), rest)) = vertices.split_first() {
                     stroke.move_to(at(x, y));
@@ -84,6 +101,10 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                     draw(&[(4.5, 6.), (8., 9.5), (11.5, 6.)]);
                     &[]
                 }
+                Icon::ChevronLeft => {
+                    draw(&[(9.5, 4.5), (6., 8.), (9.5, 11.5)]);
+                    &[]
+                }
                 Icon::ChevronRight => {
                     draw(&[(6.5, 4.5), (10., 8.), (6.5, 11.5)]);
                     &[]
@@ -91,6 +112,66 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                 Icon::Close => {
                     draw(&[(4., 4.), (12., 12.)]);
                     draw(&[(12., 4.), (4., 12.)]);
+                    &[]
+                }
+                Icon::CollapseAll => {
+                    draw(&[(4.5, 3.5), (8., 6.8), (11.5, 3.5)]);
+                    draw(&[(4.5, 12.5), (8., 9.2), (11.5, 12.5)]);
+                    &[]
+                }
+                Icon::Compare => {
+                    draw(&[(3., 5.5), (12.5, 5.5)]);
+                    draw(&[(9.8, 3.2), (12.5, 5.5), (9.8, 7.8)]);
+                    draw(&[(13., 10.5), (3.5, 10.5)]);
+                    draw(&[(6.2, 8.2), (3.5, 10.5), (6.2, 12.8)]);
+                    &[]
+                }
+                Icon::Eye => {
+                    draw(&[
+                        (2., 8.),
+                        (4.2, 5.),
+                        (8., 4.),
+                        (11.8, 5.),
+                        (14., 8.),
+                        (11.8, 11.),
+                        (8., 12.),
+                        (4.2, 11.),
+                        (2., 8.),
+                    ]);
+                    stroke.move_to(at(9.8, 8.));
+                    stroke.arc_to(point(px(1.8), px(1.8)), px(0.), false, true, at(6.2, 8.));
+                    stroke.arc_to(point(px(1.8), px(1.8)), px(0.), false, true, at(9.8, 8.));
+                    &[]
+                }
+                Icon::HistoryClock => {
+                    draw(&[(8., 5.2), (8., 8.2), (10.5, 9.6)]);
+                    stroke.move_to(at(13., 8.));
+                    stroke.arc_to(point(px(5.), px(5.)), px(0.), false, true, at(3., 8.));
+                    stroke.arc_to(point(px(5.), px(5.)), px(0.), false, true, at(13., 8.));
+                    &[]
+                }
+                Icon::Rollback => {
+                    draw(&[(6.2, 3.3), (3., 6.), (6.2, 8.7)]);
+                    draw(&[
+                        (3.4, 6.),
+                        (9.6, 6.),
+                        (12., 7.2),
+                        (12.6, 9.4),
+                        (11.6, 11.6),
+                        (9.4, 12.4),
+                        (5., 12.4),
+                    ]);
+                    &[]
+                }
+                Icon::Shelve => {
+                    draw(&[(8., 2.8), (8., 9.6)]);
+                    draw(&[(5.3, 7.), (8., 9.7), (10.7, 7.)]);
+                    draw(&[(3., 9.5), (3., 12.6), (13., 12.6), (13., 9.5)]);
+                    &[]
+                }
+                Icon::ExpandAll => {
+                    draw(&[(4.5, 6.2), (8., 2.8), (11.5, 6.2)]);
+                    draw(&[(4.5, 9.8), (8., 13.2), (11.5, 9.8)]);
                     &[]
                 }
                 Icon::File => {
@@ -117,7 +198,23 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                     ]);
                     &[]
                 }
+                Icon::HeadTag => {
+                    draw(&[
+                        (3., 7.8),
+                        (8.2, 2.6),
+                        (13.2, 2.6),
+                        (13.2, 7.6),
+                        (8., 12.8),
+                        (3., 7.8),
+                    ]);
+                    &[(10.4, 5.4)]
+                }
                 Icon::More => &[(3.8, 8.), (8., 8.), (12.2, 8.)],
+                Icon::PullArrow => {
+                    draw(&[(11.8, 4.2), (4.5, 11.5)]);
+                    draw(&[(4.5, 6.8), (4.5, 11.5), (9.2, 11.5)]);
+                    &[]
+                }
                 Icon::Refresh => {
                     draw(&[
                         (12., 5.),
@@ -155,7 +252,93 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                     stroke.arc_to(point(px(4.), px(4.)), px(0.), false, true, at(10.8, 6.7));
                     &[]
                 }
+                Icon::Settings => {
+                    draw(&[(8., 2.2), (8., 4.1)]);
+                    draw(&[(8., 11.9), (8., 13.8)]);
+                    draw(&[(2.2, 8.), (4.1, 8.)]);
+                    draw(&[(11.9, 8.), (13.8, 8.)]);
+                    draw(&[(3.9, 3.9), (5.2, 5.2)]);
+                    draw(&[(10.8, 10.8), (12.1, 12.1)]);
+                    draw(&[(12.1, 3.9), (10.8, 5.2)]);
+                    draw(&[(5.2, 10.8), (3.9, 12.1)]);
+                    stroke.move_to(at(10.4, 8.));
+                    stroke.arc_to(point(px(2.4), px(2.4)), px(0.), false, true, at(5.6, 8.));
+                    stroke.arc_to(point(px(2.4), px(2.4)), px(0.), false, true, at(10.4, 8.));
+                    &[]
+                }
+                Icon::Star => {
+                    draw(&[
+                        (8., 2.3),
+                        (9.6, 5.9),
+                        (13.5, 6.3),
+                        (10.5, 8.9),
+                        (11.4, 12.8),
+                        (8., 10.7),
+                        (4.6, 12.8),
+                        (5.5, 8.9),
+                        (2.5, 6.3),
+                        (6.4, 5.9),
+                        (8., 2.3),
+                    ]);
+                    &[]
+                }
+                Icon::StarFilled => {
+                    let mut filled = PathBuilder::fill();
+                    let pts = [
+                        (8., 2.3),
+                        (9.6, 5.9),
+                        (13.5, 6.3),
+                        (10.5, 8.9),
+                        (11.4, 12.8),
+                        (8., 10.7),
+                        (4.6, 12.8),
+                        (5.5, 8.9),
+                        (2.5, 6.3),
+                        (6.4, 5.9),
+                    ];
+                    filled.move_to(at(pts[0].0, pts[0].1));
+                    for &(x, y) in &pts[1..] {
+                        filled.line_to(at(x, y));
+                    }
+                    filled.close();
+                    fill_path = Some(filled);
+                    &[]
+                }
+                Icon::Tag => {
+                    draw(&[
+                        (3., 7.8),
+                        (8.2, 2.6),
+                        (13.2, 2.6),
+                        (13.2, 7.6),
+                        (8., 12.8),
+                        (3., 7.8),
+                    ]);
+                    &[(10.4, 5.4)]
+                }
+                Icon::Target => {
+                    draw(&[(8., 2.), (8., 4.6)]);
+                    draw(&[(8., 11.4), (8., 14.)]);
+                    draw(&[(2., 8.), (4.6, 8.)]);
+                    draw(&[(11.4, 8.), (14., 8.)]);
+                    stroke.move_to(at(12.2, 8.));
+                    stroke.arc_to(point(px(4.2), px(4.2)), px(0.), false, true, at(3.8, 8.));
+                    stroke.arc_to(point(px(4.2), px(4.2)), px(0.), false, true, at(12.2, 8.));
+                    &[(8., 8.)]
+                }
+                Icon::Trash => {
+                    draw(&[(3., 4.2), (13., 4.2)]);
+                    draw(&[(6.2, 2.6), (9.8, 2.6)]);
+                    draw(&[(4.5, 4.2), (5.2, 13.), (10.8, 13.), (11.5, 4.2)]);
+                    draw(&[(6.8, 6.5), (6.8, 10.8)]);
+                    draw(&[(9.2, 6.5), (9.2, 10.8)]);
+                    &[]
+                }
             };
+            if let Some(filled) = fill_path
+                && let Ok(path) = filled.build()
+            {
+                window.paint_path(path, color);
+            }
             if let Ok(path) = stroke.build() {
                 window.paint_path(path, color);
             }
@@ -299,11 +482,15 @@ pub(super) fn pill(text: impl Into<SharedString>, bg: u32, border: u32, fg: u32)
         .child(text.into())
 }
 
-pub(super) fn workspace_tab(id: &'static str, label: &'static str, active: bool) -> Stateful<Div> {
+pub(super) fn workspace_tab(
+    id: &'static str,
+    label: impl Into<SharedString>,
+    active: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .role(Role::Tab)
-        .aria_label(label)
+        .aria_label(label.into())
         .aria_selected(active)
         .tab_index(0)
         .flex()

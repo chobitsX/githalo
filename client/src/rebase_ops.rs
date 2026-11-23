@@ -291,6 +291,42 @@ pub fn execute_rebase(preview: &RebasePreview, autostash: bool) -> Result<Rebase
     finish_rebase_command(&checkout, &preview.worktree, output, "无法执行 Rebase")
 }
 
+/// Checkout a local branch and rebase it onto `onto_ref` (`git rebase [--autostash] <onto_oid> <branch>`).
+pub fn checkout_and_rebase(
+    target: &WorktreeTarget,
+    branch_ref: &OsStr,
+    onto_ref: &OsStr,
+    autostash: bool,
+) -> Result<RebaseOutcome, String> {
+    let checkout = Checkout::read(target)?;
+    checkout.ensure_idle()?;
+    let conflicts = checkout.unmerged_paths()?;
+    if !conflicts.is_empty() {
+        return Err(format!(
+            "当前工作树仍有未解决的冲突文件（{}），请先处理冲突",
+            join_paths(&conflicts)
+        ));
+    }
+    let raw_branch = branch_ref.to_string_lossy();
+    let Some(branch_name) = raw_branch.strip_prefix("refs/heads/") else {
+        return Err("仅支持检出本地分支并执行 Rebase".into());
+    };
+    if branch_ref == onto_ref {
+        return Err("不能将分支 Rebase 到自身".into());
+    }
+    let _branch_oid = exact_ref_oid(&checkout, branch_ref)?;
+    let onto_oid = exact_ref_oid(&checkout, onto_ref)?;
+
+    let mut cmd = checkout.write_command();
+    cmd.arg("rebase");
+    if autostash {
+        cmd.arg("--autostash");
+    }
+    cmd.arg(&onto_oid).arg(branch_name);
+    let output = run(&mut cmd)?;
+    finish_rebase_command(&checkout, target, output, "无法检出并执行 Rebase")
+}
+
 /// Preview an interactive rebase starting from `from_commit_oid` (inclusive of `from_commit_oid` up to `HEAD`).
 pub fn preview_interactive(
     target: &WorktreeTarget,

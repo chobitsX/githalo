@@ -68,6 +68,14 @@ pub fn recent(root: &Path) -> Result<Vec<Commit>, String> {
 }
 
 pub fn recent_with_limit(root: &Path, limit: usize) -> Result<Vec<Commit>, String> {
+    recent_for_branch(root, limit, None)
+}
+
+pub fn recent_for_branch(
+    root: &Path,
+    limit: usize,
+    branch_ref: Option<&str>,
+) -> Result<Vec<Commit>, String> {
     let limit = limit.max(1);
     let mut cmd = read_command(root);
     cmd.args([
@@ -78,22 +86,45 @@ pub fn recent_with_limit(root: &Path, limit: usize) -> Result<Vec<Commit>, Strin
         "-z",
     ])
     .arg(format!("--max-count={limit}"))
-    .arg("--format=%H%x00%P%x00%an%x00%as%x00%s")
-    .args(["--branches", "--remotes"]);
-    // Explicit endpoints also include detached HEADs and upstreams mapped outside refs/remotes.
-    for revision in ["HEAD^{commit}", "@{upstream}^{commit}"] {
-        let result = read_command(root)
-            .args(["rev-parse", "--verify", "--quiet", revision])
+    .arg("--format=%H%x00%P%x00%an%x00%as%x00%s");
+
+    if let Some(reference) = branch_ref.map(str::trim).filter(|s| !s.is_empty()) {
+        let verified = read_command(root)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{reference}^{{commit}}"),
+            ])
             .output()
             .map_err(|e| e.to_string())?;
-        if result.status.success() {
-            let oid = std::str::from_utf8(&result.stdout)
-                .map_err(|_| "提交 ID 无效")?
-                .trim();
-            if !is_oid(oid.as_bytes()) {
-                return Err("提交 ID 无效".into());
+        if !verified.status.success() {
+            return Ok(Vec::new());
+        }
+        let oid = std::str::from_utf8(&verified.stdout)
+            .map_err(|_| "分支提交 ID 无效")?
+            .trim();
+        if !is_oid(oid.as_bytes()) {
+            return Err("分支提交 ID 无效".into());
+        }
+        cmd.arg(oid);
+    } else {
+        cmd.args(["--branches", "--remotes"]);
+        // Explicit endpoints also include detached HEADs and upstreams mapped outside refs/remotes.
+        for revision in ["HEAD^{commit}", "@{upstream}^{commit}"] {
+            let result = read_command(root)
+                .args(["rev-parse", "--verify", "--quiet", revision])
+                .output()
+                .map_err(|e| e.to_string())?;
+            if result.status.success() {
+                let oid = std::str::from_utf8(&result.stdout)
+                    .map_err(|_| "提交 ID 无效")?
+                    .trim();
+                if !is_oid(oid.as_bytes()) {
+                    return Err("提交 ID 无效".into());
+                }
+                cmd.arg(oid);
             }
-            cmd.arg(oid);
         }
     }
     let mut refs_by_oid = read_commit_refs(root);
@@ -504,5 +535,38 @@ pub fn compare_file_diff(
     }
     let mut cmd = diff_tree(root);
     cmd.args([from_oid, to_oid]);
+    file_diff_from(&mut cmd, file)
+}
+
+fn diff_working_tree_cmd(root: &Path, from_oid: &str) -> Result<Command, String> {
+    if !is_oid(from_oid.as_bytes()) {
+        return Err("无效的比较提交 ID".into());
+    }
+    let mut cmd = read_command(root);
+    cmd.args([
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        "--find-renames",
+        from_oid,
+    ]);
+    Ok(cmd)
+}
+
+/// List files differing between commit `from_oid` and the current working tree.
+pub fn compare_with_working_tree(root: &Path, from_oid: &str) -> Result<Vec<ChangedFile>, String> {
+    let mut cmd = diff_working_tree_cmd(root, from_oid)?;
+    changed_files_from(&mut cmd)
+}
+
+/// Read the unified diff for a single file between commit `from_oid` and the current working tree.
+pub fn compare_working_tree_file_diff(
+    root: &Path,
+    from_oid: &str,
+    file: &ChangedFile,
+) -> Result<String, String> {
+    let mut cmd = diff_working_tree_cmd(root, from_oid)?;
     file_diff_from(&mut cmd, file)
 }

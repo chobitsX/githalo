@@ -1,7 +1,11 @@
 mod admin;
+mod branches;
 mod cherry_pick;
+mod code_editor;
 mod components;
 mod daily;
+mod file_icons;
+mod file_viewer;
 mod graph;
 mod history;
 mod nested;
@@ -14,8 +18,10 @@ mod sidebar;
 mod stash;
 mod text_field;
 
+use std::collections::BTreeSet;
+
 use githalo::branch_ops::{PullStrategy, RemoteOperation};
-use githalo::i18n::{self, AppPreferences, LanguagePreference, tr};
+use githalo::i18n::{self, AppPreferences, BranchClickMode, LanguagePreference, tr};
 use githalo::workspace::{
     Action, DailyAction, GroupId, Panel, Workspace, WorktreeId, database_path,
 };
@@ -44,12 +50,19 @@ actions!(
         TriggerPull,
         TriggerPush,
         FocusSearch,
+        ToggleBranches,
+        RenameSelectedBranch,
+        DeleteSelectedBranch,
+        SaveFile,
+        CommitNow,
+        CommitAndPushNow,
         Quit
     ]
 );
 
 pub fn bind_keys(cx: &mut App) {
     text_field::bind_keys(cx);
+    code_editor::bind_keys(cx);
     let mod_key = if cfg!(target_os = "macos") {
         "cmd"
     } else {
@@ -69,6 +82,21 @@ pub fn bind_keys(cx: &mut App) {
         ),
         KeyBinding::new(&format!("{mod_key}-t"), TriggerPull, Some("GitClient")),
         KeyBinding::new(&format!("{mod_key}-l"), FocusSearch, Some("GitClient")),
+        KeyBinding::new(&format!("{mod_key}-b"), ToggleBranches, Some("GitClient")),
+        KeyBinding::new(&format!("{mod_key}-s"), SaveFile, Some("GitClient")),
+        KeyBinding::new(
+            &format!("{mod_key}-enter"),
+            CommitNow,
+            Some("CommitMessageInput"),
+        ),
+        KeyBinding::new(
+            &format!("{mod_key}-shift-enter"),
+            CommitAndPushNow,
+            Some("CommitMessageInput"),
+        ),
+        KeyBinding::new("f2", RenameSelectedBranch, Some("BranchesTree")),
+        KeyBinding::new("backspace", DeleteSelectedBranch, Some("BranchesTree")),
+        KeyBinding::new("delete", DeleteSelectedBranch, Some("BranchesTree")),
         KeyBinding::new(&format!("{mod_key}-q"), Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -105,6 +133,8 @@ pub struct DesktopView {
     diff_scroll: UniformListScrollHandle,
     project_scroll: UniformListScrollHandle,
     history_details: HistoryDetails,
+    branches_ui: branches::BranchesPanelUi,
+    file_viewer_ui: file_viewer::FileViewerUi,
     daily_ui: DailyUi,
     stash_ui: StashUi,
     shelf_ui: ShelfUi,
@@ -113,6 +143,18 @@ pub struct DesktopView {
     pub(super) default_pull_strategy: PullStrategy,
     pub(super) show_commit_details: bool,
     pub(super) diff_side_by_side: bool,
+    pub(super) show_branches_panel: bool,
+    pub(super) branches_group_by_dir: bool,
+    pub(super) branches_show_tags: bool,
+    pub(super) branches_only_favorites: bool,
+    pub(super) branches_click_mode: BranchClickMode,
+    pub(super) favorite_branches: BTreeSet<String>,
+    pub(super) commit_group_by_dir: bool,
+    pub(super) commit_staging_view: bool,
+    pub(super) commit_review_before: bool,
+    pub(super) commit_sign_off: bool,
+    pub(super) commit_no_verify: bool,
+    pub(super) commit_show_conventional: bool,
     pub(super) commit_diff_expanded: bool,
     pub(super) pending_push_commit: Option<WorktreeTarget>,
 }
@@ -144,6 +186,8 @@ impl DesktopView {
                     .update(cx, |view, cx| {
                         view.workspace.apply(update);
                         view.sync_history_view();
+                        view.sync_branches_panel(None, cx);
+                        view.sync_file_viewer(None, cx);
                         view.sync_daily_view(cx);
                         view.sync_stash_view();
                         view.sync_shelf_view();
@@ -164,6 +208,8 @@ impl DesktopView {
         })
         .detach();
 
+        let branches_ui = branches::BranchesPanelUi::new(cx);
+        let file_viewer_ui = file_viewer::FileViewerUi::new(window, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         Self {
@@ -184,6 +230,8 @@ impl DesktopView {
             diff_scroll: UniformListScrollHandle::new(),
             project_scroll: UniformListScrollHandle::new(),
             history_details: HistoryDetails::default(),
+            branches_ui,
+            file_viewer_ui,
             daily_ui: DailyUi::default(),
             stash_ui: StashUi::default(),
             shelf_ui: ShelfUi::default(),
@@ -192,6 +240,18 @@ impl DesktopView {
             default_pull_strategy: prefs.pull_strategy,
             show_commit_details: prefs.show_commit_details,
             diff_side_by_side: prefs.diff_side_by_side,
+            show_branches_panel: prefs.show_branches_panel,
+            branches_group_by_dir: prefs.branches_group_by_dir,
+            branches_show_tags: prefs.branches_show_tags,
+            branches_only_favorites: prefs.branches_only_favorites,
+            branches_click_mode: prefs.branches_click_mode,
+            favorite_branches: prefs.favorite_branches,
+            commit_group_by_dir: prefs.commit_group_by_dir,
+            commit_staging_view: prefs.commit_staging_view,
+            commit_review_before: prefs.commit_review_before,
+            commit_sign_off: prefs.commit_sign_off,
+            commit_no_verify: prefs.commit_no_verify,
+            commit_show_conventional: prefs.commit_show_conventional,
             commit_diff_expanded: false,
             pending_push_commit: None,
         }
@@ -203,6 +263,18 @@ impl DesktopView {
             pull_strategy: self.default_pull_strategy,
             show_commit_details: self.show_commit_details,
             diff_side_by_side: self.diff_side_by_side,
+            show_branches_panel: self.show_branches_panel,
+            branches_group_by_dir: self.branches_group_by_dir,
+            branches_show_tags: self.branches_show_tags,
+            branches_only_favorites: self.branches_only_favorites,
+            branches_click_mode: self.branches_click_mode,
+            favorite_branches: self.favorite_branches.clone(),
+            commit_group_by_dir: self.commit_group_by_dir,
+            commit_staging_view: self.commit_staging_view,
+            commit_review_before: self.commit_review_before,
+            commit_sign_off: self.commit_sign_off,
+            commit_no_verify: self.commit_no_verify,
+            commit_show_conventional: self.commit_show_conventional,
         };
         let _ = prefs.save(&AppPreferences::default_path());
     }
@@ -283,6 +355,8 @@ impl DesktopView {
                 cx,
             );
         });
+        self.branches_ui.refresh_placeholder(cx);
+        self.file_viewer_ui.refresh_placeholders(cx);
         self.refresh_daily_placeholders(cx);
         set_app_menus(cx);
         cx.notify();
@@ -291,6 +365,8 @@ impl DesktopView {
     fn dispatch(&mut self, action: Action, cx: &mut Context<Self>) {
         self.workspace.dispatch(action);
         self.sync_history_view();
+        self.sync_branches_panel(None, cx);
+        self.sync_file_viewer(None, cx);
         self.sync_daily_view(cx);
         self.sync_stash_view();
         self.sync_shelf_view();
@@ -323,6 +399,15 @@ impl DesktopView {
         if self.workspace.selected != Some(id) {
             self.commit_diff_expanded = false;
             self.search
+                .update(cx, |search, cx| search.clear(window, cx));
+            self.branches_ui
+                .search
+                .update(cx, |search, cx| search.clear(window, cx));
+            self.file_viewer_ui
+                .tree_filter
+                .update(cx, |search, cx| search.clear(window, cx));
+            self.file_viewer_ui
+                .find_input
                 .update(cx, |search, cx| search.clear(window, cx));
         }
         self.dispatch(Action::Select(id), cx);
@@ -631,6 +716,7 @@ impl DesktopView {
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_container_discovery_dialog(window, cx);
+        self.ensure_project_file_editors(window, cx);
         let viewport = window.viewport_size().width;
         let sidebar_width = self.sidebar_width_for(viewport);
         let available = viewport
@@ -656,6 +742,8 @@ impl Render for DesktopView {
             .on_action(cx.listener(|view, _: &Dismiss, window, cx| {
                 if view.overlay.is_some() {
                     view.close_overlay(window, cx);
+                } else if view.dismiss_editor_bars(window, cx) {
+                    // Closed find/replace or go-to-line bar inside the active code editor.
                 } else if view.working_patch_open() {
                     view.dispatch_daily(DailyAction::CloseChange, cx);
                 } else if view.stash_patch_open() {
@@ -697,19 +785,45 @@ impl Render for DesktopView {
                     view.search.focus_handle(cx).focus(window, cx);
                 }
             }))
+            .on_action(cx.listener(|view, _: &ToggleBranches, _, cx| {
+                if view.overlay.is_none() {
+                    view.toggle_branches_panel(cx);
+                }
+            }))
+            .on_action(cx.listener(|view, _: &SaveFile, _, cx| {
+                if view.overlay.is_none() {
+                    view.save_active_project_file(cx);
+                }
+            }))
             .on_mouse_move(cx.listener(|view, event: &gpui::MouseMoveEvent, _, cx| {
                 if let Some((origin, width)) = view.sidebar_drag {
                     view.sidebar_width = Some(width + event.position.x - origin);
+                    cx.notify();
+                } else if let Some((origin, width)) = view.branches_ui.drag {
+                    view.branches_ui.width = Some(width + event.position.x - origin);
+                    cx.notify();
+                } else if let Some((origin_y, start_h)) = view.daily_ui.draft_drag {
+                    let next = (start_h + origin_y - event.position.y).clamp(px(64.), px(260.));
+                    view.daily_ui.draft_height = next;
+                    view.sync_commit_draft_height(cx);
                     cx.notify();
                 }
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|view, _, _, _| view.sidebar_drag = None),
+                cx.listener(|view, _, _, _| {
+                    view.sidebar_drag = None;
+                    view.branches_ui.drag = None;
+                    view.daily_ui.draft_drag = None;
+                }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|view, _, _, _| view.sidebar_drag = None),
+                cx.listener(|view, _, _, _| {
+                    view.sidebar_drag = None;
+                    view.branches_ui.drag = None;
+                    view.daily_ui.draft_drag = None;
+                }),
             )
             .child(self.titlebar(cx))
             .child(

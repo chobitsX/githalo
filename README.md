@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/UI-GPUI%20(GPU%20Accelerated)-2ea043" alt="GPUI" />
   <img src="https://img.shields.io/badge/License-Apache--2.0-blue" alt="Apache-2.0 License" />
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20Verified-1f6feb?logo=apple" alt="macOS Apple Silicon" />
-  <img src="https://img.shields.io/badge/Tests-150%20Passing-brightgreen" alt="150 Tests Passing" />
+  <img src="https://img.shields.io/badge/Tests-160%2B%20Passing-brightgreen" alt="160+ Tests Passing" />
 </p>
 
 ---
@@ -68,7 +68,8 @@ Modern developers rarely work on a single repository. Between microservices, fro
 - **Native Git Worktrees Manager**: List, create (with optional new branch + auto-registration), lock/unlock, remove (with main worktree protection), and prune linked worktrees directly from the top bar. Linked worktrees appear independently and automatically recalculate when shared tracking refs update.
 
 ### 2. Complete Professional Git Workflows
-- **Precision Staging & Partial Commits**: Dual staged/unstaged file lists (the same file can appear in both sides simultaneously), hunk-level staging/unstaging, **partial hunk-only commits** (preserving remaining staged and unstaged edits safely), Amend with prefilled `HEAD` message, single-file Rollback, and Commit & Push flow.
+- **Rebased-Style Tri-State Commit Tree & Precision Staging**: Check files, compacted directories, or groups directly to atomically stage/unstage (with partial-hunk indeterminate `−` state), switch between Changes/Unversioned tree and classic Staged/Unstaged dual view, use the 7-action toolbar, right-click to add to `.gitignore` / rollback / shelve / open in editor, resize the commit box, pick from commit message history, and commit instantly via `⌘Enter` (with optional review dialog, `-s` Signed-off-by, `--no-verify`, and Conventional Commit prefixes).
+- **Collapsible Log Branches Tree Panel**: Browse `HEAD`, `Local`, `Remote`, and `Tags` with `/` directory grouping, favorites pinning, real-time filtering, click-to-filter or navigate Log history, and full branch context actions (checkout remote tracking branch, Checkout & Rebase, Compare, Diff with Working Tree, rename `F2`, delete).
 - **Interactive Rebase & Guided Recovery**: Visual Interactive Rebase (`Pick`, `Reword`, `Squash`, `Fixup`, `Drop`, reorder) plus standard Rebase (`--autostash`). Mid-operation conflict banners persist across restarts with `Continue`, `Skip`, and confirmed `Abort`.
 - **Built-In 3-Way Conflict Resolver**: Inspect `Base`, `Yours`, and `Theirs` with operation-aware labels (Merge, Rebase, Cherry-pick, Revert), accept either or both sides, or edit the merged result directly in the built-in multi-line editor before staging.
 - **Merge, Cherry-Pick, Reset & Revert**: Merge with fast-forward / `--no-ff` / `--ff-only` / `--squash`, Cherry-pick with `-x` and merge parent `-m`, Undo Commit (`--soft HEAD^`), Reset (`Soft` / `Mixed` / `Hard` / `Keep`), and Revert with full conflict recovery.
@@ -77,11 +78,11 @@ Modern developers rarely work on a single repository. Between microservices, fro
   - **Shelf**: Patch-based shelving stored under `<git-common-dir>/githalo-shelf/` without touching `refs/stash` — selectively shelve files, preview patches, unshelve (keep or remove), and delete.
 - **Remotes, Branches & Tags**: Clone, Init, manage multiple Remotes, configure branch upstream tracking, create/push/delete lightweight & annotated Tags, Pull with strategy selection (`--ff-only`, `Merge`, `Rebase --autostash`), safe force push (`--force-with-lease`), and `Push up to commit`.
 
-### 3. Code-Review-Grade Diff & Deep History Inspection
-- **Side-by-Side Diff with Word-Level Highlighting**: Toggle instantly between Side-by-Side and Unified views across Commit Diff, Working Tree Diff, Stash Diff, and Shelf Diff. Double-click any changed file to open a full-width **Commit Diff** tab and step through files with `← / →`.
+### 3. Code-Review-Grade Diff, Integrated Code Editor & Deep History Inspection
+- **Side-by-Side Syntax-Highlighted Diff**: Powered by `syntect` across Commit Diff, Working Tree Diff, Stash Diff, and Shelf Diff, layering multi-language TextMate syntax colors cleanly with word-level inline diff highlights. Double-click any changed file to open a full-width **Commit Diff** tab and step through files with `← / →`.
+- **Integrated Native Code Editor & Git Gutter**: Double-click any project file (with 30+ color-coded vector file icons) to open it directly in an editable GPUI code view featuring `syntect` syntax highlighting (50+ languages including embedded HTML `<style>`/`<script>`), undo/redo, smart indentation, IME input, in-file Find & Replace (`⌘F`/`⌥⌘F`), Go to Line (`⌘G`), Soft-Wrap, bookmarks (`F3`), **inline Git Blame gutter**, and **real-time Git change markers with single-hunk diff preview & undoable rollback**.
 - **Structured History Search**: Filter commits by keywords or structured prefixes (`author:`, `branch:`, `after:`, `before:`), inspect color-coded branch/HEAD/remote/tag pills on the commit graph, and paginate seamlessly beyond the initial 200 commits.
 - **File History, Blame & Revision Compare**: Open tabbed **File History / Line-by-Line Blame** right from the Diff header, or mark any commit as a comparison base to diff arbitrary revisions.
-- **Integrated Project File Browser**: Switch the sidebar to browse the active worktree's on-disk directory tree on demand while keeping repository group state intact.
 
 ### 4. Built for Speed, Safety & Real-World Git Setups
 - **100% Native Git CLI Execution**: Because GitHalo invokes your system `git` binary instead of reimplementing Git via `libgit2`, your existing SSH agents, GPG signing, `pre-commit` / `pre-push` hooks, `.gitconfig` `includeIf` rules, and credential helpers work out of the box.

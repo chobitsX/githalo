@@ -70,6 +70,7 @@ pub(super) struct TextField {
     placeholder: SharedString,
     text: String,
     multiline: bool,
+    custom_height: Option<Pixels>,
     anchor: usize,
     caret: usize,
     marked: Option<Range<usize>>,
@@ -104,6 +105,7 @@ impl TextField {
             placeholder: placeholder.into(),
             text,
             multiline: false,
+            custom_height: None,
             anchor: if select_all { 0 } else { end },
             caret: end,
             marked: None,
@@ -116,6 +118,14 @@ impl TextField {
         Self {
             multiline: true,
             ..Self::new(placeholder, String::new(), false, cx)
+        }
+    }
+
+    pub(super) fn set_height(&mut self, height: Option<Pixels>, cx: &mut Context<Self>) {
+        if self.custom_height != height {
+            self.custom_height = height;
+            self.layout = None;
+            cx.notify();
         }
     }
 
@@ -546,13 +556,14 @@ impl TextField {
             pan: point(px(0.), px(0.)),
         };
         let previous = self.layout.as_ref().map_or(layout.pan, |layout| layout.pan);
+        let max_y = (top - bounds.size.height).max(px(0.));
         if focused && let Some(caret) = layout.position(self.caret) {
             if self.multiline {
                 layout.pan.y = previous
                     .y
                     .max(caret.y + height - bounds.size.height)
                     .min(caret.y)
-                    .clamp(px(0.), (top - bounds.size.height).max(px(0.)));
+                    .clamp(px(0.), max_y);
             } else if let Some(line) = layout.lines.first() {
                 let max = (line.line.width() - bounds.size.width + px(3.)).max(px(0.));
                 layout.pan.x = previous
@@ -562,7 +573,7 @@ impl TextField {
                     .clamp(px(0.), max);
             }
         } else if self.multiline {
-            layout.pan.y = previous.y.min((top - bounds.size.height).max(px(0.)));
+            layout.pan.y = previous.y.min(max_y);
         }
         layout
     }
@@ -624,24 +635,28 @@ impl Render for TextField {
                 });
                 paint_entity.update(cx, |field, _| field.layout = Some(layout));
             },
-        )
-        .w_full()
-        .h(px(if self.multiline {
-            4. * LINE_HEIGHT
+        );
+        let box_height = self.custom_height.unwrap_or_else(|| {
+            px(if self.multiline {
+                4. * LINE_HEIGHT + 12.
+            } else {
+                26.
+            })
+        });
+        let canvas_height = if self.multiline {
+            (box_height - px(12.)).max(px(LINE_HEIGHT * 2.))
         } else {
-            LINE_HEIGHT
-        }));
+            px(LINE_HEIGHT)
+        };
+        let text_canvas = text_canvas.w_full().h(canvas_height);
 
         div()
             .id("input")
             .w_full()
-            .h(px(if self.multiline {
-                4. * LINE_HEIGHT + 12.
-            } else {
-                26.
-            }))
+            .h(box_height)
             .flex()
-            .items_center()
+            .when(self.multiline, |el| el.items_start().py(px(6.)))
+            .when(!self.multiline, |el| el.items_center())
             .px(px(7.))
             .bg(rgb(PANEL))
             .border_1()

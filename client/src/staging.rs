@@ -3,7 +3,10 @@
 mod commit;
 mod patch;
 
-pub use commit::{CommitPreview, CommitScope, CommitSelection, commit, prepare_commit};
+pub use commit::{
+    CommitOptions, CommitPreview, CommitScope, CommitSelection, commit, commit_with_options,
+    prepare_commit, quick_commit_staged,
+};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -186,6 +189,148 @@ pub fn update_index(
     repo.confirm_diff(worktree, None, &current, preview)?;
     repo.verify_current(&preview.head)?;
     lock.install(&index)
+}
+
+/// Atomically stage all matching unstaged files in `paths` into the index.
+pub fn batch_stage_paths(
+    worktree: &WorktreeTarget,
+    snapshot: &ChangesSnapshot,
+    paths: &[PathBuf],
+) -> Result<usize, String> {
+    if worktree != &snapshot.worktree {
+        return Err(STALE_CHECKOUT.into());
+    }
+    let targets: BTreeSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    let mut to_stage: Vec<&FileChange> = snapshot
+        .unstaged
+        .iter()
+        .filter(|file| {
+            !matches!(file.kind, ChangeKind::Conflicted(_)) && targets.contains(file.path.as_path())
+        })
+        .collect();
+    if to_stage.is_empty() {
+        return Ok(0);
+    }
+    // Deletions first so a removed file can make room for a new directory entry.
+    to_stage.sort_by_key(|file| !matches!(file.kind, ChangeKind::Deleted));
+
+    let repo = Repo::open(worktree)?;
+    repo.verify_identity(&snapshot.identity)?;
+    let lock = repo.lock_index()?;
+    let scratch = repo.scratch()?;
+    let index = scratch.path().join("index");
+    repo.copy_index(&index)?;
+    let before = repo.entries(Some(&index))?;
+    let mut allowed: BTreeSet<&Path> = BTreeSet::new();
+    for file in &to_stage {
+        allowed.extend(file.operation_paths());
+        repo.stage_file(&index, file)?;
+    }
+    let after = repo.entries(Some(&index))?;
+    check_changed_paths(&before, &after, allowed)?;
+    repo.verify_current(&snapshot.head)?;
+    lock.install(&index)?;
+    Ok(to_stage.len())
+}
+
+/// Atomically unstage all matching staged files in `paths` back to `HEAD`.
+pub fn batch_unstage_paths(
+    worktree: &WorktreeTarget,
+    snapshot: &ChangesSnapshot,
+    paths: &[PathBuf],
+) -> Result<usize, String> {
+    if worktree != &snapshot.worktree {
+        return Err(STALE_CHECKOUT.into());
+    }
+    let targets: BTreeSet<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    if targets.is_empty() {
+        return Ok(0);
+    }
+    let to_unstage: Vec<&FileChange> = snapshot
+        .staged
+        .iter()
+        .filter(|file| {
+            !matches!(file.kind, ChangeKind::Conflicted(_)) && targets.contains(file.path.as_path())
+        })
+        .collect();
+    if to_unstage.is_empty() {
+        return Ok(0);
+    }
+
+    let repo = Repo::open(worktree)?;
+    repo.verify_identity(&snapshot.identity)?;
+    let lock = repo.lock_index()?;
+    let scratch = repo.scratch()?;
+    let index = scratch.path().join("index");
+    repo.copy_index(&index)?;
+    let before = repo.entries(Some(&index))?;
+    let mut op_paths: BTreeSet<&Path> = BTreeSet::new();
+    for file in &to_unstage {
+        op_paths.extend(file.operation_paths());
+    }
+    let head = repo.tree_entries(snapshot.head.oid.as_deref(), &op_paths)?;
+    repo.set_paths(&index, &head, &op_paths)?;
+    let after = repo.entries(Some(&index))?;
+    check_changed_paths(&before, &after, op_paths)?;
+    repo.verify_current(&snapshot.head)?;
+    lock.install(&index)?;
+    Ok(to_unstage.len())
+}
+
+/// Append one or more worktree-relative paths to the repository root `.gitignore` (deduplicated).
+pub fn add_to_gitignore(worktree: &WorktreeTarget, paths: &[PathBuf]) -> Result<usize, String> {
+    let mut patterns: Vec<String> = Vec::new();
+    for path in paths {
+        if !is_worktree_path(path) {
+            return Err("路径必须位于当前仓库工作树内".into());
+        }
+        if path
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == ".git")
+        {
+            return Err("不允许将 .git 目录添加到 .gitignore".into());
+        }
+        let normalized = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .trim_start_matches('/')
+            .to_owned();
+        if !normalized.is_empty() && !patterns.contains(&normalized) {
+            patterns.push(normalized);
+        }
+    }
+    if patterns.is_empty() {
+        return Ok(0);
+    }
+    let ignore_path = worktree.root.join(".gitignore");
+    let existing = match fs::read_to_string(&ignore_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(format!("无法读取 .gitignore（{err}）")),
+    };
+    let existing_lines: BTreeSet<&str> = existing.lines().map(str::trim).collect();
+    let new_entries: Vec<&str> = patterns
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !existing_lines.contains(p))
+        .collect();
+    if new_entries.is_empty() {
+        return Ok(0);
+    }
+    let mut updated = existing;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    for entry in &new_entries {
+        updated.push_str(entry);
+        updated.push('\n');
+    }
+    fs::write(&ignore_path, updated).map_err(|e| format!("无法写入 .gitignore（{e}）"))?;
+    Ok(new_entries.len())
 }
 
 struct Repo<'a> {
@@ -955,4 +1100,113 @@ fn command_error(task: &str, output: &Output) -> String {
 
 fn io_error(error: io::Error) -> String {
     format!("无法访问 Git 暂存区（{error}）")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::worktree::WorktreeId;
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("git command");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn batch_stage_unstage_gitignore_and_quick_commit_work_end_to_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        run_git(&root, &["init", "-b", "main"]);
+        run_git(&root, &["config", "user.name", "GitHalo Tester"]);
+        run_git(&root, &["config", "user.email", "tester@githalo.dev"]);
+        fs::write(root.join("a.txt"), "hello\n").unwrap();
+        run_git(&root, &["add", "a.txt"]);
+        run_git(&root, &["commit", "-m", "initial"]);
+
+        let target = WorktreeTarget {
+            id: WorktreeId::new(1).unwrap(),
+            root: root.clone(),
+            path_revision: 1,
+        };
+
+        // Modify a.txt + add two untracked files (one to commit, one to ignore)
+        fs::write(root.join("a.txt"), "hello world\n").unwrap();
+        fs::create_dir_all(root.join("docs/sub")).unwrap();
+        fs::write(root.join("docs/sub/note.md"), "# Note\n").unwrap();
+        fs::write(root.join("scratch.log"), "temp\n").unwrap();
+
+        let snap = changes(&target).unwrap();
+        assert!(snap.staged.is_empty());
+        assert_eq!(snap.unstaged.len(), 3);
+
+        // Batch stage two files
+        let staged_count = batch_stage_paths(
+            &target,
+            &snap,
+            &[PathBuf::from("a.txt"), PathBuf::from("docs/sub/note.md")],
+        )
+        .unwrap();
+        assert_eq!(staged_count, 2);
+
+        let snap2 = changes(&target).unwrap();
+        assert_eq!(snap2.staged.len(), 2);
+
+        // Batch unstage one file
+        let unstaged_count =
+            batch_unstage_paths(&target, &snap2, &[PathBuf::from("docs/sub/note.md")]).unwrap();
+        assert_eq!(unstaged_count, 1);
+
+        let snap3 = changes(&target).unwrap();
+        assert_eq!(snap3.staged.len(), 1);
+        assert_eq!(snap3.staged[0].path, PathBuf::from("a.txt"));
+
+        // Add scratch.log to .gitignore (idempotent deduplication)
+        assert_eq!(
+            add_to_gitignore(&target, &[PathBuf::from("scratch.log")]).unwrap(),
+            1
+        );
+        assert_eq!(
+            add_to_gitignore(&target, &[PathBuf::from("scratch.log")]).unwrap(),
+            0
+        );
+        assert!(
+            fs::read_to_string(root.join(".gitignore"))
+                .unwrap()
+                .contains("scratch.log")
+        );
+
+        // Quick commit staged changes with sign-off
+        let snap4 = changes(&target).unwrap();
+        let oid = quick_commit_staged(
+            &target,
+            &snap4,
+            "feat: update greeting",
+            CommitOptions {
+                sign_off: true,
+                no_verify: true,
+            },
+        )
+        .unwrap();
+        assert!(oid.len() >= 40);
+        let msg = String::from_utf8_lossy(
+            &Command::new("git")
+                .current_dir(&root)
+                .args(["log", "-1", "--pretty=%B"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .into_owned();
+        assert!(msg.contains("feat: update greeting"));
+        assert!(msg.contains("Signed-off-by: GitHalo Tester <tester@githalo.dev>"));
+    }
 }

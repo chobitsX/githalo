@@ -368,6 +368,7 @@ impl Workspace {
         }
         if self.selected.is_some_and(|id| affected.contains(&id)) {
             self.load_history();
+            self.load_branches();
         }
         for id in affected {
             self.start_status(id);

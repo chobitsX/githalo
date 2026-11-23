@@ -16,5 +16,6 @@ pub mod repo_admin;
 pub mod shelf;
 pub mod staging;
 pub mod stash;
+pub mod syntax;
 pub mod workspace;
 pub mod worktree;

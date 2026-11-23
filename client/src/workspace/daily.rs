@@ -9,7 +9,8 @@ use crate::{
     },
     registry::Registry,
     staging::{
-        self, ChangeDiff, ChangesSnapshot, CommitPreview, CommitScope, CommitSelection, DiffSide,
+        self, ChangeDiff, ChangesSnapshot, CommitOptions, CommitPreview, CommitScope,
+        CommitSelection, DiffSide,
     },
     worktree::{WorktreeId, WorktreeTarget},
 };
@@ -27,11 +28,32 @@ pub enum DailyAction {
         diff: Arc<ChangeDiff>,
         hunks: Vec<usize>,
     },
+    BatchStage {
+        snapshot: Arc<ChangesSnapshot>,
+        paths: Vec<PathBuf>,
+    },
+    BatchUnstage {
+        snapshot: Arc<ChangesSnapshot>,
+        paths: Vec<PathBuf>,
+    },
+    AddToGitignore {
+        target: WorktreeTarget,
+        paths: Vec<PathBuf>,
+    },
+    QuickCommit {
+        snapshot: Arc<ChangesSnapshot>,
+        message: String,
+        options: CommitOptions,
+    },
     PrepareCommit {
         snapshot: Arc<ChangesSnapshot>,
         diff: Option<Arc<ChangeDiff>>,
         hunks: Vec<usize>,
         message: String,
+    },
+    ConfirmCommit {
+        id: u64,
+        options: CommitOptions,
     },
     LoadBranches,
     SwitchBranch {
@@ -241,7 +263,7 @@ impl Workspace {
         });
     }
 
-    fn load_branches(&mut self) {
+    pub(super) fn load_branches(&mut self) {
         let Some(target) = self.current_target().filter(|t| !self.writing(t.id)) else {
             return;
         };
@@ -368,6 +390,82 @@ impl Workspace {
                     )))
                 });
             }
+            DailyAction::BatchStage { snapshot, paths } => {
+                if self.panel != Panel::Commit
+                    || self.daily.changes_loading
+                    || !same(&self.daily.changes, &snapshot)
+                {
+                    self.daily_error("工作区变更已更新，请重新操作");
+                    return;
+                }
+                let target = snapshot.worktree.clone();
+                self.write(target.clone(), move || {
+                    let count = staging::batch_stage_paths(&target, &snapshot, &paths)?;
+                    let msg = if count == 1 {
+                        format!("已暂存 {}", paths[0].display())
+                    } else {
+                        format!("已暂存 {count} 个文件")
+                    };
+                    Ok(Effect::IndexChanged(msg))
+                });
+            }
+            DailyAction::BatchUnstage { snapshot, paths } => {
+                if self.panel != Panel::Commit
+                    || self.daily.changes_loading
+                    || !same(&self.daily.changes, &snapshot)
+                {
+                    self.daily_error("工作区变更已更新，请重新操作");
+                    return;
+                }
+                let target = snapshot.worktree.clone();
+                self.write(target.clone(), move || {
+                    let count = staging::batch_unstage_paths(&target, &snapshot, &paths)?;
+                    let msg = if count == 1 {
+                        format!("已取消暂存 {}", paths[0].display())
+                    } else {
+                        format!("已取消暂存 {count} 个文件")
+                    };
+                    Ok(Effect::IndexChanged(msg))
+                });
+            }
+            DailyAction::AddToGitignore { target, paths } => {
+                self.write(target.clone(), move || {
+                    let added = staging::add_to_gitignore(&target, &paths)?;
+                    let msg = if added == 0 {
+                        "所选路径已在 .gitignore 中".to_owned()
+                    } else if added == 1 {
+                        format!("已添加到 .gitignore：{}", paths[0].display())
+                    } else {
+                        format!("已将 {added} 项路径添加到 .gitignore")
+                    };
+                    Ok(Effect::Changed(msg))
+                });
+            }
+            DailyAction::QuickCommit {
+                snapshot,
+                message,
+                options,
+            } => {
+                if self.panel != Panel::Commit
+                    || self.daily.changes_loading
+                    || !same(&self.daily.changes, &snapshot)
+                {
+                    self.daily_error("工作区预览已更新，请重新确认");
+                    return;
+                }
+                if message.trim().is_empty() {
+                    self.daily_error("请填写提交信息");
+                    return;
+                }
+                let target = snapshot.worktree.clone();
+                self.write(target.clone(), move || {
+                    let oid = staging::quick_commit_staged(&target, &snapshot, &message, options)?;
+                    Ok(Effect::Committed { message, oid })
+                });
+            }
+            DailyAction::ConfirmCommit { id, options } => {
+                self.confirm_commit_with_options(id, options);
+            }
             DailyAction::PrepareCommit {
                 snapshot,
                 diff,
@@ -489,6 +587,22 @@ impl Workspace {
                     Ok(Effect::Changed(format!("{verb} {name}")))
                 });
             }
+        }
+    }
+
+    fn confirm_commit_with_options(&mut self, id: u64, options: CommitOptions) {
+        let Some(review) = self.daily.review.as_ref().filter(|v| v.id == id).cloned() else {
+            return;
+        };
+        if let ReviewKind::Commit {
+            preview, message, ..
+        } = review.kind
+        {
+            let target = preview.worktree.clone();
+            self.write(target.clone(), move || {
+                let oid = staging::commit_with_options(&target, &preview, &message, options)?;
+                Ok(Effect::Committed { message, oid })
+            });
         }
     }
 
@@ -702,15 +816,12 @@ impl Workspace {
                 });
             }
             if !index_only {
-                let branches_open =
-                    self.daily.branches.take().is_some() || self.daily.branches_loading;
+                self.daily.branches = None;
                 self.load_history();
                 if self.panel == Panel::ProjectFiles {
                     self.reload_tree();
                 }
-                if branches_open {
-                    self.load_branches();
-                }
+                self.load_branches();
             }
             if self.panel == Panel::Commit {
                 self.load_working_changes();
