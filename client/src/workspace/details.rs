@@ -44,15 +44,9 @@ impl Workspace {
                 self.load_dir(PathBuf::new());
                 self.load_project_git_status();
             }
-            if self.panel == Panel::Commit {
-                self.load_working_changes();
-            }
-            if self.panel == Panel::Stash {
-                self.load_stashes();
-            }
-            if self.panel == Panel::Shelf {
-                self.load_shelves();
-            }
+            self.load_working_changes();
+            self.load_stashes();
+            self.load_shelves();
         }
     }
 
@@ -108,13 +102,16 @@ impl Workspace {
         if !self.commits.iter().any(|c| c.oid == oid) {
             return;
         }
-        self.close_diff();
-        self.changes.clear();
+        let same_commit = self.selected_commit.as_deref() == Some(oid);
+        if !same_commit {
+            self.close_diff();
+            self.changes.clear();
+        }
         self.selected_commit = Some(oid.into());
         self.message = None;
         let tag = self.next_id();
         self.changes_request = tag;
-        self.changes_loading = true;
+        self.changes_loading = !same_commit || self.changes.is_empty();
         let oid = oid.to_owned();
         self.runtime
             .detail
@@ -179,6 +176,22 @@ impl Workspace {
         self.tree.clear();
         self.tree_loading = false;
         self.load_dir(PathBuf::new());
+        self.load_project_git_status();
+    }
+
+    /// Re-read the root and currently expanded directories in place without clearing the visible tree.
+    pub(super) fn refresh_tree_silently(&mut self) {
+        if self.dirs.is_empty() {
+            self.load_dir(PathBuf::new());
+            self.load_project_git_status();
+            return;
+        }
+        let mut to_reload: Vec<PathBuf> = vec![PathBuf::new()];
+        to_reload.extend(self.expanded_dirs.iter().cloned());
+        for rel in to_reload {
+            self.dir_requests.remove(&rel);
+            self.load_dir(rel);
+        }
         self.load_project_git_status();
     }
 
@@ -458,9 +471,7 @@ impl Workspace {
                 ));
                 self.load_project_git_status();
                 self.refresh_project_file_gutter(path.clone());
-                if self.panel == Panel::Commit {
-                    self.load_working_changes();
-                }
+                self.load_working_changes();
             }
             Ok(ProjectFileMutation::CreatedFile(path)) => {
                 // Ensure ancestor dirs are expanded so the newly created file is visible.
@@ -477,6 +488,7 @@ impl Workspace {
                     path.display()
                 ));
                 self.reload_tree();
+                self.load_working_changes();
                 self.open_project_file(path, true);
             }
             Ok(ProjectFileMutation::CreatedDir(path)) => {
@@ -493,6 +505,7 @@ impl Workspace {
                     path.display()
                 ));
                 self.reload_tree();
+                self.load_working_changes();
             }
             Ok(ProjectFileMutation::Renamed { from, to }) => {
                 for open in &mut self.open_project_files {
@@ -516,6 +529,7 @@ impl Workspace {
                     to.display()
                 ));
                 self.reload_tree();
+                self.load_working_changes();
             }
             Ok(ProjectFileMutation::Deleted(path)) => {
                 let to_close: Vec<PathBuf> = self
@@ -533,6 +547,7 @@ impl Workspace {
                     path.display()
                 ));
                 self.reload_tree();
+                self.load_working_changes();
             }
             Err(err) => {
                 self.message = Some(err);

@@ -13,7 +13,7 @@ use githalo::workspace::{
 use gpui::{
     AnyElement, ClipboardItem, Context, Div, FontStyle, FontWeight, HighlightStyle,
     ListHorizontalSizingBehavior, MouseButton, Pixels, Role, ScrollStrategy, SharedString,
-    StyledText, TextAlign, div, prelude::*, px, rgb, uniform_list,
+    StyledText, TextAlign, div, prelude::*, px, rems, rgb, uniform_list,
 };
 
 use super::DesktopView;
@@ -71,9 +71,9 @@ impl DesktopView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(4.))
-                    .h(px(35.))
-                    .px(px(7.))
+                    .gap(px(5.))
+                    .h(rems(2.375))
+                    .px(px(8.))
                     .flex_shrink_0()
                     .border_b_1()
                     .border_color(rgb(BORDER))
@@ -128,11 +128,11 @@ impl DesktopView {
                                         .flex()
                                         .flex_shrink_0()
                                         .items_center()
-                                        .gap(px(4.))
-                                        .h(px(25.))
-                                        .pl(px(7.))
+                                        .gap(px(5.))
+                                        .h(rems(1.6875))
+                                        .pl(px(8.))
                                         .pr(px(4.))
-                                        .rounded(px(4.))
+                                        .rounded(px(5.))
                                         .border_1()
                                         .border_color(rgb(if is_active {
                                             ACTIVE_BORDER
@@ -302,8 +302,8 @@ impl DesktopView {
                                 },
                                 false,
                             )
-                            .h(px(23.))
-                            .text_size(px(11.5))
+                            .h(rems(1.5625))
+                            .text_size(rems(0.76))
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.show_commit_details = !view.show_commit_details;
                                 view.save_preferences();
@@ -408,137 +408,135 @@ impl DesktopView {
                 "Cherry-pick selected commit onto current branch…",
             )
         };
-        let toolbar = div()
-            .h(px(36.))
-            .px(px(8.))
-            .gap(px(6.))
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(icon(Icon::Search, SUBTLE))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .max_w(px(260.))
-                    .child(self.search.clone()),
-            )
-            .when(filtered, |row| {
-                row.child(
-                    icon_button(
-                        "clear-search",
-                        Icon::Close,
-                        tr("清除提交搜索", "Clear search"),
-                    )
-                    .on_click(cx.listener(|view, _, window, cx| {
-                        view.search
-                            .update(cx, |search, cx| search.clear(window, cx))
-                    })),
-                )
-            })
-            .when_some(self.workspace.branch_filter.clone(), |row, active_ref| {
-                let display = short_branch_display(&active_ref).to_owned();
-                row.child(
-                    div()
-                        .flex()
-                        .flex_shrink_0()
-                        .items_center()
-                        .gap(px(5.))
-                        .h(px(23.))
-                        .pl(px(8.))
-                        .pr(px(4.))
-                        .rounded(px(4.))
-                        .bg(rgb(ACCENT_BG))
-                        .border_1()
-                        .border_color(rgb(ACCENT_BORDER))
-                        .text_size(px(11.5))
-                        .child(div().text_color(rgb(SUBTLE)).child(tr("分支:", "Branch:")))
-                        .child(
-                            elide(display.clone())
-                                .max_w(px(160.))
-                                .text_color(rgb(LINK))
-                                .font_weight(FontWeight::MEDIUM),
-                        )
-                        .child(
-                            div()
-                                .id("clear-branch-filter-chip")
-                                .role(Role::Button)
-                                .aria_label(tr("清除分支筛选", "Clear branch filter"))
-                                .tab_index(0)
-                                .tooltip(tooltip(
-                                    tr("清除分支筛选，显示全部分支", "Clear branch filter")
-                                        .to_owned(),
-                                ))
-                                .size(px(16.))
-                                .rounded(px(3.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .text_color(rgb(MUTED))
-                                .hover(|s| s.bg(rgb(ACTIVE)).text_color(rgb(TEXT)))
-                                .child("×")
-                                .on_click(cx.listener(|view, _, _, cx| {
-                                    view.dispatch(Action::SetBranchFilter(None), cx);
-                                })),
-                        ),
-                )
-            })
-            .child(div().flex_1().min_w_0())
-            .child(
-                command_button(
-                    "toolbar-cherry-pick",
-                    "Cherry-pick…",
-                    false,
-                    cherry_pick_enabled,
-                )
-                .h(px(25.))
+        let toolbar =
+            div()
+                .h(rems(2.375))
                 .px(px(8.))
-                .text_size(px(11.5))
-                .when(!cherry_pick_enabled, |button| {
-                    button.tooltip(tooltip(cherry_pick_tip.to_owned()))
-                })
-                .child(icon(
-                    Icon::CherryPick,
-                    if cherry_pick_enabled { TEXT } else { SUBTLE },
-                ))
-                .when(cherry_pick_enabled, |button| {
-                    let oid = selected_oid.clone().unwrap_or_default();
-                    button.on_click(cx.listener(move |view, _, window, cx| {
-                        view.open_cherry_pick_dialog(oid.clone(), window, cx);
-                    }))
-                }),
-            )
-            .when(can_load_more, |row| {
-                row.child(
-                    command_button(
-                        "load-more-history",
-                        tr("加载更多", "Load More"),
-                        false,
-                        true,
-                    )
-                    .h(px(24.))
-                    .px(px(7.))
-                    .text_size(px(11.))
-                    .on_click(cx.listener(|view, _, _, cx| {
-                        view.dispatch(Action::LoadMoreHistory, cx);
-                    })),
-                )
-            })
-            .when(width >= px(380.), |row| {
-                row.child(
+                .gap(px(6.))
+                .flex()
+                .flex_shrink_0()
+                .items_center()
+                .border_b_1()
+                .border_color(rgb(BORDER))
+                .child(icon(Icon::Search, SUBTLE))
+                .child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(rgb(SUBTLE))
-                        .child(if is_zh() {
+                        .flex_1()
+                        .min_w_0()
+                        .max_w(px(260.))
+                        .child(self.search.clone()),
+                )
+                .when(filtered, |row| {
+                    row.child(
+                        icon_button(
+                            "clear-search",
+                            Icon::Close,
+                            tr("清除提交搜索", "Clear search"),
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.search
+                                .update(cx, |search, cx| search.clear(window, cx))
+                        })),
+                    )
+                })
+                .when_some(self.workspace.branch_filter.clone(), |row, active_ref| {
+                    let display = short_branch_display(&active_ref).to_owned();
+                    row.child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(5.))
+                            .h(px(23.))
+                            .pl(px(8.))
+                            .pr(px(4.))
+                            .rounded(px(4.))
+                            .bg(rgb(ACCENT_BG))
+                            .border_1()
+                            .border_color(rgb(ACCENT_BORDER))
+                            .text_size(px(11.5))
+                            .child(div().text_color(rgb(SUBTLE)).child(tr("分支:", "Branch:")))
+                            .child(
+                                elide(display.clone())
+                                    .max_w(px(160.))
+                                    .text_color(rgb(LINK))
+                                    .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(
+                                div()
+                                    .id("clear-branch-filter-chip")
+                                    .role(Role::Button)
+                                    .aria_label(tr("清除分支筛选", "Clear branch filter"))
+                                    .tab_index(0)
+                                    .tooltip(tooltip(
+                                        tr("清除分支筛选，显示全部分支", "Clear branch filter")
+                                            .to_owned(),
+                                    ))
+                                    .size(px(16.))
+                                    .rounded(px(3.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .cursor_pointer()
+                                    .text_color(rgb(MUTED))
+                                    .hover(|s| s.bg(rgb(ACTIVE)).text_color(rgb(TEXT)))
+                                    .child("×")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.dispatch(Action::SetBranchFilter(None), cx);
+                                    })),
+                            ),
+                    )
+                })
+                .child(div().flex_1().min_w_0())
+                .child(
+                    command_button(
+                        "toolbar-cherry-pick",
+                        "Cherry-pick…",
+                        false,
+                        cherry_pick_enabled,
+                    )
+                    .h(rems(1.625))
+                    .px(px(9.))
+                    .text_size(rems(0.76))
+                    .when(!cherry_pick_enabled, |button| {
+                        button.tooltip(tooltip(cherry_pick_tip.to_owned()))
+                    })
+                    .child(icon(
+                        Icon::CherryPick,
+                        if cherry_pick_enabled { TEXT } else { SUBTLE },
+                    ))
+                    .when(cherry_pick_enabled, |button| {
+                        let oid = selected_oid.clone().unwrap_or_default();
+                        button.on_click(cx.listener(move |view, _, window, cx| {
+                            view.open_cherry_pick_dialog(oid.clone(), window, cx);
+                        }))
+                    }),
+                )
+                .when(can_load_more, |row| {
+                    row.child(
+                        command_button(
+                            "load-more-history",
+                            tr("加载更多", "Load More"),
+                            false,
+                            true,
+                        )
+                        .h(rems(1.5625))
+                        .px(px(8.))
+                        .text_size(rems(0.74))
+                        .on_click(cx.listener(|view, _, _, cx| {
+                            view.dispatch(Action::LoadMoreHistory, cx);
+                        })),
+                    )
+                })
+                .when(width >= px(380.), |row| {
+                    row.child(div().text_size(rems(0.74)).text_color(rgb(SUBTLE)).child(
+                        if is_zh() {
                             format!("{count} 条提交")
                         } else {
                             format!("{count} commits")
-                        }),
-                )
-            });
+                        },
+                    ))
+                });
         let content = if count == 0 {
             let message = if self.workspace.history_loading {
                 tr("正在读取最近提交…", "Loading recent commits…")
@@ -1197,7 +1195,7 @@ impl DesktopView {
 
 fn pane_heading(title: &'static str, subtitle: Option<String>) -> Div {
     div()
-        .h(px(34.))
+        .h(rems(2.375))
         .px(px(10.))
         .gap(px(7.))
         .flex()
@@ -1209,7 +1207,7 @@ fn pane_heading(title: &'static str, subtitle: Option<String>) -> Div {
         .children(subtitle.map(|subtitle| {
             div()
                 .text_color(rgb(SUBTLE))
-                .text_size(px(11.))
+                .text_size(rems(0.74))
                 .child(subtitle)
         }))
 }
@@ -1220,10 +1218,10 @@ fn log_entry() -> Div {
         .items_center()
         .w_full()
         .min_w_0()
-        .h(px(25.))
+        .h(rems(1.75))
         .pl(px(4.))
-        .pr(px(9.))
-        .gap(px(3.))
+        .pr(px(10.))
+        .gap(px(4.))
 }
 
 fn commit_columns(commit: &Commit, width: Pixels) -> impl IntoElement {
@@ -1332,11 +1330,11 @@ fn file_row(depth: usize) -> Div {
         .items_center()
         .w_full()
         .min_w_0()
-        .h(px(22.))
-        .pl(px(4. + 15. * depth.min(10) as f32))
-        .pr(px(5.))
-        .gap(px(4.))
-        .rounded(px(3.))
+        .h(rems(1.625))
+        .pl(px(5. + 15. * depth.min(10) as f32))
+        .pr(px(6.))
+        .gap(px(5.))
+        .rounded(px(4.))
 }
 
 #[derive(Default)]
@@ -1625,7 +1623,7 @@ impl SplitCell {
             .w_1_2()
             .flex_shrink_0()
             .min_w_0()
-            .h(px(20.))
+            .h(rems(1.375))
             .flex()
             .items_center()
             .gap(px(4.))
@@ -1675,10 +1673,10 @@ impl SplitDiffRow {
             .items_center()
             .w_full()
             .min_w_0()
-            .h(px(20.))
+            .h(rems(1.375))
             .font_family(mono_font())
-            .text_size(px(11.5))
-            .line_height(px(17.))
+            .text_size(rems(0.78))
+            .line_height(rems(1.2))
             .whitespace_nowrap();
         match self {
             Self::Banner {
@@ -1702,7 +1700,7 @@ impl SplitDiffRow {
 
 pub(super) fn split_column_header(left_label: &'static str, right_label: &'static str) -> Div {
     div()
-        .h(px(23.))
+        .h(rems(1.5625))
         .flex_shrink_0()
         .w_full()
         .flex()
@@ -1710,7 +1708,7 @@ pub(super) fn split_column_header(left_label: &'static str, right_label: &'stati
         .bg(rgb(CHROME))
         .border_b_1()
         .border_color(rgb(BORDER))
-        .text_size(px(11.))
+        .text_size(rems(0.74))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(SUBTLE))
         .child(div().w_1_2().flex_shrink_0().px(px(10.)).child(left_label))
@@ -1791,13 +1789,13 @@ impl DiffLine {
             .flex()
             .items_center()
             .w_full()
-            .h(px(20.))
+            .h(rems(1.375))
             .gap(px(4.))
             .pr(px(12.))
             .bg(rgb(self.background))
             .font_family(mono_font())
-            .text_size(px(11.5))
-            .line_height(px(17.))
+            .text_size(rems(0.78))
+            .line_height(rems(1.2))
             .whitespace_nowrap()
             .child(number(self.old))
             .child(number(self.new))

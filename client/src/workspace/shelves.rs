@@ -50,9 +50,7 @@ pub struct ShelfState {
 
 impl ShelfState {
     pub(super) fn suspend_reads(&mut self) {
-        self.list_request = 0;
         self.diff_request = 0;
-        self.loading = false;
         self.diff_loading = false;
     }
 }
@@ -68,9 +66,6 @@ fn event(e: ShelfEvent) -> Event {
 
 impl Workspace {
     pub(super) fn load_shelves(&mut self) {
-        if self.panel != Panel::Shelf {
-            return;
-        }
         let Some(target) = self
             .current_target()
             .filter(|target| !self.writing(target.id))
@@ -196,7 +191,9 @@ impl Workspace {
                         self.shelves.snapshot = None;
                         self.shelves.selected = None;
                         self.close_shelf_diff();
-                        self.shelves.error = Some(err);
+                        if self.panel == Panel::Shelf {
+                            self.shelves.error = Some(err);
+                        }
                         return;
                     }
                 };

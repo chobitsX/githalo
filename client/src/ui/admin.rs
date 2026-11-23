@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
 use githalo::branch_ops::PullStrategy;
-use githalo::i18n::{self, LanguagePreference, Locale, tr};
+use githalo::i18n::{self, LanguagePreference, Locale, UI_SCALE_PRESETS, tr};
 use githalo::workspace::{Action, GroupId, RepoOpAction};
 use githalo::worktree::WorktreeTarget;
 use gpui::{
     AnyElement, Context, Div, Entity, Focusable, FontWeight, Pixels, Role, SharedString, Toggled,
-    Window, div, prelude::*, px, rgb,
+    Window, div, prelude::*, px, rems, rgb,
 };
 
 use super::components::*;
@@ -1747,6 +1747,62 @@ impl DesktopView {
                             .text_size(px(11.5))
                             .text_color(rgb(SUBTLE))
                             .child(system_detected),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(rems(0.78))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(MUTED))
+                            .child(tr("界面缩放（Interface Scale）", "Interface Scale")),
+                    )
+                    .child(div().flex().gap(px(6.)).children(
+                        UI_SCALE_PRESETS.into_iter().enumerate().map(|(idx, preset)| {
+                            let selected = self.ui_scale == preset;
+                            div()
+                                .id(("settings-ui-scale", idx))
+                                .role(Role::Button)
+                                .aria_selected(selected)
+                                .tab_index(0)
+                                .flex_1()
+                                .px(px(8.))
+                                .py(px(6.))
+                                .rounded(px(5.))
+                                .border_1()
+                                .border_color(rgb(if selected { ACCENT_BORDER } else { BORDER }))
+                                .bg(rgb(if selected { ACCENT_BG } else { CARD }))
+                                .text_size(rems(0.78))
+                                .text_color(rgb(if selected { LINK } else { TEXT }))
+                                .flex()
+                                .justify_center()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(rgb(if selected { ACCENT_BG } else { HOVER })))
+                                .child(format!("{preset}%"))
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.set_ui_scale(preset, window, cx);
+                                }))
+                        }),
+                    ))
+                    .child(
+                        div()
+                            .text_size(rems(0.74))
+                            .text_color(rgb(SUBTLE))
+                            .child(if cfg!(target_os = "macos") {
+                                tr(
+                                    "文字、行高与矢量图标等比无损缩放；也可随时按 ⌘= / ⌘- / ⌘0 调节",
+                                    "Scales typography, row heights and vector icons proportionally; use ⌘= / ⌘- / ⌘0 anytime",
+                                )
+                            } else {
+                                tr(
+                                    "文字、行高与矢量图标等比无损缩放；也可随时按 Ctrl+= / Ctrl+- / Ctrl+0 调节",
+                                    "Scales typography, row heights and vector icons proportionally; use Ctrl+= / Ctrl+- / Ctrl+0 anytime",
+                                )
+                            }),
                     ),
             )
             .child(

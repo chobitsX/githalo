@@ -14,7 +14,7 @@ use githalo::worktree::WorktreeTarget;
 use gpui::{
     AnyElement, ClipboardItem, Context, CursorStyle, Div, Entity, FontWeight,
     ListHorizontalSizingBehavior, MouseButton, Pixels, Role, Toggled, UniformListScrollHandle,
-    Window, div, prelude::*, px, rgb, uniform_list,
+    Window, div, prelude::*, px, rems, rgb, uniform_list,
 };
 
 use super::components::*;
@@ -965,7 +965,7 @@ impl DesktopView {
                     }),
                 )
                 .child(div().flex_1())
-                .when(state.changes_loading, |bar| {
+                .when(state.changes_loading && state.changes.is_none(), |bar| {
                     bar.child(
                         div()
                             .text_size(px(11.))
@@ -1352,12 +1352,12 @@ impl DesktopView {
                 let title = kind.title();
                 div()
                     .id(("commit-group", row_idx))
-                    .h(px(26.))
+                    .h(rems(1.625))
                     .w_full()
                     .min_w_0()
                     .px(px(4.))
                     .gap(px(5.))
-                    .rounded(px(4.))
+                    .rounded(px(5.))
                     .flex()
                     .items_center()
                     .cursor_pointer()
@@ -1388,7 +1388,7 @@ impl DesktopView {
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(12.))
+                            .text_size(rems(0.8125))
                             .text_color(rgb(TEXT))
                             .child(title),
                     )
@@ -1446,13 +1446,13 @@ impl DesktopView {
                 };
                 div()
                     .id(("commit-repo-header", row_idx))
-                    .h(px(25.))
+                    .h(rems(1.625))
                     .w_full()
                     .min_w_0()
                     .pl(px(16.))
                     .pr(px(6.))
                     .gap(px(5.))
-                    .rounded(px(4.))
+                    .rounded(px(5.))
                     .flex()
                     .items_center()
                     .cursor_pointer()
@@ -1490,13 +1490,13 @@ impl DesktopView {
                     .child(
                         elide(repo_name.clone())
                             .font_weight(FontWeight::MEDIUM)
-                            .text_size(px(12.))
+                            .text_size(rems(0.8125))
                             .text_color(rgb(TEXT)),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_size(px(11.))
+                            .text_size(rems(0.72))
                             .text_color(rgb(SUBTLE))
                             .child(count_suffix(*file_count)),
                     )
@@ -1506,11 +1506,11 @@ impl DesktopView {
                             .max_w(px(110.))
                             .px(px(5.))
                             .py(px(1.))
-                            .rounded(px(3.))
+                            .rounded(px(4.))
                             .bg(rgb(CARD))
                             .border_1()
                             .border_color(rgb(BORDER))
-                            .text_size(px(10.5))
+                            .text_size(rems(0.7))
                             .text_color(rgb(MUTED))
                             .child(elide(branch.clone())),
                     )
@@ -1542,13 +1542,13 @@ impl DesktopView {
                 let indent = 6. + (*depth as f32 * 14.);
                 div()
                     .id(("commit-dir", row_idx))
-                    .h(px(24.))
+                    .h(rems(1.625))
                     .w_full()
                     .min_w_0()
                     .pl(px(indent))
                     .pr(px(6.))
                     .gap(px(4.))
-                    .rounded(px(4.))
+                    .rounded(px(5.))
                     .flex()
                     .items_center()
                     .cursor_pointer()
@@ -1581,13 +1581,13 @@ impl DesktopView {
                         elide(display_name.clone())
                             .flex_1()
                             .min_w_0()
-                            .text_size(px(12.))
+                            .text_size(rems(0.8125))
                             .text_color(rgb(TEXT)),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_size(px(10.5))
+                            .text_size(rems(0.7))
                             .text_color(rgb(SUBTLE))
                             .child(count_suffix(*file_count)),
                     )
@@ -1683,13 +1683,13 @@ impl DesktopView {
                     .aria_label(format!("{} {}", entry.path.display(), description))
                     .aria_selected(selected)
                     .tab_index(0)
-                    .h(px(24.))
+                    .h(rems(1.625))
                     .w_full()
                     .min_w_0()
                     .pl(px(indent))
                     .pr(px(6.))
                     .gap(px(5.))
-                    .rounded(px(4.))
+                    .rounded(px(5.))
                     .flex()
                     .items_center()
                     .cursor_pointer()
@@ -1722,18 +1722,18 @@ impl DesktopView {
                             .overflow_hidden()
                             .child(
                                 elide(display_title)
-                                    .text_size(px(12.))
+                                    .text_size(rems(0.8125))
                                     .text_color(rgb(color))
                                     .when(is_deleted, |t| t.line_through()),
                             )
                             .when_some(parent_hint, |r, dir| {
-                                r.child(elide(dir).text_size(px(11.)).text_color(rgb(SUBTLE)))
+                                r.child(elide(dir).text_size(rems(0.72)).text_color(rgb(SUBTLE)))
                             }),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
-                            .text_size(px(10.5))
+                            .text_size(rems(0.7))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(color))
                             .child(mark),
@@ -2579,14 +2579,14 @@ impl DesktopView {
             .aria_toggled(toggled)
             .tab_index(0)
             .w_full()
-            .h(px(20.))
+            .h(rems(1.375))
             .px(px(9.))
             .flex()
             .items_center()
             .gap(px(6.))
             .bg(rgb(if selected { ACTIVE } else { 0x202b3c }))
             .text_color(rgb(LINK))
-            .text_size(px(11.5))
+            .text_size(rems(0.76))
             .whitespace_nowrap()
             .cursor_pointer()
             .hover(|row| row.bg(rgb(ACTIVE)))

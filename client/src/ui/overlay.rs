@@ -149,6 +149,8 @@ pub(super) enum Dialog {
     Tags(TagsDialog),
     AdoptNested(AdoptNestedDialog),
     Settings,
+    About,
+    Shortcuts,
 }
 
 impl DesktopView {
@@ -296,7 +298,7 @@ impl DesktopView {
         .detach();
     }
 
-    fn open_group_name(
+    pub(super) fn open_group_name(
         &mut self,
         group: Option<GroupId>,
         window: &mut Window,
@@ -1134,9 +1136,21 @@ impl DesktopView {
             }
             Dialog::Settings => {
                 container = container
-                    .aria_label("视图与偏好设置")
+                    .aria_label(tr("视图与偏好设置", "Settings"))
                     .w(px(540.))
                     .child(self.settings_dialog(cx));
+            }
+            Dialog::About => {
+                container = container
+                    .aria_label(tr("关于 GitHalo", "About GitHalo"))
+                    .w(px(460.))
+                    .child(self.about_dialog(cx));
+            }
+            Dialog::Shortcuts => {
+                container = container
+                    .aria_label(tr("快捷键一览", "Keyboard Shortcuts"))
+                    .w(px(560.))
+                    .child(self.shortcuts_dialog(cx));
             }
         }
         container

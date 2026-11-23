@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, App, Bounds, Context, Div, ElementId, Hsla, PathBuilder, Pixels, Point, Role,
-    SharedString, Stateful, Window, canvas, div, fill, point, prelude::*, px, rgb, size,
+    SharedString, Stateful, Window, canvas, div, fill, point, prelude::*, px, rems, rgb, size,
 };
 
 pub(super) const CHROME: u32 = 0x242629;
@@ -69,8 +69,10 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
         move |bounds, _, window, _| {
             let origin = bounds.origin;
             let color: Hsla = rgb(color).into();
-            let at = |x, y| origin + point(px(x), px(y));
-            let mut stroke = PathBuilder::stroke(px(1.2));
+            let s = (bounds.size.width / px(16.)).max(0.5);
+            let at = |x, y| origin + point(px(x * s), px(y * s));
+            let rad = |r| point(px(r * s), px(r * s));
+            let mut stroke = PathBuilder::stroke(px(1.25 * s));
             let mut fill_path: Option<PathBuilder> = None;
             let mut draw = |vertices: &[(f32, f32)]| {
                 if let Some((&(x, y), rest)) = vertices.split_first() {
@@ -139,15 +141,15 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                         (2., 8.),
                     ]);
                     stroke.move_to(at(9.8, 8.));
-                    stroke.arc_to(point(px(1.8), px(1.8)), px(0.), false, true, at(6.2, 8.));
-                    stroke.arc_to(point(px(1.8), px(1.8)), px(0.), false, true, at(9.8, 8.));
+                    stroke.arc_to(rad(1.8), px(0.), false, true, at(6.2, 8.));
+                    stroke.arc_to(rad(1.8), px(0.), false, true, at(9.8, 8.));
                     &[]
                 }
                 Icon::HistoryClock => {
                     draw(&[(8., 5.2), (8., 8.2), (10.5, 9.6)]);
                     stroke.move_to(at(13., 8.));
-                    stroke.arc_to(point(px(5.), px(5.)), px(0.), false, true, at(3., 8.));
-                    stroke.arc_to(point(px(5.), px(5.)), px(0.), false, true, at(13., 8.));
+                    stroke.arc_to(rad(5.), px(0.), false, true, at(3., 8.));
+                    stroke.arc_to(rad(5.), px(0.), false, true, at(13., 8.));
                     &[]
                 }
                 Icon::Rollback => {
@@ -248,8 +250,8 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                 Icon::Search => {
                     draw(&[(9.8, 10.), (13.4, 13.6)]);
                     stroke.move_to(at(10.8, 6.7));
-                    stroke.arc_to(point(px(4.), px(4.)), px(0.), false, true, at(2.8, 6.7));
-                    stroke.arc_to(point(px(4.), px(4.)), px(0.), false, true, at(10.8, 6.7));
+                    stroke.arc_to(rad(4.), px(0.), false, true, at(2.8, 6.7));
+                    stroke.arc_to(rad(4.), px(0.), false, true, at(10.8, 6.7));
                     &[]
                 }
                 Icon::Settings => {
@@ -262,8 +264,8 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                     draw(&[(12.1, 3.9), (10.8, 5.2)]);
                     draw(&[(5.2, 10.8), (3.9, 12.1)]);
                     stroke.move_to(at(10.4, 8.));
-                    stroke.arc_to(point(px(2.4), px(2.4)), px(0.), false, true, at(5.6, 8.));
-                    stroke.arc_to(point(px(2.4), px(2.4)), px(0.), false, true, at(10.4, 8.));
+                    stroke.arc_to(rad(2.4), px(0.), false, true, at(5.6, 8.));
+                    stroke.arc_to(rad(2.4), px(0.), false, true, at(10.4, 8.));
                     &[]
                 }
                 Icon::Star => {
@@ -321,8 +323,8 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                     draw(&[(2., 8.), (4.6, 8.)]);
                     draw(&[(11.4, 8.), (14., 8.)]);
                     stroke.move_to(at(12.2, 8.));
-                    stroke.arc_to(point(px(4.2), px(4.2)), px(0.), false, true, at(3.8, 8.));
-                    stroke.arc_to(point(px(4.2), px(4.2)), px(0.), false, true, at(12.2, 8.));
+                    stroke.arc_to(rad(4.2), px(0.), false, true, at(3.8, 8.));
+                    stroke.arc_to(rad(4.2), px(0.), false, true, at(12.2, 8.));
                     &[(8., 8.)]
                 }
                 Icon::Trash => {
@@ -343,11 +345,11 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                 window.paint_path(path, color);
             }
             for &(x, y) in dots {
-                dot(window, at(x, y), px(2.5), color);
+                dot(window, at(x, y), px(2.5 * s), color);
             }
         },
     )
-    .size(px(16.))
+    .size(rems(1.0625))
     .flex_shrink_0()
 }
 
@@ -379,12 +381,12 @@ pub(super) fn icon_button(id: impl Into<ElementId>, kind: Icon, label: &str) -> 
         .tab_index(0)
         .focus_visible(|s| s.bg(rgb(HOVER)).border_color(rgb(ACTIVE_BORDER)))
         .tooltip(tooltip(label.to_owned()))
-        .size(px(25.))
+        .size(rems(1.6875))
         .flex()
         .flex_shrink_0()
         .items_center()
         .justify_center()
-        .rounded(px(4.))
+        .rounded(px(5.))
         .cursor_pointer()
         .hover(|s| s.bg(rgb(HOVER)))
         .child(icon(kind, MUTED))
@@ -409,14 +411,14 @@ pub(super) fn command_button(
         .id(id)
         .role(Role::Button)
         .aria_label(text.clone())
-        .h(px(27.))
-        .px(px(9.))
+        .h(rems(1.75))
+        .px(px(10.))
         .gap(px(5.))
         .flex()
         .items_center()
         .justify_center()
         .flex_shrink_0()
-        .rounded(px(4.))
+        .rounded(px(5.))
         .border_1()
         .border_color(rgb(if primary && enabled {
             ACTIVE_BORDER
@@ -445,14 +447,14 @@ pub(super) fn danger_button(
         .id(id)
         .role(Role::Button)
         .aria_label(text.clone())
-        .h(px(27.))
-        .px(px(9.))
+        .h(rems(1.75))
+        .px(px(10.))
         .gap(px(5.))
         .flex()
         .items_center()
         .justify_center()
         .flex_shrink_0()
-        .rounded(px(4.))
+        .rounded(px(5.))
         .border_1()
         .border_color(rgb(if enabled { DANGER_BORDER } else { BORDER }))
         .bg(rgb(if enabled { DANGER_BG } else { CHROME }))
@@ -476,8 +478,8 @@ pub(super) fn pill(text: impl Into<SharedString>, bg: u32, border: u32, fg: u32)
         .border_1()
         .border_color(rgb(border))
         .bg(rgb(bg))
-        .text_size(px(10.5))
-        .line_height(px(14.))
+        .text_size(rems(0.7))
+        .line_height(rems(0.95))
         .text_color(rgb(fg))
         .child(text.into())
 }
@@ -496,10 +498,10 @@ pub(super) fn workspace_tab(
         .flex()
         .flex_shrink_0()
         .items_center()
-        .gap(px(4.))
-        .h(px(25.))
-        .px(px(7.))
-        .rounded(px(4.))
+        .gap(px(5.))
+        .h(rems(1.6875))
+        .px(px(9.))
+        .rounded(px(5.))
         .border_1()
         .border_color(rgb(if active { ACTIVE_BORDER } else { PANEL }))
         .bg(rgb(if active { 0x203351 } else { PANEL }))
@@ -529,12 +531,12 @@ impl Render for Tooltip {
             .bg(rgb(POPUP))
             .border_1()
             .border_color(rgb(BORDER))
-            .rounded(px(4.))
+            .rounded(px(6.))
             .px(px(9.))
             .py(px(6.))
             .max_w(px(480.))
-            .text_size(px(12.))
-            .line_height(px(18.))
+            .text_size(rems(0.78))
+            .line_height(rems(1.15))
             .text_color(rgb(TEXT))
             .child(self.0.clone())
     }
@@ -555,6 +557,6 @@ pub(super) fn gutter_line(window: &mut Window, x: Pixels, top: Pixels, height: P
 pub(super) fn optional_icon(kind: Option<Icon>, color: u32) -> AnyElement {
     match kind {
         Some(kind) => icon(kind, color).into_any_element(),
-        None => div().size(px(16.)).flex_shrink_0().into_any_element(),
+        None => div().size(rems(1.0625)).flex_shrink_0().into_any_element(),
     }
 }

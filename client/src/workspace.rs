@@ -961,17 +961,11 @@ impl Workspace {
             self.load_cherry_pick_state();
             self.load_repo_op_states();
             if self.panel == Panel::ProjectFiles {
-                self.reload_tree();
+                self.refresh_tree_silently();
             }
-            if self.panel == Panel::Commit {
-                self.load_working_changes();
-            }
-            if self.panel == Panel::Stash {
-                self.load_stashes();
-            }
-            if self.panel == Panel::Shelf {
-                self.load_shelves();
-            }
+            self.load_working_changes();
+            self.load_stashes();
+            self.load_shelves();
         }
         for id in reads {
             self.start_status(id);

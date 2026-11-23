@@ -1,4 +1,5 @@
 mod admin;
+mod app_menu;
 mod branches;
 mod cherry_pick;
 mod code_editor;
@@ -19,16 +20,19 @@ mod stash;
 mod text_field;
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use githalo::branch_ops::{PullStrategy, RemoteOperation};
-use githalo::i18n::{self, AppPreferences, BranchClickMode, LanguagePreference, tr};
+use githalo::i18n::{
+    self, AppPreferences, BranchClickMode, LanguagePreference, normalize_ui_scale, tr,
+};
 use githalo::workspace::{
     Action, DailyAction, GroupId, Panel, Workspace, WorktreeId, database_path,
 };
 use githalo::worktree::WorktreeTarget;
 use gpui::{
-    App, Context, CursorStyle, Div, Entity, FocusHandle, Focusable, KeyBinding, Menu, MenuItem,
-    MouseButton, Pixels, Role, UniformListScrollHandle, Window, actions, div, prelude::*, px, rgb,
+    App, Context, CursorStyle, Div, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
+    Pixels, Role, UniformListScrollHandle, Window, actions, div, prelude::*, px, rems, rgb,
 };
 
 use components::*;
@@ -63,6 +67,7 @@ actions!(
 pub fn bind_keys(cx: &mut App) {
     text_field::bind_keys(cx);
     code_editor::bind_keys(cx);
+    app_menu::bind_keys(cx);
     let mod_key = if cfg!(target_os = "macos") {
         "cmd"
     } else {
@@ -100,19 +105,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{mod_key}-q"), Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
-    set_app_menus(cx);
-}
-
-pub(super) fn set_app_menus(cx: &mut App) {
-    cx.set_menus([
-        Menu::new("GitHalo").items([MenuItem::action(tr("退出 GitHalo", "Quit GitHalo"), Quit)]),
-        Menu::new(tr("编辑", "Edit")).items([
-            MenuItem::action(tr("剪切", "Cut"), text_field::Cut),
-            MenuItem::action(tr("复制", "Copy"), text_field::Copy),
-            MenuItem::action(tr("粘贴", "Paste"), text_field::Paste),
-            MenuItem::action(tr("全选", "Select All"), text_field::SelectAll),
-        ]),
-    ]);
+    app_menu::set_menus(cx, app_menu::AppMenuState::default());
 }
 
 pub struct DesktopView {
@@ -140,6 +133,7 @@ pub struct DesktopView {
     shelf_ui: ShelfUi,
     pub(super) compare_base: Option<(WorktreeId, String)>,
     pub(super) language_pref: LanguagePreference,
+    pub(super) ui_scale: u16,
     pub(super) default_pull_strategy: PullStrategy,
     pub(super) show_commit_details: bool,
     pub(super) diff_side_by_side: bool,
@@ -157,12 +151,15 @@ pub struct DesktopView {
     pub(super) commit_show_conventional: bool,
     pub(super) commit_diff_expanded: bool,
     pub(super) pending_push_commit: Option<WorktreeTarget>,
+    last_activation_reload: Option<Instant>,
 }
 
 impl DesktopView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prefs = AppPreferences::load(&AppPreferences::default_path());
         i18n::apply_preference(prefs.language);
+        let ui_scale = normalize_ui_scale(prefs.ui_scale);
+        window.set_rem_size(px(16. * (ui_scale as f32 / 100.)));
         let (workspace, updates) = Workspace::new(database_path());
         let search = cx.new(|cx| {
             TextField::new(
@@ -203,7 +200,14 @@ impl DesktopView {
         .detach();
         cx.observe_window_activation(window, |view, window, cx| {
             if window.is_window_active() && !view.path_prompt_open {
-                view.dispatch(Action::Reload, cx);
+                let now = Instant::now();
+                let should_reload = view
+                    .last_activation_reload
+                    .is_none_or(|prev| now.duration_since(prev) >= Duration::from_secs(3));
+                if should_reload {
+                    view.last_activation_reload = Some(now);
+                    view.dispatch(Action::Reload, cx);
+                }
             }
         })
         .detach();
@@ -212,7 +216,7 @@ impl DesktopView {
         let file_viewer_ui = file_viewer::FileViewerUi::new(window, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        Self {
+        let view = Self {
             workspace,
             focus,
             overlay_focus: cx.focus_handle(),
@@ -237,6 +241,7 @@ impl DesktopView {
             shelf_ui: ShelfUi::default(),
             compare_base: None,
             language_pref: prefs.language,
+            ui_scale,
             default_pull_strategy: prefs.pull_strategy,
             show_commit_details: prefs.show_commit_details,
             diff_side_by_side: prefs.diff_side_by_side,
@@ -254,12 +259,16 @@ impl DesktopView {
             commit_show_conventional: prefs.commit_show_conventional,
             commit_diff_expanded: false,
             pending_push_commit: None,
-        }
+            last_activation_reload: Some(Instant::now()),
+        };
+        view.refresh_app_menus(cx);
+        view
     }
 
     pub(super) fn save_preferences(&self) {
         let prefs = AppPreferences {
             language: self.language_pref,
+            ui_scale: self.ui_scale,
             pull_strategy: self.default_pull_strategy,
             show_commit_details: self.show_commit_details,
             diff_side_by_side: self.diff_side_by_side,
@@ -279,10 +288,32 @@ impl DesktopView {
         let _ = prefs.save(&AppPreferences::default_path());
     }
 
+    pub(super) fn set_ui_scale(&mut self, scale: u16, window: &mut Window, cx: &mut Context<Self>) {
+        let normalized = normalize_ui_scale(scale);
+        if self.ui_scale != normalized {
+            self.ui_scale = normalized;
+            window.set_rem_size(px(16. * (normalized as f32 / 100.)));
+            self.save_preferences();
+            self.refresh_app_menus(cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn step_ui_scale(
+        &mut self,
+        delta: i16,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let next = (self.ui_scale as i16 + delta).clamp(90, 130) as u16;
+        self.set_ui_scale(next, window, cx);
+    }
+
     pub(super) fn set_diff_side_by_side(&mut self, side_by_side: bool, cx: &mut Context<Self>) {
         if self.diff_side_by_side != side_by_side {
             self.diff_side_by_side = side_by_side;
             self.save_preferences();
+            self.refresh_app_menus(cx);
             cx.notify();
         }
     }
@@ -304,12 +335,12 @@ impl DesktopView {
                     .role(Role::Button)
                     .aria_selected(split)
                     .tab_index(0)
-                    .h(px(21.))
-                    .px(px(7.))
+                    .h(rems(1.4375))
+                    .px(px(8.))
                     .rounded(px(4.))
                     .flex()
                     .items_center()
-                    .text_size(px(11.))
+                    .text_size(rems(0.75))
                     .cursor_pointer()
                     .bg(rgb(if split { ACTIVE } else { CHROME }))
                     .text_color(rgb(if split { TEXT } else { SUBTLE }))
@@ -325,12 +356,12 @@ impl DesktopView {
                     .role(Role::Button)
                     .aria_selected(!split)
                     .tab_index(0)
-                    .h(px(21.))
-                    .px(px(7.))
+                    .h(rems(1.4375))
+                    .px(px(8.))
                     .rounded(px(4.))
                     .flex()
                     .items_center()
-                    .text_size(px(11.))
+                    .text_size(rems(0.75))
                     .cursor_pointer()
                     .bg(rgb(if !split { ACTIVE } else { CHROME }))
                     .text_color(rgb(if !split { TEXT } else { SUBTLE }))
@@ -358,7 +389,7 @@ impl DesktopView {
         self.branches_ui.refresh_placeholder(cx);
         self.file_viewer_ui.refresh_placeholders(cx);
         self.refresh_daily_placeholders(cx);
-        set_app_menus(cx);
+        self.refresh_app_menus(cx);
         cx.notify();
     }
 
@@ -416,6 +447,7 @@ impl DesktopView {
     fn toggle_panel(&mut self, panel: Panel, cx: &mut Context<Self>) {
         if self.sidebar_visible && rail_panel(self.workspace.panel) == panel {
             self.sidebar_visible = false;
+            self.refresh_app_menus(cx);
             cx.notify();
         } else {
             self.sidebar_visible = true;
@@ -425,6 +457,7 @@ impl DesktopView {
                 panel
             };
             self.dispatch(Action::ShowPanel(target), cx);
+            self.refresh_app_menus(cx);
         }
     }
 
@@ -471,10 +504,10 @@ impl DesktopView {
                 .items_center()
                 .gap(px(5.))
                 .min_w_0()
-                .h(px(28.))
-                .px(px(5.))
-                .max_w(px(290.))
-                .rounded(px(4.))
+                .h(rems(1.8125))
+                .px(px(7.))
+                .max_w(px(300.))
+                .rounded(px(5.))
                 .tooltip(tooltip(current.to_owned()))
                 .child(icon(Icon::Branch, MUTED))
                 .child(elide(current))
@@ -499,7 +532,7 @@ impl DesktopView {
         };
 
         div()
-            .h(px(39.))
+            .h(rems(2.625))
             .flex_shrink_0()
             .pl(px(if cfg!(target_os = "macos") { 81. } else { 12. }))
             .pr(px(12.))
@@ -515,11 +548,11 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .gap(px(5.))
-                    .h(px(28.))
-                    .px(px(6.))
-                    .min_w(px(90.))
-                    .max_w(px(270.))
-                    .rounded(px(4.))
+                    .h(rems(1.8125))
+                    .px(px(7.))
+                    .min_w(px(96.))
+                    .max_w(px(280.))
+                    .rounded(px(5.))
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(HOVER)))
                     .focus_visible(|s| s.bg(rgb(HOVER)))
@@ -585,40 +618,76 @@ impl DesktopView {
     }
 
     fn rail(&self, cx: &mut Context<Self>) -> Div {
-        let button = |id, panel, icon, label| {
+        let counts = self.sidebar_badge_counts();
+        let repo_dot_color = if !self.sidebar_visible || self.workspace.panel == Panel::ProjectFiles
+        {
+            if counts.commit_conflicts {
+                Some(ERROR)
+            } else if counts.commit_files > 0 {
+                Some(0x69a9ff)
+            } else if counts.diverged_repos > 0 {
+                Some(0x69e8ce)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let button = |id, panel, icon, label, dot_color: Option<u32>| {
             let active = self.sidebar_visible && rail_panel(self.workspace.panel) == panel;
             icon_button(id, icon, label)
+                .relative()
                 .when(active, |div| div.bg(rgb(0x3c4046)))
                 .aria_expanded(active)
+                .when_some(dot_color, |btn, color| {
+                    btn.child(
+                        div()
+                            .absolute()
+                            .top(px(2.))
+                            .right(px(2.))
+                            .w(px(7.))
+                            .h(px(7.))
+                            .rounded(px(999.))
+                            .bg(rgb(color))
+                            .border_1()
+                            .border_color(rgb(CHROME)),
+                    )
+                })
                 .on_click(cx.listener(move |view, _, _, cx| view.toggle_panel(panel, cx)))
         };
         div()
-            .w(px(35.))
+            .w(rems(2.5))
             .flex_shrink_0()
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(4.))
-            .gap(px(5.))
+            .pt(px(5.))
+            .gap(px(6.))
             .child(button(
                 "repo-tool",
                 Panel::Repositories,
                 Icon::Repositories,
                 tr("仓库", "Repositories"),
+                repo_dot_color,
             ))
             .child(button(
                 "project-tool",
                 Panel::ProjectFiles,
                 Icon::Folder,
                 tr("项目文件", "Project Files"),
+                None,
             ))
     }
 
     fn sidebar_width_for(&self, viewport: Pixels) -> Pixels {
-        let max = (viewport * 0.35).clamp(px(190.), px(365.));
+        let scale = self.ui_scale as f32 / 100.;
+        let min_w = px(200. * scale);
+        let default_min = px(244. * scale);
+        let default_max = px(328. * scale);
+        let max = (viewport * 0.36).clamp(min_w, px(390. * scale));
         self.sidebar_width
-            .unwrap_or_else(|| (viewport * 0.19).clamp(px(224.), px(312.)))
-            .clamp(px(190.), max)
+            .unwrap_or_else(|| (viewport * 0.20).clamp(default_min, default_max))
+            .clamp(min_w, max)
     }
 
     fn sash(&self, width: Pixels, cx: &mut Context<Self>) -> Div {
@@ -667,13 +736,13 @@ impl DesktopView {
             .and_then(|id| self.workspace.repo(id))
             .map(|repo| repo.target.root.to_string_lossy().into_owned());
         div()
-            .h(px(29.))
+            .h(rems(1.875))
             .flex_shrink_0()
-            .px(px(10.))
+            .px(px(11.))
             .flex()
             .items_center()
             .gap(px(6.))
-            .text_size(px(11.5))
+            .text_size(rems(0.75))
             .text_color(rgb(SUBTLE))
             .children(message.map(|(message, color, dismissible)| {
                 div()
@@ -715,18 +784,20 @@ impl DesktopView {
 
 impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scale = self.ui_scale as f32 / 100.;
+        window.set_rem_size(px(16. * scale));
         self.sync_container_discovery_dialog(window, cx);
         self.ensure_project_file_editors(window, cx);
         let viewport = window.viewport_size().width;
         let sidebar_width = self.sidebar_width_for(viewport);
         let available = viewport
-            - px(43.)
+            - px(48. * scale)
             - if self.sidebar_visible {
                 sidebar_width
             } else {
                 px(0.)
             };
-        div()
+        let root = div()
             .id("main-window")
             .key_context("GitClient")
             .track_focus(&self.focus)
@@ -737,8 +808,8 @@ impl Render for DesktopView {
             .overflow_hidden()
             .bg(rgb(CHROME))
             .text_color(rgb(TEXT))
-            .text_size(px(12.5))
-            .line_height(px(17.))
+            .text_size(rems(0.84375))
+            .line_height(rems(1.22))
             .on_action(cx.listener(|view, _: &Dismiss, window, cx| {
                 if view.overlay.is_some() {
                     view.close_overlay(window, cx);
@@ -769,6 +840,7 @@ impl Render for DesktopView {
             .on_action(cx.listener(|view, _: &OpenCommit, _, cx| {
                 view.sidebar_visible = true;
                 view.dispatch(Action::ShowPanel(Panel::Commit), cx);
+                view.refresh_app_menus(cx);
             }))
             .on_action(cx.listener(|view, _: &TriggerPull, window, cx| {
                 if view.overlay.is_none() {
@@ -788,13 +860,15 @@ impl Render for DesktopView {
             .on_action(cx.listener(|view, _: &ToggleBranches, _, cx| {
                 if view.overlay.is_none() {
                     view.toggle_branches_panel(cx);
+                    view.refresh_app_menus(cx);
                 }
             }))
             .on_action(cx.listener(|view, _: &SaveFile, _, cx| {
                 if view.overlay.is_none() {
                     view.save_active_project_file(cx);
                 }
-            }))
+            }));
+        self.attach_menu_actions(root, cx)
             .on_mouse_move(cx.listener(|view, event: &gpui::MouseMoveEvent, _, cx| {
                 if let Some((origin, width)) = view.sidebar_drag {
                     view.sidebar_width = Some(width + event.position.x - origin);

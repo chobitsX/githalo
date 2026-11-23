@@ -76,6 +76,11 @@ fn display_ref(reference: &OsStr) -> String {
 }
 
 impl RepoRow {
+    /// Whether at least one sync snapshot has been loaded for this repository.
+    pub fn has_status(&self) -> bool {
+        self.snapshot.is_some()
+    }
+
     pub(super) fn new(target: WorktreeTarget) -> Self {
         let name = target
             .root

@@ -381,6 +381,10 @@ impl DesktopView {
             .find(|f| &f.path == active)
     }
 
+    pub(super) fn active_code_editor(&self) -> Option<Entity<CodeEditor>> {
+        self.active_editor()
+    }
+
     fn active_editor(&self) -> Option<Entity<CodeEditor>> {
         let active = self.workspace.active_project_file.as_ref()?;
         self.file_viewer_ui.editors.get(active).cloned()

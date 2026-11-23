@@ -12,7 +12,7 @@ use gpui::{
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Role, ScrollWheelEvent,
     SharedString, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions,
-    canvas, div, fill, point, prelude::*, px, rgb, rgba, size,
+    canvas, div, fill, point, prelude::*, px, rems, rgb, rgba, size,
 };
 
 use super::components::{ACTIVE, LINK, PANEL, SUBTLE, TEXT};
@@ -171,7 +171,7 @@ pub(super) enum EditorEvent {
     OpenGotoLine,
 }
 
-const LINE_HEIGHT: f32 = 20.0;
+const LINE_HEIGHT: f32 = 21.0;
 const TOP_PADDING: f32 = 6.0;
 const CODE_LEFT_PADDING: f32 = 10.0;
 const CODE_RIGHT_PADDING: f32 = 28.0;
@@ -2433,7 +2433,7 @@ impl Render for CodeEditor {
             .min_h_0()
             .bg(rgb(PANEL))
             .font_family("Menlo")
-            .text_size(px(12.))
+            .text_size(rems(0.8125))
             .cursor(CursorStyle::IBeam)
             .key_context("CodeEditor")
             .role(Role::TextInput)

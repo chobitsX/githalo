@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gpui::{IntoElement, prelude::*, px, rgb, svg};
+use gpui::{IntoElement, prelude::*, rems, rgb, svg};
 
 use super::components::MUTED;
 
@@ -267,7 +267,7 @@ pub(super) fn file_type_icon(path: &Path) -> impl IntoElement {
     let spec = file_icon_spec(path);
     svg()
         .data(spec.svg)
-        .size(px(15.))
+        .size(rems(1.0))
         .flex_shrink_0()
         .text_color(rgb(spec.color))
 }
@@ -291,7 +291,7 @@ pub(super) fn folder_type_icon(name: &str, expanded: bool) -> impl IntoElement {
         } else {
             SVG_FOLDER_CLOSED
         })
-        .size(px(15.))
+        .size(rems(1.0))
         .flex_shrink_0()
         .text_color(rgb(color))
 }

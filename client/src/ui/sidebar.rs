@@ -1,11 +1,15 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use githalo::i18n::{is_zh, tr};
+use githalo::staging::ChangeKind;
 use githalo::workspace::{
     Action, FileGitStatus, GroupId, GroupView, Panel, RepoRow, format_fetch_time,
 };
 use githalo::worktree::WorktreeId;
 use gpui::{
-    AnyElement, Context, Div, ExternalPaths, FontWeight, MouseButton, Pixels, Render, Role,
-    SharedString, TextAlign, Window, div, prelude::*, px, rgb, transparent_black,
+    AnyElement, Context, Div, ExternalPaths, FontWeight, MouseButton, Pixels, Render, Role, Window,
+    div, prelude::*, px, rems, rgb, transparent_black,
 };
 
 use super::DesktopView;
@@ -13,8 +17,6 @@ use super::components::*;
 use super::file_icons::{file_type_icon, folder_type_icon};
 use super::file_viewer::{ProjectEntryFormKind, ProjectEntryMenuTarget};
 use super::overlay::{MenuKind, PathOperation};
-
-const COUNT_WIDTH: f32 = 42.;
 
 #[derive(Clone)]
 struct DraggedRepo {
@@ -40,14 +42,242 @@ impl Render for DragRepoBadge {
     }
 }
 
+#[derive(Clone, Copy)]
+struct TabBadgeStyle {
+    bg: u32,
+    active_bg: u32,
+    fg: u32,
+    dot: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct SidebarBadgeCounts {
+    pub(super) diverged_repos: usize,
+    pub(super) commit_files: usize,
+    pub(super) commit_staged: usize,
+    pub(super) commit_unstaged: usize,
+    pub(super) commit_conflicts: bool,
+    pub(super) stash_entries: usize,
+    pub(super) shelf_entries: usize,
+}
+
+fn format_badge_count(count: usize) -> String {
+    if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    }
+}
+
+fn tab_badge(count: usize, active: bool, dot_only: bool, style: TabBadgeStyle) -> Div {
+    if dot_only {
+        div()
+            .w(px(6.))
+            .h(px(6.))
+            .flex_shrink_0()
+            .rounded(px(999.))
+            .bg(rgb(style.dot))
+    } else {
+        div()
+            .flex_shrink_0()
+            .min_w(rems(1.0))
+            .px(px(4.5))
+            .py(px(0.5))
+            .rounded(px(999.))
+            .bg(rgb(if active { style.active_bg } else { style.bg }))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(rems(0.64))
+            .line_height(rems(0.9))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(style.fg))
+            .child(format_badge_count(count))
+    }
+}
+
 impl DesktopView {
+    pub(super) fn sidebar_badge_counts(&self) -> SidebarBadgeCounts {
+        let diverged_repos = self
+            .workspace
+            .repos
+            .iter()
+            .filter(|r| {
+                r.counts
+                    .is_some_and(|c| (c.behind > 0 || c.ahead > 0) && !r.historical)
+            })
+            .count();
+
+        let selected = self.workspace.selected;
+        let (commit_files, commit_staged, commit_unstaged, commit_conflicts) = self
+            .workspace
+            .daily
+            .changes
+            .as_ref()
+            .filter(|snap| Some(snap.worktree.id) == selected)
+            .map(|snap| {
+                let mut unique: BTreeSet<&Path> = BTreeSet::new();
+                let mut conflicts = false;
+                for file in &snap.staged {
+                    unique.insert(file.path.as_path());
+                    if matches!(file.kind, ChangeKind::Conflicted(_)) {
+                        conflicts = true;
+                    }
+                }
+                for file in &snap.unstaged {
+                    unique.insert(file.path.as_path());
+                    if matches!(file.kind, ChangeKind::Conflicted(_)) {
+                        conflicts = true;
+                    }
+                }
+                (
+                    unique.len(),
+                    snap.staged.len(),
+                    snap.unstaged.len(),
+                    conflicts,
+                )
+            })
+            .unwrap_or_default();
+
+        let stash_entries = self
+            .workspace
+            .stashes
+            .snapshot
+            .as_ref()
+            .filter(|snap| Some(snap.worktree().id) == selected)
+            .map_or(0, |snap| snap.entries().len());
+
+        let shelf_entries = self
+            .workspace
+            .shelves
+            .snapshot
+            .as_ref()
+            .filter(|snap| Some(snap.worktree().id) == selected)
+            .map_or(0, |snap| snap.entries().len());
+
+        SidebarBadgeCounts {
+            diverged_repos,
+            commit_files,
+            commit_staged,
+            commit_unstaged,
+            commit_conflicts,
+            stash_entries,
+            shelf_entries,
+        }
+    }
+
     pub(super) fn sidebar(&self, width: Pixels, cx: &mut Context<Self>) -> Div {
         let panel = self.workspace.panel;
-        let compact = width < px(224.);
-        let tab = |id, label, target| {
-            workspace_tab(id, label, target == panel)
-                .when(compact, |tab| tab.px(px(4.)))
+        let scale = self.ui_scale as f32 / 100.;
+        let counts = self.sidebar_badge_counts();
+        let active_badges = usize::from(counts.diverged_repos > 0)
+            + usize::from(counts.commit_files > 0)
+            + usize::from(counts.stash_entries > 0)
+            + usize::from(counts.shelf_entries > 0);
+        let compact = width < px(236. * scale);
+        let dot_only = width < px((246. + active_badges.saturating_sub(1) as f32 * 22.) * scale);
+
+        let repos_tip = (counts.diverged_repos > 0).then(|| {
+            if is_zh() {
+                format!("{} 个仓库有待同步的提交", counts.diverged_repos)
+            } else if counts.diverged_repos == 1 {
+                "1 repository has commits to pull or push".to_owned()
+            } else {
+                format!(
+                    "{} repositories have commits to pull or push",
+                    counts.diverged_repos
+                )
+            }
+        });
+        let commit_tip = (counts.commit_files > 0).then(|| {
+            let mut text = if is_zh() {
+                format!(
+                    "{} 个待提交变更（{} 已暂存 · {} 未暂存）",
+                    counts.commit_files, counts.commit_staged, counts.commit_unstaged
+                )
+            } else {
+                format!(
+                    "{} pending change(s) ({} staged · {} unstaged)",
+                    counts.commit_files, counts.commit_staged, counts.commit_unstaged
+                )
+            };
+            if counts.commit_conflicts {
+                text.push_str(tr(" · 含未解决冲突", " · unresolved conflicts"));
+            }
+            text
+        });
+        let stash_tip = (counts.stash_entries > 0).then(|| {
+            if is_zh() {
+                format!("当前仓库有 {} 条 Stash 暂存记录", counts.stash_entries)
+            } else if counts.stash_entries == 1 {
+                "1 stash entry in this repository".to_owned()
+            } else {
+                format!("{} stash entries in this repository", counts.stash_entries)
+            }
+        });
+        let shelf_tip = (counts.shelf_entries > 0).then(|| {
+            if is_zh() {
+                format!("当前仓库有 {} 组 Shelf 搁置集", counts.shelf_entries)
+            } else if counts.shelf_entries == 1 {
+                "1 shelf entry in this repository".to_owned()
+            } else {
+                format!("{} shelf entries in this repository", counts.shelf_entries)
+            }
+        });
+
+        let repos_badge_style = TabBadgeStyle {
+            bg: 0x172e2b,
+            active_bg: 0x1e3f3b,
+            fg: 0x6ce0cb,
+            dot: 0x69e8ce,
+        };
+        let commit_badge_style = if counts.commit_conflicts {
+            TabBadgeStyle {
+                bg: DANGER_BG,
+                active_bg: 0x52252d,
+                fg: ERROR,
+                dot: ERROR,
+            }
+        } else {
+            TabBadgeStyle {
+                bg: 0x1b3454,
+                active_bg: 0x2c5286,
+                fg: 0x8fc2ff,
+                dot: 0x69a9ff,
+            }
+        };
+        let stash_badge_style = TabBadgeStyle {
+            bg: 0x2f281b,
+            active_bg: 0x423722,
+            fg: WARNING,
+            dot: WARNING,
+        };
+        let shelf_badge_style = TabBadgeStyle {
+            bg: REMOTE_BG,
+            active_bg: 0x353958,
+            fg: REMOTE_TEXT,
+            dot: REMOTE_TEXT,
+        };
+
+        let tab = |id,
+                   label,
+                   target,
+                   badge_count: usize,
+                   badge_style: Option<TabBadgeStyle>,
+                   tip: Option<String>| {
+            let active = target == panel;
+            workspace_tab(id, label, active)
+                .px(px(if compact { 5. } else { 7. }))
+                .gap(px(4.))
+                .when_some(tip, |tab, text| tab.tooltip(tooltip(text)))
                 .child(label)
+                .when(badge_count > 0, |tab| {
+                    if let Some(style) = badge_style {
+                        tab.child(tab_badge(badge_count, active, dot_only, style))
+                    } else {
+                        tab
+                    }
+                })
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.dispatch(Action::ShowPanel(target), cx);
                 }))
@@ -64,20 +294,23 @@ impl DesktopView {
             .overflow_hidden()
             .child(
                 div()
-                    .h(px(35.))
+                    .h(rems(2.375))
                     .flex()
                     .flex_shrink_0()
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .px(px(if compact { 4. } else { 7. }))
-                    .gap(px(if compact { 3. } else { 5. }))
-                    .when(compact, |tabs| tabs.text_size(px(11.5)))
+                    .px(px(if compact { 5. } else { 7. }))
+                    .gap(px(if compact { 2. } else { 4. }))
+                    .when(compact, |tabs| tabs.text_size(rems(0.75)))
                     .when(panel == Panel::ProjectFiles, |tabs| {
                         tabs.child(tab(
                             "projects-tab",
                             tr("项目文件", "Files"),
                             Panel::ProjectFiles,
+                            0,
+                            None,
+                            None,
                         ))
                     })
                     .when(panel != Panel::ProjectFiles, |tabs| {
@@ -85,10 +318,34 @@ impl DesktopView {
                             "repositories-tab",
                             tr("仓库", "Repos"),
                             Panel::Repositories,
+                            counts.diverged_repos,
+                            Some(repos_badge_style),
+                            repos_tip,
                         ))
-                        .child(tab("commit-tab", "Commit", Panel::Commit))
-                        .child(tab("stash-tab", "Stash", Panel::Stash))
-                        .child(tab("shelf-tab", "Shelf", Panel::Shelf))
+                        .child(tab(
+                            "commit-tab",
+                            "Commit",
+                            Panel::Commit,
+                            counts.commit_files,
+                            Some(commit_badge_style),
+                            commit_tip,
+                        ))
+                        .child(tab(
+                            "stash-tab",
+                            "Stash",
+                            Panel::Stash,
+                            counts.stash_entries,
+                            Some(stash_badge_style),
+                            stash_tip,
+                        ))
+                        .child(tab(
+                            "shelf-tab",
+                            "Shelf",
+                            Panel::Shelf,
+                            counts.shelf_entries,
+                            Some(shelf_badge_style),
+                            shelf_tip,
+                        ))
                     }),
             )
             .child(match panel {
@@ -101,9 +358,50 @@ impl DesktopView {
     }
 
     fn repositories(&self, cx: &mut Context<Self>) -> Div {
+        let total_repos = self.workspace.repos.len();
+        let diverged_repos = self
+            .workspace
+            .repos
+            .iter()
+            .filter(|r| {
+                r.counts
+                    .is_some_and(|c| (c.behind > 0 || c.ahead > 0) && !r.historical)
+            })
+            .count();
+        let summary_pill: Option<AnyElement> = if total_repos == 0 {
+            None
+        } else if diverged_repos > 0 {
+            let label = if is_zh() {
+                format!("{diverged_repos} 待同步")
+            } else {
+                format!("{diverged_repos} to sync")
+            };
+            Some(
+                pill(label, ACCENT_BG, ACCENT_BORDER, LINK)
+                    .text_size(rems(0.68))
+                    .into_any_element(),
+            )
+        } else {
+            let label = if is_zh() {
+                format!("{total_repos} 仓库")
+            } else if total_repos == 1 {
+                "1 repo".to_owned()
+            } else {
+                format!("{total_repos} repos")
+            };
+            Some(
+                div()
+                    .pr(px(4.))
+                    .text_size(rems(0.72))
+                    .text_color(rgb(SUBTLE))
+                    .child(label)
+                    .into_any_element(),
+            )
+        };
+
         let toolbar = div()
-            .h(px(34.))
-            .mx(px(7.))
+            .h(rems(2.375))
+            .mx(px(8.))
             .flex()
             .flex_shrink_0()
             .items_center()
@@ -131,8 +429,7 @@ impl DesktopView {
                 .on_click(cx.listener(|view, _, _, cx| view.dispatch(Action::Reload, cx))),
             )
             .child(div().flex_1())
-            .child(count_cell(tr("↓ 落后", "↓ In"), MUTED).text_size(px(11.)))
-            .child(count_cell(tr("↑ 领先", "↑ Out"), MUTED).text_size(px(11.)));
+            .children(summary_pill);
         let selected = self.workspace.selected;
         let visible_group = selected.and_then(|id| {
             let mut expanded = self.workspace.groups.iter().filter(|group| {
@@ -275,56 +572,63 @@ impl DesktopView {
             .id("toggle-group")
             .role(Role::Button)
             .aria_label(group_title.clone())
-            .aria_description(summary.clone())
+            .aria_description(summary)
             .aria_expanded(group.expanded)
             .tab_index(0)
             .flex()
-            .flex_col()
+            .items_center()
             .flex_1()
             .min_w_0()
-            .rounded(px(4.))
+            .h(rems(1.75))
+            .px(px(4.))
+            .pr(px(if group.members.is_empty() { 28. } else { 56. }))
+            .gap(px(5.))
+            .rounded(px(5.))
             .cursor_pointer()
             .hover(|s| s.bg(rgb(HOVER)))
             .focus_visible(|s| s.bg(rgb(HOVER)))
+            .child(icon(disclosure, SUBTLE))
+            .child(icon(Icon::Folder, MUTED))
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .h(px(24.))
-                    .gap(px(4.))
-                    .pr(px(if group.members.is_empty() { 27. } else { 54. }))
-                    .min_w_0()
-                    .child(icon(disclosure, SUBTLE))
-                    .child(icon(Icon::Folder, MUTED))
-                    .child(elide(group_title.clone()).font_weight(FontWeight::SEMIBOLD)),
+                elide(group_title.clone())
+                    .text_size(rems(0.8125))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT)),
             )
             .child(
                 div()
-                    .pl(px(40.))
-                    .pr(px(3.))
-                    .line_height(px(15.))
-                    .text_size(px(11.))
+                    .flex_shrink_0()
+                    .text_size(rems(0.72))
                     .text_color(rgb(SUBTLE))
-                    .child(summary),
+                    .child(group.members.len().to_string()),
             )
+            .when(changed > 0, |row| {
+                let badge = if is_zh() {
+                    format!("{changed} 待同步")
+                } else {
+                    format!("{changed}")
+                };
+                row.child(pill(badge, ACCENT_BG, ACCENT_BORDER, LINK).text_size(rems(0.66)))
+            })
             .on_click(
                 cx.listener(move |view, _, _, cx| view.dispatch(Action::ToggleGroup(id), cx)),
             );
         let header = div()
             .relative()
             .flex()
-            .items_start()
+            .items_center()
             .min_w_0()
             .gap(px(2.))
-            .pt(px(6.))
-            .pb(px(4.))
+            .pt(px(5.))
+            .pb(px(3.))
             .child(toggle)
             .child(
                 div()
                     .absolute()
                     .right_0()
-                    .top(px(6.))
+                    .top(px(5.))
                     .flex()
+                    .items_center()
                     .occlude()
                     .gap(px(2.))
                     .when(!group.members.is_empty(), |actions| {
@@ -628,16 +932,61 @@ impl DesktopView {
         let details = repo_description(repo);
         let status_label = if repo.fetching {
             Some(tr("正在刷新…", "Fetching…").to_owned())
-        } else if repo.loading {
+        } else if repo.loading && !repo.has_status() {
             Some(tr("正在读取状态…", "Loading status…").to_owned())
         } else {
             repo.issue.clone()
         };
-        let count_color = if repo.historical { WARNING } else { TEXT };
-        let (behind, ahead) = repo.counts.map_or_else(
-            || ("—".to_owned(), "—".to_owned()),
-            |counts| (counts.behind.to_string(), counts.ahead.to_string()),
-        );
+        let count_is_historical = repo.historical;
+        let sync_badges = repo
+            .counts
+            .filter(|counts| counts.behind > 0 || counts.ahead > 0)
+            .map(|counts| {
+                let mut row = div().flex().items_center().flex_shrink_0().gap(px(3.));
+                if counts.behind > 0 {
+                    let (bg, border, fg) = if count_is_historical {
+                        (0x2f291c, 0x5c4f28, WARNING)
+                    } else {
+                        (0x1b2b3d, 0x2e4e73, LINK)
+                    };
+                    row = row.child(
+                        div()
+                            .px(px(5.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(rgb(bg))
+                            .border_1()
+                            .border_color(rgb(border))
+                            .text_size(rems(0.68))
+                            .line_height(rems(0.95))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(fg))
+                            .child(format!("↓{}", counts.behind)),
+                    );
+                }
+                if counts.ahead > 0 {
+                    let (bg, border, fg) = if count_is_historical {
+                        (0x2f291c, 0x5c4f28, WARNING)
+                    } else {
+                        (0x1a3026, 0x2d5a45, SUCCESS)
+                    };
+                    row = row.child(
+                        div()
+                            .px(px(5.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(rgb(bg))
+                            .border_1()
+                            .border_color(rgb(border))
+                            .text_size(rems(0.68))
+                            .line_height(rems(0.95))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(fg))
+                            .child(format!("↑{}", counts.ahead)),
+                    );
+                }
+                row
+            });
         let nested_info = if nested_parent.is_none() {
             self.workspace
                 .nested
@@ -659,9 +1008,20 @@ impl DesktopView {
                     diverged += 1;
                 }
             }
-            let text = if diverged > 0 {
+            let badge_text = if diverged > 0 {
                 if is_zh() {
-                    format!("{total} 个子仓库 · {diverged} 个有差异")
+                    format!("{total} 子仓 · {diverged}")
+                } else {
+                    format!("{total} sub · {diverged}")
+                }
+            } else if is_zh() {
+                format!("{total} 子仓")
+            } else {
+                format!("{total} sub")
+            };
+            let tip_text = if diverged > 0 {
+                if is_zh() {
+                    format!("{total} 个子仓库 · {diverged} 个待同步")
                 } else {
                     format!("{total} sub-repos · {diverged} diverged")
                 }
@@ -670,11 +1030,11 @@ impl DesktopView {
             } else {
                 format!("{total} sub-repos · synced")
             };
-            (nested.expanded, diverged > 0, text)
+            (nested.expanded, diverged > 0, badge_text, tip_text)
         });
 
-        let mut name = div().flex().min_w_0().flex_1().gap(px(4.)).items_center();
-        if let Some((expanded, _, _)) = &nested_summary {
+        let mut name = div().flex().min_w_0().flex_1().gap(px(5.)).items_center();
+        if let Some((expanded, _, _, _)) = &nested_summary {
             let arrow = if *expanded {
                 Icon::ChevronDown
             } else {
@@ -686,10 +1046,10 @@ impl DesktopView {
                     .role(Role::Button)
                     .aria_label(tr("展开或折叠子仓库", "Toggle nested repositories"))
                     .tab_index(0)
-                    .w(px(16.))
-                    .h(px(16.))
+                    .w(rems(1.05))
+                    .h(rems(1.05))
                     .flex_shrink_0()
-                    .rounded(px(3.))
+                    .rounded(px(4.))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -705,42 +1065,119 @@ impl DesktopView {
         name = name
             .child(icon(
                 Icon::Folder,
-                if nested_parent.is_some() {
+                if selected {
+                    TEXT
+                } else if nested_parent.is_some() {
                     0x7ab8c4
                 } else {
                     MUTED
                 },
             ))
-            .child(elide(repo.name.clone()));
+            .child(
+                elide(repo.name.clone())
+                    .text_size(rems(0.84))
+                    .font_weight(if selected {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .text_color(rgb(TEXT)),
+            );
         let first = div()
             .flex()
             .min_w_0()
             .items_center()
-            .gap(px(4.))
+            .gap(px(5.))
             .child(name)
-            .child(count_cell(behind, count_color))
-            .child(count_cell(ahead, count_color));
+            .children(
+                nested_summary
+                    .as_ref()
+                    .map(|(_, has_diverged, badge_text, tip_text)| {
+                        let (bg, border, fg) = if *has_diverged {
+                            (0x28261a, 0x5c5128, WARNING)
+                        } else {
+                            (0x1a282c, 0x2b454c, 0x8fd6cc)
+                        };
+                        div()
+                            .id(("nested-pill", id.get() as usize))
+                            .flex_shrink_0()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .bg(rgb(bg))
+                            .border_1()
+                            .border_color(rgb(border))
+                            .text_size(rems(0.68))
+                            .line_height(rems(0.95))
+                            .text_color(rgb(fg))
+                            .cursor_pointer()
+                            .tooltip(tooltip(tip_text.clone()))
+                            .hover(|s| s.border_color(rgb(0x69e8ce)))
+                            .child(badge_text.clone())
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.dispatch(Action::ToggleNested(id), cx);
+                            }))
+                    }),
+            )
+            .children(sync_badges);
         let branch_indent = if nested_summary.is_some() {
-            px(36.)
+            rems(2.5)
         } else {
-            px(20.)
+            rems(1.375)
+        };
+        let is_transient_status = repo.fetching || (repo.loading && !repo.has_status());
+        let branch_label = if repo.branch.is_empty() {
+            "—"
+        } else {
+            &repo.branch
         };
         let second = div()
             .flex()
             .ml(branch_indent)
+            .mt(px(1.))
             .items_center()
             .justify_between()
             .min_w_0()
-            .gap(px(3.))
+            .gap(px(5.))
             .child(
-                elide(if repo.branch.is_empty() {
-                    "—"
-                } else {
-                    &repo.branch
-                })
-                .flex_1()
-                .text_size(px(11.5))
-                .text_color(rgb(if selected { TEXT } else { SUBTLE })),
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(5.))
+                    .child(
+                        elide(branch_label)
+                            .text_size(rems(0.75))
+                            .text_color(rgb(if selected { 0xd2d8e2 } else { SUBTLE })),
+                    )
+                    .children(status_label.map(|status| {
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .w(px(4.))
+                                    .h(px(4.))
+                                    .rounded(px(2.))
+                                    .bg(rgb(if is_transient_status { LINK } else { WARNING })),
+                            )
+                            .child(
+                                div()
+                                    .text_size(rems(0.68))
+                                    .text_color(rgb(if is_transient_status {
+                                        LINK
+                                    } else if selected {
+                                        0xf3c778
+                                    } else {
+                                        0xc7a35e
+                                    }))
+                                    .child(status),
+                            )
+                    })),
             )
             .child(
                 icon_button(
@@ -748,7 +1185,10 @@ impl DesktopView {
                     Icon::More,
                     tr("仓库操作", "Repository actions"),
                 )
-                .h(px(17.))
+                .h(rems(1.125))
+                .w(rems(1.25))
+                .opacity(if selected { 1. } else { 0. })
+                .group_hover("repo-row", |s| s.opacity(1.))
                 .on_click(cx.listener(
                     move |view, event: &gpui::ClickEvent, window, cx| {
                         cx.stop_propagation();
@@ -769,13 +1209,14 @@ impl DesktopView {
         let row_pl = if nested_parent.is_some() || nested_summary.is_some() {
             px(6.)
         } else {
-            px(22.)
+            px(18.)
         };
         div()
             .id((
                 "repository",
                 (id.get() as usize) * 4 + usize::from(nested_parent.is_some()),
             ))
+            .group("repo-row")
             .role(Role::TreeItem)
             .aria_label(repo.name.clone())
             .aria_description(details.clone())
@@ -783,11 +1224,13 @@ impl DesktopView {
             .tab_index(0)
             .when_some(repo.issue.clone(), |row, issue| row.tooltip(tooltip(issue)))
             .min_w_0()
-            .rounded(px(4.))
+            .rounded(px(6.))
             .pl(row_pl)
-            .py(px(2.))
-            .text_size(px(12.5))
-            .line_height(px(17.))
+            .pr(px(5.))
+            .py(px(5.))
+            .my(px(1.))
+            .text_size(rems(0.8125))
+            .line_height(rems(1.15))
             .cursor_pointer()
             .on_drag(
                 DraggedRepo {
@@ -802,53 +1245,6 @@ impl DesktopView {
             .focus_visible(|s| s.bg(rgb(ACTIVE)))
             .child(first)
             .child(second)
-            .children(nested_summary.map(|(_, has_diverged, summary_text)| {
-                div()
-                    .id(("nested-pill", id.get() as usize))
-                    .ml(branch_indent)
-                    .mr(px(4.))
-                    .mt(px(2.))
-                    .mb(px(1.))
-                    .px(px(6.))
-                    .py(px(1.))
-                    .rounded(px(4.))
-                    .bg(rgb(if has_diverged { 0x26291e } else { 0x1b272a }))
-                    .border_1()
-                    .border_color(rgb(if has_diverged { 0x5c5328 } else { 0x2b454c }))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.))
-                    .cursor_pointer()
-                    .hover(|s| s.border_color(rgb(0x69e8ce)))
-                    .child(
-                        div()
-                            .w(px(5.))
-                            .h(px(5.))
-                            .flex_shrink_0()
-                            .rounded(px(3.))
-                            .bg(rgb(if has_diverged { WARNING } else { 0x69e8ce })),
-                    )
-                    .child(
-                        elide(summary_text)
-                            .text_size(px(10.5))
-                            .text_color(rgb(if has_diverged { WARNING } else { 0x9fd8cf })),
-                    )
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        cx.stop_propagation();
-                        view.dispatch(Action::ToggleNested(id), cx);
-                    }))
-            }))
-            .children(status_label.map(|status| {
-                elide(status)
-                    .ml(branch_indent)
-                    .pr(px(5.))
-                    .text_size(px(10.5))
-                    .text_color(rgb(if repo.fetching || repo.loading {
-                        LINK
-                    } else {
-                        WARNING
-                    }))
-            }))
             .children(repo.historical_at.filter(|_| repo.historical).map(|time| {
                 elide(format!(
                     "{} · {}",
@@ -857,7 +1253,7 @@ impl DesktopView {
                 ))
                 .ml(branch_indent)
                 .pr(px(5.))
-                .text_size(px(10.5))
+                .text_size(rems(0.68))
                 .text_color(rgb(WARNING))
             }))
             .on_click(cx.listener(move |view, _, window, cx| {
@@ -978,12 +1374,13 @@ impl DesktopView {
                                     .flex()
                                     .items_center()
                                     .min_w_0()
-                                    .h(px(24.))
+                                    .h(rems(1.625))
                                     .mx(px(4.))
                                     .pl(px(5. + 14. * entry.depth.min(8) as f32))
                                     .pr(px(6.))
                                     .gap(px(5.))
-                                    .rounded(px(4.))
+                                    .rounded(px(5.))
+                                    .text_size(rems(0.8125))
                                     .cursor_pointer()
                                     .when(is_selected, |el| el.bg(rgb(ACTIVE)))
                                     .hover(move |s| {
@@ -1004,7 +1401,7 @@ impl DesktopView {
                                         el.child(
                                             div()
                                                 .flex_shrink_0()
-                                                .text_size(px(10.5))
+                                                .text_size(rems(0.7))
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(rgb(status_color))
                                                 .child(st.badge()),
@@ -1287,26 +1684,17 @@ fn repo_metadata(repo: &RepoRow) -> AnyElement {
     };
     div()
         .id("selected-repo-metadata")
-        .mx(px(7.))
-        .px(px(5.))
-        .py(px(6.))
+        .mx(px(8.))
+        .px(px(6.))
+        .py(px(8.))
         .border_t_1()
         .border_color(rgb(BORDER))
-        .text_size(px(11.))
-        .line_height(px(18.))
+        .text_size(rems(0.75))
+        .line_height(rems(1.2))
         .child(item(
             tr("上游", "Upstream"),
             repo.upstream.as_deref().unwrap_or("—").to_owned(),
         ))
         .child(item(tr("上次获取", "Fetched"), time))
         .into_any_element()
-}
-
-fn count_cell(value: impl Into<SharedString>, color: u32) -> Div {
-    elide(value)
-        .w(px(COUNT_WIDTH))
-        .flex_shrink_0()
-        .pr(px(6.))
-        .text_align(TextAlign::Right)
-        .text_color(rgb(color))
 }

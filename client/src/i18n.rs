@@ -197,6 +197,7 @@ impl BranchClickMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppPreferences {
     pub language: LanguagePreference,
+    pub ui_scale: u16,
     pub pull_strategy: PullStrategy,
     pub show_commit_details: bool,
     pub diff_side_by_side: bool,
@@ -214,6 +215,16 @@ pub struct AppPreferences {
     pub commit_show_conventional: bool,
 }
 
+/// Allowed UI zoom percentage presets (90% .. 130%).
+pub const UI_SCALE_PRESETS: [u16; 5] = [90, 100, 110, 120, 130];
+
+/// Clamp and snap a persisted or computed UI scale percentage into `[90, 130]`.
+pub fn normalize_ui_scale(raw: u16) -> u16 {
+    let clamped = raw.clamp(90, 130);
+    // Round to nearest 5% so keyboard/menu zoom remains clean.
+    ((clamped + 2) / 5) * 5
+}
+
 impl Default for AppPreferences {
     fn default() -> Self {
         let mut favorite_branches = BTreeSet::new();
@@ -223,6 +234,7 @@ impl Default for AppPreferences {
         favorite_branches.insert("refs/remotes/origin/master".to_owned());
         Self {
             language: LanguagePreference::System,
+            ui_scale: 100,
             pull_strategy: PullStrategy::FastForwardOnly,
             show_commit_details: true,
             diff_side_by_side: true,
@@ -266,6 +278,11 @@ impl AppPreferences {
                 |v: &str| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0");
             match key.trim() {
                 "language" => prefs.language = LanguagePreference::from_key(value),
+                "ui_scale" => {
+                    if let Ok(parsed) = value.trim().parse::<u16>() {
+                        prefs.ui_scale = normalize_ui_scale(parsed);
+                    }
+                }
                 "pull_strategy" => {
                     prefs.pull_strategy = match value.trim().to_ascii_lowercase().as_str() {
                         "merge" => PullStrategy::Merge,
@@ -318,8 +335,9 @@ impl AppPreferences {
             .collect::<Vec<_>>()
             .join(",");
         let content = format!(
-            "language={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\n",
+            "language={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\n",
             self.language.as_key(),
+            normalize_ui_scale(self.ui_scale),
             pull_key,
             self.show_commit_details,
             self.diff_side_by_side,
@@ -381,6 +399,7 @@ mod tests {
         favorites.insert("refs/heads/release/v1".to_owned());
         let saved = AppPreferences {
             language: LanguagePreference::EnUs,
+            ui_scale: 110,
             pull_strategy: PullStrategy::Rebase,
             show_commit_details: false,
             diff_side_by_side: false,

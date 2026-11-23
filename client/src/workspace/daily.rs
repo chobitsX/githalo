@@ -214,9 +214,6 @@ impl Workspace {
     }
 
     pub(super) fn load_working_changes(&mut self) {
-        if self.panel != Panel::Commit {
-            return;
-        }
         let Some(target) = self.current_target().filter(|t| !self.writing(t.id)) else {
             return;
         };
@@ -682,7 +679,9 @@ impl Workspace {
                     Err(error) => {
                         self.daily.changes = None;
                         self.close_change();
-                        self.daily_error(error);
+                        if self.panel == Panel::Commit {
+                            self.daily_error(error);
+                        }
                     }
                 }
             }
@@ -823,15 +822,9 @@ impl Workspace {
                 }
                 self.load_branches();
             }
-            if self.panel == Panel::Commit {
-                self.load_working_changes();
-            }
-            if self.panel == Panel::Stash {
-                self.load_stashes();
-            }
-            if self.panel == Panel::Shelf {
-                self.load_shelves();
-            }
+            self.load_working_changes();
+            self.load_stashes();
+            self.load_shelves();
             match feedback {
                 Ok(text) => {
                     self.daily.notice = Some(text.clone());
@@ -842,12 +835,9 @@ impl Workspace {
             }
         } else if self.selected.is_some_and(|id| affected.contains(&id)) {
             self.load_history();
-            if self.panel == Panel::Stash {
-                self.load_stashes();
-            }
-            if self.panel == Panel::Shelf {
-                self.load_shelves();
-            }
+            self.load_working_changes();
+            self.load_stashes();
+            self.load_shelves();
         }
         for id in affected {
             self.start_status(id);

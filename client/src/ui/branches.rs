@@ -10,7 +10,7 @@ use githalo::worktree::WorktreeTarget;
 use gpui::{
     AnyElement, ClipboardItem, Context, CursorStyle, Div, Entity, FocusHandle, Focusable,
     FontWeight, MouseButton, Pixels, Role, ScrollStrategy, SharedString, Toggled,
-    UniformListScrollHandle, Window, div, prelude::*, px, rgb, uniform_list,
+    UniformListScrollHandle, Window, div, prelude::*, px, rems, rgb, uniform_list,
 };
 
 use super::components::*;
@@ -1384,7 +1384,7 @@ impl DesktopView {
     ) -> Div {
         let has_query = !query_text.trim().is_empty();
         let search_bar = div()
-            .h(px(36.))
+            .h(rems(2.375))
             .px(px(7.))
             .flex()
             .flex_shrink_0()
@@ -1395,7 +1395,7 @@ impl DesktopView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .h(px(26.))
+                    .h(rems(1.75))
                     .px(px(6.))
                     .gap(px(5.))
                     .flex()
@@ -2943,10 +2943,10 @@ fn render_branch_row(
         .id(("branch-tree-row", index))
         .role(Role::ListItem)
         .aria_selected(is_selected)
-        .h(px(24.))
+        .h(rems(1.625))
         .mx(px(4.))
-        .px(px(5.))
-        .rounded(px(4.))
+        .px(px(6.))
+        .rounded(px(5.))
         .flex()
         .items_center()
         .gap(px(5.))
@@ -2962,14 +2962,14 @@ fn render_branch_row(
                 .child(
                     elide(tr("HEAD (当前分支)", "HEAD (Current Branch)"))
                         .flex_1()
-                        .text_size(px(12.))
+                        .text_size(rems(0.8125))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(rgb(TEXT)),
                 )
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(10.5))
+                        .text_size(rems(0.7))
                         .text_color(rgb(SUBTLE))
                         .child(branch_label),
                 )
@@ -3022,14 +3022,14 @@ fn render_branch_row(
                 .child(
                     elide(title)
                         .flex_1()
-                        .text_size(px(12.))
+                        .text_size(rems(0.8125))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(TEXT)),
                 )
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(10.5))
+                        .text_size(rems(0.7))
                         .text_color(rgb(SUBTLE))
                         .child(count.to_string()),
                 )
@@ -3091,13 +3091,13 @@ fn render_branch_row(
                 .child(
                     elide(label)
                         .flex_1()
-                        .text_size(px(12.))
+                        .text_size(rems(0.8125))
                         .text_color(rgb(TEXT)),
                 )
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_size(px(10.5))
+                        .text_size(rems(0.7))
                         .text_color(rgb(SUBTLE))
                         .child(count.to_string()),
                 )
@@ -3164,7 +3164,7 @@ fn render_branch_row(
                 .child(
                     elide(label)
                         .flex_1()
-                        .text_size(px(12.))
+                        .text_size(rems(0.8125))
                         .when(is_current, |t| t.font_weight(FontWeight::SEMIBOLD))
                         .text_color(rgb(if is_filtered { LINK } else { TEXT })),
                 )
@@ -3240,7 +3240,7 @@ fn render_branch_row(
                 .child(
                     elide(label)
                         .flex_1()
-                        .text_size(px(12.))
+                        .text_size(rems(0.8125))
                         .text_color(rgb(if is_filtered { LINK } else { TEXT })),
                 )
                 .when(is_filtered, |r| {
@@ -3303,7 +3303,7 @@ fn render_branch_row(
                 .child(
                     elide(label)
                         .flex_1()
-                        .text_size(px(12.))
+                        .text_size(rems(0.8125))
                         .text_color(rgb(if is_filtered { LINK } else { TEXT })),
                 )
                 .when(is_filtered, |r| {

@@ -528,7 +528,7 @@ impl DesktopView {
         )
     }
 
-    fn open_stash_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_stash_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.stash_can_write() {
             return;
         }

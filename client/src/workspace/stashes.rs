@@ -51,10 +51,8 @@ pub struct StashState {
 
 impl StashState {
     pub(super) fn suspend_reads(&mut self) {
-        self.list_request = 0;
         self.files_request = 0;
         self.diff_request = 0;
-        self.loading = false;
         self.files_loading = false;
         self.diff_loading = false;
     }
@@ -68,9 +66,6 @@ pub(super) enum StashEvent {
 
 impl Workspace {
     pub(super) fn load_stashes(&mut self) {
-        if self.panel != Panel::Stash {
-            return;
-        }
         let Some(target) = self
             .current_target()
             .filter(|target| !self.writing(target.id))
@@ -234,13 +229,17 @@ impl Workspace {
                     Err(err) => {
                         self.stashes.snapshot = None;
                         self.read_stash_files(None, false);
-                        self.stashes.error = Some(err);
+                        if self.panel == Panel::Stash {
+                            self.stashes.error = Some(err);
+                        }
                         return;
                     }
                 };
                 self.stashes.error = None;
                 if self.stashes.snapshot.as_deref() == Some(&snapshot) {
-                    if let Some(entry) = self.stashes.selected.clone() {
+                    if self.panel == Panel::Stash
+                        && let Some(entry) = self.stashes.selected.clone()
+                    {
                         if self.stashes.files.is_empty() && !self.stashes.files_loading {
                             self.read_stash_files(Some(entry), true);
                         } else if self.stashes.diff.is_none()
@@ -266,7 +265,13 @@ impl Workspace {
                 let keep_file = keep.is_some();
                 let selected = keep.or_else(|| entries.first()).cloned();
                 self.stashes.snapshot = Some(Arc::new(snapshot));
-                self.read_stash_files(selected, keep_file);
+                if self.panel == Panel::Stash {
+                    self.read_stash_files(selected, keep_file);
+                } else {
+                    self.stashes.selected = selected;
+                    self.stashes.files.clear();
+                    self.close_stash_diff();
+                }
             }
             StashEvent::Files(serial, result) if serial == self.stashes.files_request => {
                 self.stashes.files_loading = false;
