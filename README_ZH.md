@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/UI-GPUI%20(GPU%20加速)-2ea043" alt="GPUI" />
   <img src="https://img.shields.io/badge/License-Apache--2.0-blue" alt="Apache-2.0 License" />
   <img src="https://img.shields.io/badge/macOS-Apple%20Silicon%20实机验证-1f6feb?logo=apple" alt="macOS Apple Silicon" />
-  <img src="https://img.shields.io/badge/Tests-160%2B%20项测试通过-brightgreen" alt="160+ Tests Passing" />
+  <img src="https://img.shields.io/badge/Tests-170%2B%20项测试通过-brightgreen" alt="170+ Tests Passing" />
 </p>
 
 ---
@@ -59,32 +59,34 @@
 ## 核心亮点
 
 ### 1. 多仓业务分组总览、异步嵌套子仓库 & Git Worktree 一等公民
-- **按业务自定义分组 & 丝滑拖拽**：将本地仓库归入不同业务组（同一仓库可跨多组并共享实时状态）。支持直接从访达（Finder）拖入单个或多个文件夹到指定分组（亮起高亮落点并自动展开）或空白处，也支持应用内直接拖动仓库行跨组移动；折叠分组时组头依然清晰汇总（如 `3 个仓库 · 2 个有差异 · 1 个待确认`）。
-- **异步嵌套子仓库自动发现 & 可折叠子树**：添加包含大量嵌套微服务子仓的父项目时，主仓库零等待即刻可用，后台低优先级剪枝扫描线程（跳过 `node_modules`/`target`/符号链接、命中 `.git` 即止）在毫秒级发现全部子仓库并以轻提示引导纳管。可一键勾选**挂在父仓库下形成可折叠子树**（折叠态自带 `23 个子仓库 · 4 个有差异` 聚合胶囊，右键支持「刷新主仓及全部子仓库」）或新建独立分组；每个子仓库均享有 100% 与主仓库平权的完整 Git 能力。
+- **按业务自定义分组 & 丝滑拖拽**：将本地仓库归入不同业务组（同一仓库可跨多组并共享实时状态）。支持直接从访达（Finder）拖入单个或多个文件夹到指定分组（亮起高亮落点并自动展开）或空白处，也支持应用内直接拖动仓库行跨组移动；折叠分组时组头依然清晰汇总待同步数量。
+- **异步嵌套子仓库自动发现 & 可折叠子树**：添加包含大量嵌套微服务子仓的父项目时，主仓库零等待即刻可用，后台低优先级剪枝扫描线程（跳过 `node_modules`/`target`/符号链接、命中 `.git` 即止）在毫秒级发现全部子仓库并以轻提示引导纳管。可一键勾选**挂在父仓库下形成可折叠子树**（支持**双击父仓整行**或点击子仓胶囊直接展开/收起，右键支持「刷新主仓及全部子仓库」）或新建独立分组；每个子仓库均享有 100% 与主仓库平权的完整 Git 能力。
 - **普通容器文件夹智能批量建组导入**：直接把本身不是 Git 仓库、但内部装着多个 Git 项目的普通目录拖入列表，自动后台扫描并弹窗一键按目录名建组批量导入。
-- **无需点开详情即可洞察同步状态**：每行直接展示当前分支与相对配置上游 `@{upstream}` 的精准 `↓ 落后 / ↑ 领先` 提交数，同时清晰区分分离 `HEAD`、空分支、未配置上游、上游已删除、认证失败及失效路径等异常状态。
+- **零噪音实时同步状态 & 侧栏语义徽章**：仅在存在待同步提交时展示紧凑彩色 `↓ 落后 / ↑ 领先` 胶囊（彻底消除 `0 / 0` 噪音）；顶部四段式页签（`仓库 / Commit / Stash / Shelf`）实时汇总工作区状态计数，并支持切回窗口时的 Stale-While-Revalidate 无感静默刷新。
 - **并发可控、故障隔离的后台 Fetch**：支持单仓刷新、父仓及全部子仓联动刷新、整组一键刷新，自动合并重复请求并限制并发；某个仓库断网、HTTP 401 或路径失效时，不影响其他健康仓库继续刷新，并支持逐行单独重试。
 - **严格的异步状态归属校验**：每个后台读写任务均绑定发起时的工作树、分支与上游快照。刷新期间切仓或在终端切分支，迟到结果绝不会串仓或污染当前草稿与刷新时间。
 - **原生 Git Worktrees 管理**：顶栏直接管理关联工作树——支持列表查看、新建工作树（可同时建新分支并自动登记）、锁定/解锁、移除（保护主工作树）及 Prune 清理；关联工作树各自独立显示状态，并在共享远端引用更新后自动重算。
 
 ### 2. 完整的专业级 Git 工作流
 - **三态勾选变更树与精准提交（对齐并超越 Rebased）**：支持按「更改 / 未跟踪文件」目录压缩树或经典「已暂存 / 未暂存」双区视图自由切换，文件/目录/分组三态复选框直连 Git Index（局部 Hunk 自动呈现半选态 `−`）；内置 7 键专业工具栏、右键一键添加 `.gitignore` / 回滚 / 搁置 / 编辑器打开、可拖拽提交框高度、提交历史消息下拉、`⌘Enter` 直接提交以及提交选项齿轮（审阅确认、`-s` Signed-off-by、`--no-verify`、Conventional 前缀）。
-- **Log 左侧可折叠 Branches 分支树面板**：按 `HEAD / Local / Remote / Tags` 分组展示并支持 `/` 目录折叠、星标收藏置顶、实时搜索、点击筛选 Log 或跳转定位，内置完整右键菜单（远端分支检出、Checkout & Rebase、修订对比、与工作树 Diff、`F2` 重命名及安全删除）。
+- **双模式分支与标签树（侧栏底部分支抽屉 + `⌘B` 独立分栏）**：按 `HEAD / Local / Remote / Tags` 分组展示并支持 `/` 目录折叠、星标收藏置顶、实时搜索、点击筛选 Log 或跳转定位；默认在**侧栏底部以可拖拽高度抽屉**呈现（保持清爽三栏黄金比例），按 `⌘B` 即可一键展开为 **Log 左侧独立分栏**，内置完整右键菜单（远端分支检出、Checkout & Rebase、修订对比、与工作树 Diff、`F2` 重命名及安全删除）。
+- **命令与仓库快速跳转面板（`⇧⌘P`）**：无需离开键盘即可全局检索执行高频 Git 操作、切换面板/Diff 视图或直达任意已登记仓库。
 - **可视化交互式 Rebase 与中断恢复**：支持标准 Rebase（含 `--autostash`）与可视化交互式 Rebase（上下调序、切换 `Pick / Reword / Squash / Fixup / Drop` 与自定义提交说明）；冲突中断后展示进度横幅，重启应用后仍可无缝 `Continue / Skip / Abort`。
 - **内置三方冲突解决器**：按操作语义（Merge / Rebase / Cherry-pick / Revert）清晰标注 `Base / Yours / Theirs`，支持一键采用本地、采用传入、保留双方，或使用内置多行合并编辑器手动编辑后直接保存暂存。
 - **Merge、Cherry-pick、Reset 与 Revert**：合并支持快进 / `--no-ff` / `--ff-only` / `--squash`；Cherry-pick 支持 `-x` 与合并提交 `-m`；支持 Undo Commit（`--soft HEAD^`）、Reset（`Soft / Mixed / Hard / Keep`）与 Revert（含冲突恢复）。
 - **双保险搁置体系：Stash + 独立 Shelf**：
   - **Stash**：按已暂存、未暂存、未跟踪三层分别预览逐文件 Diff，支持 Apply、Pop、单条 Drop 以及从原基点恢复到新分支。
   - **Shelf**：独立补丁存储于 `<git-common-dir>/githalo-shelf/`，完全不触碰 `refs/stash`；支持按文件选择性搁置、Diff 预览、Unshelve（保留或移出）及删除。
-- **远端、分支与标签全管理**：Clone、Init、Remotes 管理、分支上游跟踪绑定/解除、轻量与附注标签的创建/推送/删除；Pull 支持三段策略切换（`--ff-only` / `Merge` / `Rebase --autostash`）；Push 支持 `--force-with-lease` 安全强推与日志右键「推送至此提交」。
+- **远端、分支与标签全管理**：Clone、Init、Remotes 管理、分支上游跟踪绑定/解除（支持从侧栏底栏一键绑定）、轻量与附注标签的创建/推送/删除；Pull 支持三段策略切换（`--ff-only` / `Merge` / `Rebase --autostash`）；Push 支持 `--force-with-lease` 安全强推与日志右键「推送至此提交」。
 
 ### 3. 语法高亮 Diff、内置专业代码编辑器与深度历史检索
-- **全量 Diff 语法高亮 + 词级行内差异**：提交 Diff、工作区 Diff、Stash Diff、Shelf Diff 均接入 `syntect` TextMate 语法高亮并叠加词级行内差异背景，支持实时切换「并排 / 统一」视图与全宽「提交 Diff」标签页连续审阅（`← / →`）。
+- **全量 Diff 语法高亮 + 词级行内差异**：提交 Diff、工作区 Diff、Stash Diff、Shelf Diff 均接入 `syntect` TextMate 语法高亮并叠加词级行内差异背景，支持实时切换「并排 / 统一」视图；单击变更文件可在提交卡片下方展开内联 Diff，双击则展开全宽「提交 Diff」标签页连续审阅（`← / →`）。
 - **原生一体化代码编辑器与行号槽 Git 集成**：项目文件树配备 30+ 种彩色矢量文件图标与实时筛选，双击文件直接打开内置专业 GPUI 编辑器，支持 50+ 门语言（含 HTML 内嵌 CSS/JS）实时高亮、撤销/重做、智能缩进、中文 IME、查找/替换（`⌘F`/`⌥⌘F`）、跳转行（`⌘G`）、软换行、书签（`F3`）、**行内嵌入式 Git Blame 栏**以及**行号槽实时变更色条与单块 Diff 预览/可撤销回滚**。
-- **结构化历史筛选**：提交图展示彩色分支 / HEAD / 远端 / 标签胶囊徽章，支持关键词与 `author:`、`branch:`、`after:`、`before:` 组合筛选，并支持突破初始 200 条按需加载更多历史。
+- **平滑贝塞尔提交图谱、作者头像与结构化历史检索**：提交图绘制平滑三次贝塞尔多色分支曲线、双环 `HEAD` 节点、Conventional 前缀弱化高亮、作者彩色首字母头像与相对时间列；支持关键词与 `author:`、`branch:`、`after:`、`before:` 组合筛选，并支持突破初始 200 条按需加载更多历史。
 - **单文件历史、逐行 Blame 与任意修订比较**：在 Diff 顶部一键打开「历史 / Blame」双页签弹窗；在提交图右键可将任意提交设为比较基准，跨版本比对文件差异。
 
-### 4. 为速度、安全感与真实开发环境而生
+### 4. 为速度、安全感与原生桌面质感而生
+- **原生 macOS 交互打磨与全局自适应缩放**：内置完整 7 组原生系统菜单栏、无遮挡底部状态栏悬停预览（彻底告别遮挡列表的大气泡 Tooltip）、对齐 Apple HIG 的原生箭头光标，以及持久化 `90%`–`130%` 全局界面缩放（`⌘=` / `⌘-` / `⌘0`）。
 - **100% 直接驱动本机 Git CLI**：不依赖 `libgit2` 重写协议层，天然完美兼容你本机的 SSH Agent、GPG 签名、Git Hooks（`pre-commit` / `pre-push` 等）、`.gitconfig` `includeIf` 与凭据管理器。
 - **显式确认与防误操作**：提交、推送（明确区分 Fork 推送目标与上游分支）、安全强推、Hard Reset、中止合并/变基等操作均带清晰确认预览，标明实际作用的工作树、分支、目标与文件范围。
 - **原生中 / 英双语**：默认自动识别系统语言，也可在偏好设置中随时切换或通过 `GITHALO_LANG=en|zh` 临时指定。
@@ -139,10 +141,15 @@ cargo test --release --locked --no-default-features --test workspace_flow first_
 
 | 快捷键（macOS / Linux & Win） | 功能 |
 | --- | --- |
+| `Cmd+Shift+P` / `Ctrl+Shift+P` | 打开命令与仓库快速跳转面板 |
 | `Cmd+K` / `Ctrl+K` | 打开 Commit 提交页 |
 | `Cmd+Shift+K` / `Ctrl+Shift+K` | 打开 Push 推送确认 |
 | `Cmd+T` / `Ctrl+T` | 打开 Pull 拉取弹窗 |
 | `Cmd+L` / `Ctrl+L` | 聚焦提交历史搜索与筛选栏 |
+| `Cmd+B` / `Ctrl+B` | 切换 Log 左侧独立分支分栏 |
+| `Cmd+\` / `Ctrl+\` | 显示 / 隐藏侧边栏 |
+| `Cmd+1`–`Cmd+5` | 快速切换仓库、Commit、Stash、Shelf 与项目文件面板 |
+| `Cmd+=` / `Cmd+-` / `Cmd+0` | 全局自适应缩放（`90%`–`130%`）/ 重置为 `100%` |
 | `←` / `→` | 在全宽「提交 Diff」标签页切换上一/下一变更文件 |
 
 ---
@@ -194,13 +201,12 @@ GITHALO_DB=/tmp/githalo-demo.sqlite3 ./client/target/release/githalo
 
 | 平台 | 当前状态 | 说明 |
 | --- | --- | --- |
-| **macOS (Apple Silicon)** | 已实机验证 | 完整桌面交互与 145 项自动化回归全部通过 |
+| **macOS (Apple Silicon)** | 已实机验证 | 完整桌面交互与 170+ 项自动化回归全部通过 |
 | **macOS (Intel)** | 实验性支持 | 复用 GPUI Metal 后端，欢迎社区实测反馈 |
 | **Linux (Wayland / X11)** | 实验性支持 | 数据层已接入 CI，`gpui_platform` 已开启 Wayland/X11，欢迎 PR |
 | **Windows** | 规划中 | GPUI Windows 后端适配与打包，欢迎参与贡献 |
 
 **后续规划：**
-- Diff 与 Blame 视图语法高亮
 - 浅色主题与自定义配色方案
 - Git Submodules 与 Git LFS 专项工作流
 - macOS Intel / Linux / Windows 预编译安装包与 Homebrew Cask 分发

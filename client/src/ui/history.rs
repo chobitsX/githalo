@@ -596,7 +596,7 @@ impl DesktopView {
 
         let graph = (!filtered && count > 0).then(|| graph::Graph::from_commits(commits));
         let natural_width = graph.as_ref().map_or(18., |g| g.width);
-        let graph_width = natural_width.min(f32::from(width) / 3.2).max(24.);
+        let graph_width = natural_width.min(f32::from(width) / 3.2).max(38.);
 
         let header_row = (count > 0).then(|| {
             div()
@@ -614,6 +614,7 @@ impl DesktopView {
                     div()
                         .w(px(graph_width))
                         .flex_shrink_0()
+                        .whitespace_nowrap()
                         .child(tr("图谱", "Graph")),
                 )
                 .child(div().flex_1().min_w_0().child(tr("提交说明", "Subject")))
@@ -798,11 +799,14 @@ impl DesktopView {
                             .child(lbl)
                     }))
                     .child(div().flex_1())
-                    .when(!patch_open && file_count > 0, |h| {
-                        h.child(div().text_size(px(10.5)).text_color(rgb(SUBTLE)).child(tr(
-                            "单击预览 · 双击展开",
-                            "Click preview · Double-click expand",
-                        )))
+                    .when(!patch_open && file_count > 0 && width >= px(260.), |h| {
+                        h.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(10.5))
+                                .text_color(rgb(SUBTLE))
+                                .child(tr("单击预览 · 双击展开", "Click preview · Dbl-click")),
+                        )
                     }),
             )
             .child(

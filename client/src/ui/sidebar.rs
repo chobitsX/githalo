@@ -176,7 +176,9 @@ impl DesktopView {
             + usize::from(counts.stash_entries > 0)
             + usize::from(counts.shelf_entries > 0);
         let compact = width < px(244. * scale);
-        let dot_only = width < px((216. + active_badges.saturating_sub(1) as f32 * 20.) * scale);
+        let lang_extra = if is_zh() { 0. } else { 26. };
+        let dot_only =
+            width < px((216. + lang_extra + active_badges.saturating_sub(1) as f32 * 20.) * scale);
 
         let repos_tip = (counts.diverged_repos > 0).then(|| {
             if is_zh() {
