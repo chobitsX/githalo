@@ -21,11 +21,9 @@ use super::{
     Confirm, DeleteSelectedBranch, DesktopView, RenameSelectedBranch, TextField, text_field,
 };
 
-pub(super) const BRANCHES_STRIPE_WIDTH: f32 = 26.;
-const BRANCHES_TOOLBAR_WIDTH: f32 = 30.;
-const BRANCHES_DEFAULT_WIDTH: f32 = 242.;
+const BRANCHES_DEFAULT_WIDTH: f32 = 232.;
 const BRANCHES_MIN_WIDTH: f32 = 186.;
-const BRANCHES_MAX_WIDTH: f32 = 420.;
+const BRANCHES_MAX_WIDTH: f32 = 400.;
 
 pub(super) struct BranchesPanelUi {
     pub(super) focus: FocusHandle,
@@ -868,64 +866,88 @@ impl DesktopView {
         rows.iter().find(|row| row.key() == key)
     }
 
-    /// Collapsed vertical "Branches" stripe on the far left of the Log view (matching Figure 1).
-    pub(super) fn branches_collapsed_stripe(&self, cx: &mut Context<Self>) -> AnyElement {
-        let has_filter = self.workspace.branch_filter.is_some();
-        let chars: Vec<String> = if is_zh() {
-            vec!["分".into(), "支".into()]
-        } else {
-            "Branches".chars().map(|c| c.to_string()).collect()
-        };
-        div()
-            .id("expand-branches-stripe")
-            .role(Role::Button)
-            .aria_label(tr("展开分支面板", "Expand Branches panel"))
-            .tab_index(0)
-            .tooltip(tooltip(
-                tr("展开 Branches 分支面板", "Expand Branches Panel").to_owned(),
-            ))
-            .w(px(BRANCHES_STRIPE_WIDTH))
-            .h_full()
-            .flex_shrink_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .pt(px(8.))
-            .gap(px(6.))
-            .bg(rgb(0x1d1f23))
-            .border_r_1()
-            .border_color(rgb(BORDER))
-            .cursor_pointer()
-            .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-            .text_color(rgb(MUTED))
-            .child(icon(Icon::ChevronRight, MUTED))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .gap(px(if is_zh() { 3. } else { 0. }))
-                    .text_size(px(10.5))
-                    .line_height(px(if is_zh() { 14. } else { 11.5 }))
-                    .font_weight(FontWeight::MEDIUM)
-                    .children(chars.into_iter().map(|ch| div().child(ch))),
-            )
-            .when(has_filter, |stripe| {
-                stripe.child(
-                    div()
-                        .mt(px(4.))
-                        .size(px(6.))
-                        .rounded(px(999.))
-                        .bg(rgb(LINK)),
+    /// Resizable Branches & Tags drawer docked at the bottom of the Repositories sidebar.
+    pub(super) fn sidebar_branches_drawer(&self, cx: &mut Context<Self>) -> Div {
+        let snapshot = self.active_branch_snapshot();
+        let query_text = self.branches_ui.search.read(cx).text().to_owned();
+        let rows: Vec<BranchTreeRow> = snapshot
+            .as_ref()
+            .map(|snap| {
+                build_branch_tree_rows(
+                    snap,
+                    &TreeBuildOptions {
+                        query: &query_text,
+                        group_by_dir: self.branches_group_by_dir,
+                        show_tags: self.branches_show_tags,
+                        only_favorites: self.branches_only_favorites,
+                        favorites: &self.favorite_branches,
+                        collapsed: &self.branches_ui.collapsed,
+                    },
                 )
             })
-            .on_click(cx.listener(|view, _, _, cx| {
-                view.toggle_branches_panel(cx);
-            }))
-            .into_any_element()
+            .unwrap_or_default();
+
+        let header = self.branches_header_bar(
+            "drawer",
+            tr("分支与标签", "Branches & Tags"),
+            snapshot.as_ref(),
+            &rows,
+            false,
+            cx,
+        );
+        let body = self.branches_tree_body(
+            "drawer-branches-list",
+            snapshot.as_ref(),
+            rows,
+            &query_text,
+            cx,
+        );
+        let current_h = self.branches_drawer_height;
+
+        div()
+            .h(current_h)
+            .flex_shrink_0()
+            .min_h(px(136.))
+            .flex()
+            .flex_col()
+            .bg(rgb(RAIL_BG))
+            .border_t_1()
+            .border_color(rgb(BORDER_STRONG))
+            .child(
+                div()
+                    .id("branches-drawer-splitter")
+                    .h(px(6.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor(CursorStyle::ResizeUpDown)
+                    .hover(|s| s.bg(rgb(HOVER)))
+                    .child(
+                        div()
+                            .w(px(26.))
+                            .h(px(2.))
+                            .rounded(px(2.))
+                            .bg(rgb(BORDER_STRONG)),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
+                            if event.click_count >= 2 {
+                                view.branches_drawer_height = px(236.);
+                                cx.notify();
+                            } else {
+                                view.branches_drawer_drag = Some((event.position.y, current_h));
+                            }
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+            .child(header)
+            .child(body)
     }
 
-    /// Expanded Branches panel (vertical icon toolbar + search field + tree + resizable sash).
+    /// Expanded standalone Branches column on the left of Log (toggled via `⌘B`).
     pub(super) fn branches_panel(&self, panel_width: Pixels, cx: &mut Context<Self>) -> Div {
         let snapshot = self.active_branch_snapshot();
         let query_text = self.branches_ui.search.read(cx).text().to_owned();
@@ -946,8 +968,21 @@ impl DesktopView {
             })
             .unwrap_or_default();
 
-        let toolbar = self.branches_toolbar(snapshot.as_ref(), &rows, cx);
-        let tree_body = self.branches_tree_body(snapshot.as_ref(), rows, &query_text, cx);
+        let header = self.branches_header_bar(
+            "col",
+            tr("分支", "Branches"),
+            snapshot.as_ref(),
+            &rows,
+            true,
+            cx,
+        );
+        let tree_body = self.branches_tree_body(
+            "branches-tree-list",
+            snapshot.as_ref(),
+            rows,
+            &query_text,
+            cx,
+        );
 
         div()
             .flex()
@@ -958,10 +993,11 @@ impl DesktopView {
                     .w(panel_width)
                     .h_full()
                     .flex()
+                    .flex_col()
                     .min_w_0()
                     .min_h_0()
-                    .bg(rgb(0x1b1c20))
-                    .child(toolbar)
+                    .bg(rgb(SIDEBAR_BG))
+                    .child(header)
                     .child(tree_body),
             )
             .child(self.branches_sash(panel_width, cx))
@@ -975,7 +1011,7 @@ impl DesktopView {
             .border_l_1()
             .border_color(rgb(BORDER))
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|s| s.bg(rgb(ACTIVE_BORDER)))
+            .hover(|s| s.bg(rgb(BRAND)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
@@ -985,10 +1021,13 @@ impl DesktopView {
             )
     }
 
-    fn branches_toolbar(
+    fn branches_header_bar(
         &self,
+        scope: &'static str,
+        title: &'static str,
         snapshot: Option<&Arc<BranchSnapshot>>,
         rows: &[BranchTreeRow],
+        standalone: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let writable = self.daily_can_write();
@@ -1004,18 +1043,6 @@ impl DesktopView {
             }
             _ => None,
         };
-
-        let can_delete = writable
-            && matches!(
-                selected,
-                Some(BranchTreeRow::LocalBranch {
-                    is_current: false,
-                    occupied_path: None,
-                    ..
-                }) | Some(BranchTreeRow::RemoteBranch { .. })
-                    | Some(BranchTreeRow::Tag { .. })
-            );
-        let delete_target = selected.cloned();
 
         let compare_target = match selected {
             Some(BranchTreeRow::LocalBranch {
@@ -1052,88 +1079,60 @@ impl DesktopView {
             _ => None,
         };
         let selected_is_fav = fav_target.as_ref().is_some_and(|(_, fav)| *fav);
-
-        let all_folder_keys: Vec<String> = rows
-            .iter()
-            .filter_map(|row| match row {
-                BranchTreeRow::Section { key, .. } | BranchTreeRow::Folder { key, .. } => {
-                    Some(key.clone())
-                }
-                _ => None,
-            })
-            .collect();
-
         let filter_mode = self.branches_click_mode == BranchClickMode::Filter;
-        let selected_repo_id = self.workspace.selected;
 
-        let bar_btn = |id: &'static str,
+        let hdr_btn = |name: &'static str,
                        kind: Icon,
                        tip: &str,
                        enabled: bool,
                        active: bool,
                        tint: Option<u32>| {
             let color = if !enabled {
-                0x4f535b
+                SUBTLE
             } else if let Some(c) = tint {
                 c
             } else if active {
-                LINK
+                BRAND_TEXT
             } else {
                 MUTED
             };
             div()
-                .id(id)
+                .id(SharedString::from(format!("{scope}-{name}")))
                 .role(Role::Button)
                 .aria_label(tip.to_owned())
                 .tooltip(tooltip(tip.to_owned()))
-                .size(px(23.))
+                .size(px(22.))
                 .flex()
                 .flex_shrink_0()
                 .items_center()
                 .justify_center()
                 .rounded(px(4.))
-                .when(active && enabled, |b| {
-                    b.bg(rgb(ACCENT_BG))
-                        .border_1()
-                        .border_color(rgb(ACCENT_BORDER))
-                })
+                .when(active && enabled, |b| b.bg(rgb(BRAND_BG)))
                 .when(enabled, |b| {
                     b.tab_index(0)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(rgb(if active { ACTIVE } else { HOVER })))
+                        .hover(move |s| s.bg(rgb(if active { BRAND_BG } else { HOVER })))
                 })
                 .child(icon(kind, color))
         };
 
-        let sep = || div().w(px(16.)).h(px(1.)).my(px(2.)).bg(rgb(BORDER));
-
         div()
-            .w(px(BRANCHES_TOOLBAR_WIDTH))
-            .h_full()
-            .flex_shrink_0()
+            .h(rems(if standalone { 2.125 } else { 1.6875 }))
+            .px(px(8.))
+            .gap(px(2.))
             .flex()
-            .flex_col()
+            .flex_shrink_0()
             .items_center()
-            .py(px(6.))
-            .gap(px(3.))
-            .bg(rgb(0x1f2126))
-            .border_r_1()
-            .border_color(rgb(BORDER))
+            .when(standalone, |h| h.border_b_1().border_color(rgb(BORDER)))
             .child(
-                bar_btn(
-                    "branches-hide",
-                    Icon::ChevronLeft,
-                    tr("折叠 Branches 面板", "Hide Branches Panel"),
-                    true,
-                    false,
-                    None,
-                )
-                .on_click(cx.listener(|view, _, _, cx| view.toggle_branches_panel(cx))),
+                elide(title)
+                    .flex_1()
+                    .text_size(rems(0.75))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(MUTED)),
             )
-            .child(sep())
             .child({
                 let snap = snapshot.cloned();
-                bar_btn(
+                hdr_btn(
                     "branches-new",
                     Icon::Add,
                     tr("新建分支…", "New Branch…"),
@@ -1156,89 +1155,13 @@ impl DesktopView {
                     }))
                 })
             })
-            .child(
-                bar_btn(
-                    "branches-pull",
-                    Icon::PullArrow,
-                    tr("拉取更新（Pull / Fetch）", "Update / Pull Current Branch"),
-                    writable && selected_repo_id.is_some(),
-                    false,
-                    None,
-                )
-                .when(writable && selected_repo_id.is_some(), |btn| {
-                    btn.on_click(cx.listener(|view, _, window, cx| {
-                        view.prepare_remote(RemoteOperation::Pull, window, cx);
-                    }))
-                }),
-            )
-            .child({
-                let snap = snapshot.cloned();
-                bar_btn(
-                    "branches-delete",
-                    Icon::Trash,
-                    tr("删除所选分支或标签", "Delete Selected Branch or Tag"),
-                    can_delete,
-                    false,
-                    None,
-                )
-                .when(can_delete, |btn| {
-                    btn.on_click(cx.listener(move |view, _, window, cx| {
-                        let Some(row) = &delete_target else {
-                            return;
-                        };
-                        match row {
-                            BranchTreeRow::LocalBranch {
-                                reference,
-                                full_name,
-                                ..
-                            } => {
-                                if let Some(snap) = &snap {
-                                    view.open_delete_branch_dialog(
-                                        snap.clone(),
-                                        reference.clone(),
-                                        full_name.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            }
-                            BranchTreeRow::RemoteBranch {
-                                remote, short_name, ..
-                            } => {
-                                if let Some(target) = view.active_worktree().cloned() {
-                                    view.open_delete_remote_branch_dialog(
-                                        target,
-                                        remote.clone(),
-                                        short_name.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            }
-                            BranchTreeRow::Tag { full_name, .. } => {
-                                if let Some(target) = view.active_worktree().cloned() {
-                                    view.dispatch_repo_op(
-                                        RepoOpAction::DeleteTag {
-                                            target,
-                                            name: full_name.clone(),
-                                        },
-                                        cx,
-                                    );
-                                }
-                            }
-                            _ => {}
-                        }
-                    }))
-                })
-            })
-            .child(sep())
             .child({
                 let head_oid_for_cmp = head_oid.clone();
                 let current_name = snapshot
                     .and_then(|s| s.branch_ref())
                     .map(|r| short_branch_display(&r.to_string_lossy()).to_owned())
                     .unwrap_or_else(|| "HEAD".to_owned());
-                bar_btn(
+                hdr_btn(
                     "branches-compare",
                     Icon::Compare,
                     tr("与当前分支比较", "Compare with Current Branch"),
@@ -1273,7 +1196,7 @@ impl DesktopView {
                         "Toggle Favorites Filter (select a branch to star)",
                     )
                 };
-                bar_btn(
+                hdr_btn(
                     "branches-favorite",
                     if selected_is_fav || self.branches_only_favorites {
                         Icon::StarFilled
@@ -1300,18 +1223,18 @@ impl DesktopView {
                 }))
             })
             .child(
-                bar_btn(
+                hdr_btn(
                     "branches-click-mode",
                     Icon::Target,
                     if filter_mode {
                         tr(
-                            "当前模式：点击分支筛选提交图（点击切换为定位提交）",
-                            "Click Mode: Filter Log by Branch (click to switch to Navigate)",
+                            "当前：点击分支筛选日志（点击切换为定位提交）",
+                            "Mode: Filter Log by Branch (click to switch to Navigate)",
                         )
                     } else {
                         tr(
-                            "当前模式：点击分支在提交图中定位（点击切换为筛选提交图）",
-                            "Click Mode: Navigate Log to Branch (click to switch to Filter)",
+                            "当前：点击分支定位提交（点击切换为筛选日志）",
+                            "Mode: Navigate Log to Branch (click to switch to Filter)",
                         )
                     },
                     true,
@@ -1327,12 +1250,14 @@ impl DesktopView {
                     cx.notify();
                 })),
             )
-            .child(sep())
             .child(
-                bar_btn(
+                hdr_btn(
                     "branches-settings",
                     Icon::Settings,
-                    tr("分支视图设置…", "Branch View Settings…"),
+                    tr(
+                        "分支视图选项与批量操作（分组 / Tags / 展开折叠 / 删除）…",
+                        "Branch View Options & Actions…",
+                    ),
                     true,
                     false,
                     None,
@@ -1343,40 +1268,61 @@ impl DesktopView {
                     },
                 )),
             )
-            .child(
-                bar_btn(
-                    "branches-expand-all",
-                    Icon::ExpandAll,
-                    tr("展开全部目录", "Expand All"),
+            .child(if standalone {
+                hdr_btn(
+                    "branches-dock-drawer",
+                    Icon::ChevronLeft,
+                    tr("收起回侧栏抽屉 (⌘B)", "Dock Back to Sidebar Drawer (⌘B)"),
                     true,
                     false,
                     None,
                 )
                 .on_click(cx.listener(|view, _, _, cx| {
-                    view.branches_ui.collapsed.clear();
+                    view.show_branches_panel = false;
+                    view.show_branches_drawer = true;
+                    view.save_preferences();
+                    view.refresh_app_menus(cx);
                     cx.notify();
-                })),
-            )
-            .child(
-                bar_btn(
-                    "branches-collapse-all",
-                    Icon::CollapseAll,
-                    tr("折叠全部目录", "Collapse All"),
+                }))
+            } else {
+                hdr_btn(
+                    "branches-popout-col",
+                    Icon::PanelLeft,
+                    tr(
+                        "独立展开为 Log 左侧分栏 (⌘B)",
+                        "Expand as Standalone Column (⌘B)",
+                    ),
                     true,
                     false,
                     None,
                 )
-                .on_click(cx.listener(move |view, _, _, cx| {
-                    view.branches_ui
-                        .collapsed
-                        .extend(all_folder_keys.iter().cloned());
-                    cx.notify();
-                })),
-            )
+                .on_click(cx.listener(|view, _, _, cx| {
+                    view.toggle_branches_panel(cx);
+                    view.refresh_app_menus(cx);
+                }))
+            })
+            .when(!standalone, |bar| {
+                bar.child(
+                    hdr_btn(
+                        "branches-close-drawer",
+                        Icon::Close,
+                        tr("隐藏底部分支抽屉", "Hide Branches Drawer"),
+                        true,
+                        false,
+                        None,
+                    )
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.show_branches_drawer = false;
+                        view.save_preferences();
+                        cx.notify();
+                    })),
+                )
+            })
     }
 
     fn branches_tree_body(
         &self,
+        list_id: &'static str,
         snapshot: Option<&Arc<BranchSnapshot>>,
         rows: Vec<BranchTreeRow>,
         query_text: &str,
@@ -1384,8 +1330,8 @@ impl DesktopView {
     ) -> Div {
         let has_query = !query_text.trim().is_empty();
         let search_bar = div()
-            .h(rems(2.375))
             .px(px(7.))
+            .py(px(4.))
             .flex()
             .flex_shrink_0()
             .items_center()
@@ -1395,13 +1341,13 @@ impl DesktopView {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .h(rems(1.75))
-                    .px(px(6.))
+                    .h(px(25.))
+                    .px(px(7.))
                     .gap(px(5.))
                     .flex()
                     .items_center()
-                    .rounded(px(5.))
-                    .bg(rgb(PANEL))
+                    .rounded(px(6.))
+                    .bg(rgb(CARD))
                     .border_1()
                     .border_color(rgb(BORDER))
                     .child(icon(Icon::Search, SUBTLE))
@@ -1418,7 +1364,7 @@ impl DesktopView {
                                 Icon::Close,
                                 tr("清除分支搜索", "Clear branch search"),
                             )
-                            .size(px(18.))
+                            .size(px(17.))
                             .on_click(cx.listener(
                                 |view, _, window, cx| {
                                     view.branches_ui
@@ -1454,7 +1400,6 @@ impl DesktopView {
                 .child(
                     div()
                         .id("clear-only-favs")
-                        .cursor_pointer()
                         .px(px(4.))
                         .rounded(px(3.))
                         .hover(|s| s.bg(rgb(HOVER)))
@@ -1486,7 +1431,7 @@ impl DesktopView {
             let snap_arc = snapshot.cloned();
             let active_filter = self.workspace.branch_filter.clone();
             let selected_key = self.branches_ui.selected_key.clone();
-            uniform_list("branches-tree-list", count, move |range, window, _cx| {
+            uniform_list(list_id, count, move |range, window, _cx| {
                 let Some(entity) = view.upgrade() else {
                     return Vec::new();
                 };
@@ -1703,6 +1648,66 @@ impl DesktopView {
                 },
             ),
         ];
+        items.push(menu_rule());
+        items.push(menu_item(
+            "bt-setting-expand-all",
+            tr("展开全部目录", "Expand All Directories"),
+            None,
+            cx,
+            |view, _, window, cx| {
+                view.branches_ui.collapsed.clear();
+                view.close_overlay(window, cx);
+            },
+        ));
+        items.push(menu_item(
+            "bt-setting-collapse-all",
+            tr("折叠全部目录", "Collapse All Directories"),
+            None,
+            cx,
+            |view, _, window, cx| {
+                if let Some(snap) = view.active_branch_snapshot() {
+                    let query = view.branches_ui.search.read(cx).text().to_owned();
+                    let empty = HashSet::new();
+                    let all_rows = build_branch_tree_rows(
+                        &snap,
+                        &TreeBuildOptions {
+                            query: &query,
+                            group_by_dir: view.branches_group_by_dir,
+                            show_tags: view.branches_show_tags,
+                            only_favorites: view.branches_only_favorites,
+                            favorites: &view.favorite_branches,
+                            collapsed: &empty,
+                        },
+                    );
+                    for row in all_rows {
+                        if let BranchTreeRow::Section { key, .. }
+                        | BranchTreeRow::Folder { key, .. } = row
+                        {
+                            view.branches_ui.collapsed.insert(key);
+                        }
+                    }
+                }
+                view.close_overlay(window, cx);
+            },
+        ));
+        if self.daily_can_write()
+            && self
+                .branches_ui
+                .selected_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("ref:"))
+        {
+            items.push(menu_item_shortcut(
+                "bt-setting-delete-sel",
+                tr("删除所选分支或标签…", "Delete Selected Branch or Tag…"),
+                "⌫",
+                cx,
+                |view, _, window, cx| {
+                    view.close_overlay(window, cx);
+                    view.trigger_delete_selected_branch(window, cx);
+                },
+            ));
+        }
         if self.workspace.branch_filter.is_some() {
             items.push(menu_rule());
             items.push(menu_item(
@@ -2850,7 +2855,6 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .gap(px(7.))
-                    .cursor_pointer()
                     .child(check_indicator(autostash))
                     .child(div().text_size(px(12.)).text_color(rgb(TEXT)).child(tr(
                         "自动暂存并恢复未提交改动（--autostash）",
@@ -2911,7 +2915,6 @@ fn menu_item_shortcut(
         .items_center()
         .justify_between()
         .gap(px(14.))
-        .cursor_pointer()
         .hover(|s| s.bg(rgb(ACTIVE)))
         .focus_visible(|s| s.bg(rgb(ACTIVE)))
         .child(div().text_color(rgb(TEXT)).child(label))
@@ -2950,7 +2953,6 @@ fn render_branch_row(
         .flex()
         .items_center()
         .gap(px(5.))
-        .cursor_pointer()
         .when(is_selected, |el| el.bg(rgb(ACTIVE)))
         .hover(move |s| s.bg(rgb(if is_selected { ACTIVE } else { HOVER })));
 
@@ -2958,7 +2960,7 @@ fn render_branch_row(
         BranchTreeRow::Head { branch_label, .. } => {
             let menu_snap = snapshot.cloned();
             let menu_label = branch_label.clone();
-            base.child(icon(Icon::HeadTag, LINK))
+            base.child(icon(Icon::HeadTag, BRAND))
                 .child(
                     elide(tr("HEAD (当前分支)", "HEAD (Current Branch)"))
                         .flex_1()
@@ -3151,7 +3153,7 @@ fn render_branch_row(
             let indent = px((depth as f32) * 14. + 18.);
             let is_filtered = active_filter == Some(ref_str.as_str());
             let (kind, icon_color) = if is_current {
-                (Icon::HeadTag, WARNING)
+                (Icon::Branch, BRAND)
             } else if is_favorite {
                 (Icon::StarFilled, WARNING)
             } else {
@@ -3159,6 +3161,7 @@ fn render_branch_row(
             };
             let menu_snap = snapshot.cloned();
             let occupied = occupied_path.is_some();
+            let upstream_hint = upstream.clone().filter(|_| !occupied && !is_filtered);
             base.pl(indent)
                 .child(icon(kind, icon_color))
                 .child(
@@ -3166,10 +3169,18 @@ fn render_branch_row(
                         .flex_1()
                         .text_size(rems(0.8125))
                         .when(is_current, |t| t.font_weight(FontWeight::SEMIBOLD))
-                        .text_color(rgb(if is_filtered { LINK } else { TEXT })),
+                        .text_color(rgb(if is_filtered { BRAND_TEXT } else { TEXT })),
                 )
+                .when_some(upstream_hint, |r, up| {
+                    r.child(
+                        elide(up)
+                            .max_w(px(88.))
+                            .text_size(rems(0.66))
+                            .text_color(rgb(SUBTLE)),
+                    )
+                })
                 .when(is_filtered, |r| {
-                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(LINK)))
+                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(BRAND)))
                 })
                 .when(occupied, |r| {
                     r.child(
@@ -3241,10 +3252,10 @@ fn render_branch_row(
                     elide(label)
                         .flex_1()
                         .text_size(rems(0.8125))
-                        .text_color(rgb(if is_filtered { LINK } else { TEXT })),
+                        .text_color(rgb(if is_filtered { BRAND_TEXT } else { TEXT })),
                 )
                 .when(is_filtered, |r| {
-                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(LINK)))
+                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(BRAND)))
                 })
                 .on_click(window.listener_for(
                     entity,
@@ -3304,10 +3315,10 @@ fn render_branch_row(
                     elide(label)
                         .flex_1()
                         .text_size(rems(0.8125))
-                        .text_color(rgb(if is_filtered { LINK } else { TEXT })),
+                        .text_color(rgb(if is_filtered { BRAND_TEXT } else { TEXT })),
                 )
                 .when(is_filtered, |r| {
-                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(LINK)))
+                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(BRAND)))
                 })
                 .on_click(window.listener_for(
                     entity,

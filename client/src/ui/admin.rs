@@ -786,7 +786,6 @@ impl DesktopView {
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .cursor_pointer()
                             .child(check_indicator(form.register_in_board))
                             .child("创建后自动添加到仓库列表")
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -1212,7 +1211,6 @@ impl DesktopView {
                         let f = file.clone();
                         div()
                             .id(("compare-file", idx))
-                            .cursor_pointer()
                             .h(px(24.))
                             .px(px(6.))
                             .rounded(px(4.))
@@ -1465,7 +1463,6 @@ impl DesktopView {
                         .bg(rgb(if selected { ACCENT_BG } else { CARD }))
                         .text_size(px(11.5))
                         .text_color(rgb(if selected { LINK } else { TEXT }))
-                        .cursor_pointer()
                         .hover(|s| s.bg(rgb(if selected { ACCENT_BG } else { HOVER })))
                         .child(r.name.clone())
                         .on_click(cx.listener(move |view, _, _, cx| {
@@ -1636,6 +1633,13 @@ impl DesktopView {
         let show_details = self.show_commit_details;
         let shortcuts = [
             (
+                format!("{mod_label}⇧P"),
+                tr(
+                    "打开全局命令与仓库快速跳转面板",
+                    "Open global Command & Repository Palette",
+                ),
+            ),
+            (
                 format!("{mod_label}K"),
                 tr(
                     "切换到 Commit 工作区变更面板",
@@ -1731,7 +1735,6 @@ impl DesktopView {
                                         .bg(rgb(if selected { ACCENT_BG } else { CARD }))
                                         .text_size(px(12.))
                                         .text_color(rgb(if selected { LINK } else { TEXT }))
-                                        .cursor_pointer()
                                         .hover(|s| {
                                             s.bg(rgb(if selected { ACCENT_BG } else { HOVER }))
                                         })
@@ -1780,7 +1783,6 @@ impl DesktopView {
                                 .text_color(rgb(if selected { LINK } else { TEXT }))
                                 .flex()
                                 .justify_center()
-                                .cursor_pointer()
                                 .hover(|s| s.bg(rgb(if selected { ACCENT_BG } else { HOVER })))
                                 .child(format!("{preset}%"))
                                 .on_click(cx.listener(move |view, _, window, cx| {
@@ -1834,7 +1836,6 @@ impl DesktopView {
                                 .bg(rgb(if selected { ACCENT_BG } else { CARD }))
                                 .text_size(px(12.))
                                 .text_color(rgb(if selected { LINK } else { TEXT }))
-                                .cursor_pointer()
                                 .hover(|s| s.bg(rgb(if selected { ACCENT_BG } else { HOVER })))
                                 .child(strategy.label())
                                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -1865,6 +1866,44 @@ impl DesktopView {
                     )
                     .child(
                         div()
+                            .id("settings-toggle-branches-drawer")
+                            .role(Role::CheckBox)
+                            .aria_label(tr(
+                                "在仓库侧栏底部显示分支与标签抽屉",
+                                "Show Branches & Tags drawer in repository sidebar",
+                            ))
+                            .aria_toggled(if self.show_branches_drawer {
+                                Toggled::True
+                            } else {
+                                Toggled::False
+                            })
+                            .tab_index(0)
+                            .flex()
+                            .items_center()
+                            .gap(px(7.))
+                            .px(px(8.))
+                            .py(px(6.))
+                            .rounded(px(5.))
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .bg(rgb(CARD))
+                            .hover(|s| s.bg(rgb(HOVER)))
+                            .child(check_indicator(self.show_branches_drawer))
+                            .child(tr(
+                                "在仓库侧栏底部显示可拖拽分支与标签抽屉",
+                                "Show resizable Branches & Tags drawer in repository sidebar",
+                            ))
+                            .on_click(cx.listener(|view, _, _, cx| {
+                                view.show_branches_drawer = !view.show_branches_drawer;
+                                if view.show_branches_drawer && view.active_branch_snapshot().is_none() && !view.workspace.daily.branches_loading {
+                                    view.dispatch_daily(githalo::workspace::DailyAction::LoadBranches, cx);
+                                }
+                                view.save_preferences();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
                             .id("settings-toggle-branches-panel")
                             .role(Role::CheckBox)
                             .aria_label(tr(
@@ -1886,7 +1925,6 @@ impl DesktopView {
                             .border_1()
                             .border_color(rgb(BORDER))
                             .bg(rgb(CARD))
-                            .cursor_pointer()
                             .hover(|s| s.bg(rgb(HOVER)))
                             .child(check_indicator(self.show_branches_panel))
                             .child(tr(
@@ -1920,7 +1958,6 @@ impl DesktopView {
                             .border_1()
                             .border_color(rgb(BORDER))
                             .bg(rgb(CARD))
-                            .cursor_pointer()
                             .hover(|s| s.bg(rgb(HOVER)))
                             .child(check_indicator(show_details))
                             .child(tr(
@@ -1956,7 +1993,6 @@ impl DesktopView {
                             .border_1()
                             .border_color(rgb(BORDER))
                             .bg(rgb(CARD))
-                            .cursor_pointer()
                             .hover(|s| s.bg(rgb(HOVER)))
                             .child(check_indicator(self.diff_side_by_side))
                             .child(tr(

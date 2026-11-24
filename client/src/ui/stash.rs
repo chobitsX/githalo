@@ -228,14 +228,16 @@ impl DesktopView {
                         .border_t_1()
                         .border_color(rgb(BORDER))
                         .children(actions.into_iter().map(|(id, label, operation)| {
-                            command_button(id, label, false, writable).px(px(6.)).when(
-                                writable,
-                                |button| {
-                                    button.on_click(cx.listener(move |view, _, window, cx| {
-                                        view.open_stash_review(operation, window, cx);
-                                    }))
-                                },
-                            )
+                            let btn = if matches!(operation, StashOperation::Drop) {
+                                danger_button(id, label, writable)
+                            } else {
+                                command_button(id, label, false, writable)
+                            };
+                            btn.flex_1().px(px(6.)).when(writable, |button| {
+                                button.on_click(cx.listener(move |view, _, window, cx| {
+                                    view.open_stash_review(operation, window, cx);
+                                }))
+                            })
                         })),
                 )
             })
@@ -295,7 +297,6 @@ impl DesktopView {
             .justify_center()
             .px(px(7.))
             .rounded(px(4.))
-            .cursor_pointer()
             .when(selected, |row| row.bg(rgb(ACTIVE)))
             .hover(move |row| row.bg(rgb(if selected { ACTIVE } else { HOVER })))
             .focus_visible(|row| row.bg(rgb(ACTIVE)))
@@ -370,7 +371,6 @@ impl DesktopView {
                     .px(px(9.))
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .tooltip(tooltip(title.clone()))
                     .child(elide(title).flex_1().font_weight(FontWeight::MEDIUM))
                     .child(
                         command_button(
@@ -425,7 +425,6 @@ impl DesktopView {
                                             .id("stash-diff-file")
                                             .min_w_0()
                                             .flex_1()
-                                            .tooltip(tooltip(path.clone()))
                                             .child(elide(path))
                                     }))
                                     .child(self.diff_mode_toggle("stash-diff-mode", cx)),
@@ -492,7 +491,6 @@ impl DesktopView {
             .gap(px(5.))
             .px(px(6.))
             .rounded(px(4.))
-            .cursor_pointer()
             .when(selected, |row| row.bg(rgb(ACTIVE)))
             .hover(move |row| row.bg(rgb(if selected { ACTIVE } else { HOVER })))
             .focus_visible(|row| row.bg(rgb(ACTIVE)))
@@ -797,7 +795,6 @@ fn stash_option(id: &'static str, label: &'static str, checked: bool) -> Statefu
         .rounded(px(3.))
         .px(px(4.))
         .py(px(3.))
-        .cursor_pointer()
         .hover(|row| row.bg(rgb(HOVER)))
         .focus_visible(|row| row.bg(rgb(HOVER)))
         .child(check_indicator(checked))

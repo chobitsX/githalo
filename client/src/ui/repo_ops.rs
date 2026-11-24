@@ -786,11 +786,10 @@ impl DesktopView {
                     .border_color(rgb(BORDER))
                     .child(icon(Icon::File, ERROR))
                     .child(
-                        elide(display.clone())
+                        elide(display)
                             .id((prefix, index))
                             .flex_1()
-                            .text_color(rgb(TEXT))
-                            .tooltip(tooltip(display)),
+                            .text_color(rgb(TEXT)),
                     )
                     .child(
                         command_button((prefix, 2000 + index), "三方解冲突…", true, writable)
@@ -1162,7 +1161,6 @@ impl DesktopView {
                                     .role(Role::Button)
                                     .aria_selected(selected)
                                     .tab_index(0)
-                                    .cursor_pointer()
                                     .px(px(9.))
                                     .py(px(6.))
                                     .rounded(px(5.))
@@ -1548,7 +1546,6 @@ impl DesktopView {
                                     .role(Role::Button)
                                     .aria_selected(selected)
                                     .tab_index(0)
-                                    .cursor_pointer()
                                     .px(px(9.))
                                     .py(px(6.))
                                     .rounded(px(5.))
@@ -1835,7 +1832,6 @@ impl DesktopView {
                     .rounded(px(3.))
                     .px(px(4.))
                     .py(px(3.))
-                    .cursor_pointer()
                     .child(check_indicator(form.checkout))
                     .child("创建后切换")
                     .on_click(cx.listener(|view, _, _, cx| {
@@ -1979,7 +1975,6 @@ impl DesktopView {
                     .rounded(px(4.))
                     .px(px(4.))
                     .py(px(3.))
-                    .cursor_pointer()
                     .hover(|row| row.bg(rgb(HOVER)))
                     .child(check_indicator(force))
                     .child(

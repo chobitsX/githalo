@@ -1100,8 +1100,8 @@ impl DesktopView {
                             .text_size(px(11.5))
                             .text_color(rgb(if has_head { MUTED } else { SUBTLE }))
                             .when(has_head, |row| {
-                                row.cursor_pointer().hover(|s| s.bg(rgb(HOVER))).on_click(
-                                    cx.listener(|view, _, _, cx| {
+                                row.hover(|s| s.bg(rgb(HOVER))).on_click(cx.listener(
+                                    |view, _, _, cx| {
                                         view.daily_ui.amend = !view.daily_ui.amend;
                                         if view.daily_ui.amend
                                             && let Some(target) = view.active_worktree().cloned()
@@ -1112,8 +1112,8 @@ impl DesktopView {
                                             );
                                         }
                                         cx.notify();
-                                    }),
-                                )
+                                    },
+                                ))
                             })
                             .child(check_indicator(amend && has_head))
                             .child(tr("Amend", "Amend"))
@@ -1181,7 +1181,6 @@ impl DesktopView {
                             .border_color(rgb(BORDER))
                             .text_size(px(10.5))
                             .text_color(rgb(MUTED))
-                            .cursor_pointer()
                             .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                             .child(kind_str)
                             .on_click(cx.listener(move |view, _, _, cx| {
@@ -1360,7 +1359,6 @@ impl DesktopView {
                     .rounded(px(5.))
                     .flex()
                     .items_center()
-                    .cursor_pointer()
                     .hover(|s| s.bg(rgb(HOVER)))
                     .child(icon(
                         if *expanded {
@@ -1455,7 +1453,6 @@ impl DesktopView {
                     .rounded(px(5.))
                     .flex()
                     .items_center()
-                    .cursor_pointer()
                     .hover(|s| s.bg(rgb(HOVER)))
                     .child(icon(
                         if *expanded {
@@ -1551,7 +1548,6 @@ impl DesktopView {
                     .rounded(px(5.))
                     .flex()
                     .items_center()
-                    .cursor_pointer()
                     .hover(|s| s.bg(rgb(HOVER)))
                     .child(icon(
                         if *expanded {
@@ -1692,7 +1688,6 @@ impl DesktopView {
                     .rounded(px(5.))
                     .flex()
                     .items_center()
-                    .cursor_pointer()
                     .when(selected, |r| r.bg(rgb(ACTIVE)))
                     .hover(move |r| r.bg(rgb(if selected { ACTIVE } else { HOVER })))
                     .focus_visible(|r| r.bg(rgb(ACTIVE)))
@@ -2327,7 +2322,6 @@ impl DesktopView {
                     .id("working-diff-path")
                     .flex_1()
                     .min_w_0()
-                    .tooltip(tooltip(path.clone()))
                     .child(elide(path)),
             )
             .child(self.diff_mode_toggle("working-diff-mode", cx))
@@ -2588,7 +2582,6 @@ impl DesktopView {
             .text_color(rgb(LINK))
             .text_size(rems(0.76))
             .whitespace_nowrap()
-            .cursor_pointer()
             .hover(|row| row.bg(rgb(ACTIVE)))
             .focus_visible(|row| row.bg(rgb(ACTIVE)))
             .child(check_indicator(selected))

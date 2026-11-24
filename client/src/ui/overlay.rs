@@ -148,6 +148,10 @@ pub(super) enum Dialog {
     CompareRevisions(CompareRevisionsDialog),
     Tags(TagsDialog),
     AdoptNested(AdoptNestedDialog),
+    CommandPalette {
+        input: Entity<TextField>,
+        selected_idx: usize,
+    },
     Settings,
     About,
     Shortcuts,
@@ -1134,6 +1138,17 @@ impl DesktopView {
                     }))
                     .child(self.adopt_nested_dialog(form, viewport_height, cx));
             }
+            Dialog::CommandPalette {
+                input,
+                selected_idx,
+            } => {
+                container = container
+                    .aria_label(tr("命令与跳转面板", "Command Palette"))
+                    .w(px(560.))
+                    .p(px(10.))
+                    .gap(px(8.))
+                    .child(self.command_palette_dialog(input, *selected_idx, viewport_height, cx));
+            }
             Dialog::Settings => {
                 container = container
                     .aria_label(tr("视图与偏好设置", "Settings"))
@@ -1177,7 +1192,6 @@ pub(super) fn menu_item(
         .px(px(8.))
         .py(px(3.))
         .rounded(px(3.))
-        .cursor_pointer()
         .hover(|s| s.bg(rgb(ACTIVE)))
         .focus_visible(|s| s.bg(rgb(ACTIVE)))
         .child(elide(label))

@@ -496,7 +496,6 @@ impl DesktopView {
                     .rounded(px(3.))
                     .px(px(4.))
                     .py(px(3.))
-                    .cursor_pointer()
                     .focus_visible(|row| row.bg(rgb(HOVER)))
                     .child(check_indicator(form.checkout))
                     .child("创建后切换")
@@ -640,7 +639,6 @@ impl DesktopView {
                             .px(px(8.))
                             .py(px(5.))
                             .rounded(px(4.))
-                            .cursor_pointer()
                             .hover(|s| s.bg(rgb(ACTIVE)))
                             .text_size(px(12.))
                             .child(name.clone())
@@ -928,7 +926,6 @@ impl DesktopView {
                                 .rounded(px(4.))
                                 .px(px(6.))
                                 .py(px(4.))
-                                .cursor_pointer()
                                 .hover(|s| s.bg(rgb(HOVER)))
                                 .child(check_indicator(push_after))
                                 .child("提交完成后立即打开 Push 预览（Commit & Push）")
@@ -1151,7 +1148,6 @@ impl DesktopView {
                                     } else {
                                         FontWeight::NORMAL
                                     })
-                                    .cursor_pointer()
                                     .hover(|s| s.bg(rgb(if selected { ACCENT_BG } else { HOVER })))
                                     .child(item.label())
                                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -1220,7 +1216,6 @@ impl DesktopView {
                             .rounded(px(4.))
                             .px(px(6.))
                             .py(px(4.))
-                            .cursor_pointer()
                             .hover(|s| s.bg(rgb(HOVER)))
                             .child(check_indicator(force))
                             .child(tr(

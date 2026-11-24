@@ -277,7 +277,6 @@ impl DesktopView {
                 .border_1()
                 .border_color(rgb(if active { 0x4db8a8 } else { BORDER }))
                 .bg(rgb(if active { 0x172d32 } else { CARD }))
-                .cursor_pointer()
                 .hover(|s| s.border_color(rgb(if active { 0x69e8ce } else { MUTED })))
                 .child(
                     div()
@@ -435,7 +434,6 @@ impl DesktopView {
                     .children(form.repos.iter().enumerate().map(|(idx, repo)| {
                         let checked = form.selected.contains(&repo.root);
                         let path = repo.root.clone();
-                        let full_tip = format!("{}\n{}", repo.name, repo.root.display());
                         div()
                             .id(("nested-item", idx))
                             .role(Role::CheckBox)
@@ -453,9 +451,7 @@ impl DesktopView {
                             .px(px(8.))
                             .py(px(4.))
                             .rounded(px(4.))
-                            .cursor_pointer()
                             .hover(|s| s.bg(rgb(HOVER)))
-                            .tooltip(tooltip(full_tip))
                             .child(
                                 div()
                                     .w(px(14.))

@@ -1,13 +1,20 @@
-use githalo::workspace::Commit;
+use githalo::workspace::{Commit, CommitRefKind};
 use gpui::{Hsla, IntoElement, PathBuilder, Styled, canvas, point, px, rgb};
 
-use super::components::{dot, gutter_line};
+use super::components::{PANEL, dot, gutter_line};
 
 const COLORS: [u32; 8] = [
-    0xb3638d, 0xc5a25e, 0x5ba7a9, 0x829ed0, 0x8cae75, 0xb786c9, 0xd28969, 0xb9a174,
+    0x5ed6be, // 品牌青绿（主干）
+    0xc49bff, // 柔紫
+    0x8fb4ff, // 天蓝
+    0xe8b968, // 暖金
+    0x7ccf8e, // 翠绿
+    0xf0947d, // 珊瑚
+    0x6ec5e8, // 冰青
+    0xd98cb8, // 玫瑰
 ];
-const SPACING: f32 = 11.;
-const INSET: f32 = 7.;
+const SPACING: f32 = 12.;
+const INSET: f32 = 8.;
 
 pub(super) struct Graph {
     pub rows: Vec<GraphRow>,
@@ -18,6 +25,7 @@ pub(super) struct Graph {
 pub(super) struct GraphRow {
     node: usize,
     color: u32,
+    is_head: bool,
     incoming_node: bool,
     through: Vec<(usize, u32)>,
     parents: Vec<(usize, u32)>,
@@ -31,6 +39,7 @@ impl Graph {
         let rows = commits
             .iter()
             .map(|commit| {
+                let is_head = commit.refs.iter().any(|r| r.kind == CommitRefKind::Head);
                 let existing = lanes
                     .iter()
                     .position(|lane| lane.is_some_and(|(oid, _)| oid == commit.oid));
@@ -72,6 +81,7 @@ impl Graph {
                 GraphRow {
                     node,
                     color,
+                    is_head,
                     incoming_node: existing.is_some(),
                     through,
                     parents,
@@ -120,18 +130,29 @@ pub(super) fn cell(row: Option<GraphRow>, width: f32, natural_width: f32) -> imp
                     gutter_line(window, x, mid, bounds.size.height / 2., color);
                 } else {
                     let ending = at(lane);
-                    let bend = mid + px(7.);
-                    let mut branch = PathBuilder::stroke(px(1.));
+                    let bottom = bounds.bottom();
+                    let ctrl_y = mid + (bottom - mid) * 0.55;
+                    let mut branch = PathBuilder::stroke(px(1.6));
                     branch.move_to(point(x, mid));
-                    branch.line_to(point(ending, bend));
-                    branch.line_to(point(ending, bounds.bottom()));
+                    branch.cubic_bezier_to(
+                        point(ending, bottom),
+                        point(x, ctrl_y),
+                        point(ending, mid + px(2.)),
+                    );
                     if let Ok(path) = branch.build() {
                         let color: Hsla = rgb(color).into();
                         window.paint_path(path, color);
                     }
                 }
             }
-            dot(window, point(x, mid), px(7.5), rgb(row.color).into());
+            if row.is_head {
+                dot(window, point(x, mid), px(10.5), rgb(row.color).into());
+                dot(window, point(x, mid), px(7.0), rgb(PANEL).into());
+                dot(window, point(x, mid), px(3.8), rgb(row.color).into());
+            } else {
+                dot(window, point(x, mid), px(9.0), rgb(PANEL).into());
+                dot(window, point(x, mid), px(6.5), rgb(row.color).into());
+            }
         },
     )
     .w(px(width))

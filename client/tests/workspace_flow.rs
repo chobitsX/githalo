@@ -212,6 +212,12 @@ fn settled(workspace: &Workspace) -> bool {
         && !workspace.changes_loading
         && !workspace.diff_loading
         && !workspace.tree_loading
+        && !workspace.daily.changes_loading
+        && !workspace.daily.branches_loading
+        && !workspace.daily.diff_loading
+        && !workspace.stashes.loading
+        && !workspace.stashes.files_loading
+        && !workspace.shelves.loading
         && !workspace.cherry_pick.loading
         && !workspace.repo_ops.loading
         && workspace

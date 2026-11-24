@@ -17,7 +17,7 @@ use gpui::{
 };
 
 use super::DesktopView;
-use super::branches::{BRANCHES_STRIPE_WIDTH, short_branch_display};
+use super::branches::short_branch_display;
 use super::components::*;
 use super::file_icons::{file_type_icon, folder_type_icon};
 use super::graph;
@@ -46,13 +46,13 @@ impl DesktopView {
         let branches_occupied = if self.show_branches_panel {
             branches_panel_width + px(4.)
         } else {
-            px(BRANCHES_STRIPE_WIDTH)
+            px(0.)
         };
         let log_and_details_width = (available - branches_occupied).max(px(280.));
         let details_width = if has_commit_file {
-            (log_and_details_width * 0.48).clamp(px(220.), px(640.))
+            (log_and_details_width * 0.46).clamp(px(260.), px(620.))
         } else {
-            (log_and_details_width * 0.32).clamp(px(200.), px(348.))
+            (log_and_details_width * 0.33).clamp(px(240.), px(368.))
         };
         let log_tab_title = match self.workspace.branch_filter.as_deref() {
             Some(reference) => format!("Log: {}", short_branch_display(reference)),
@@ -65,21 +65,24 @@ impl DesktopView {
             .min_w_0()
             .min_h_0()
             .bg(rgb(PANEL))
-            .rounded(px(9.))
             .overflow_hidden()
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(5.))
-                    .h(rems(2.375))
+                    .gap(px(4.))
+                    .h(rems(2.1875))
                     .px(px(8.))
                     .flex_shrink_0()
+                    .bg(rgb(SIDEBAR_BG))
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(
                         workspace_tab("log-tab", log_tab_title.clone(), log_active)
-                            .child(icon(Icon::Branch, TEXT))
+                            .child(icon(
+                                Icon::Branch,
+                                if log_active { BRAND_TEXT } else { MUTED },
+                            ))
                             .child(elide(log_tab_title).max_w(px(240.)))
                             .when(!log_active, |tab| {
                                 tab.on_click(cx.listener(|view, _, _, cx| {
@@ -129,26 +132,34 @@ impl DesktopView {
                                         .flex_shrink_0()
                                         .items_center()
                                         .gap(px(5.))
-                                        .h(rems(1.6875))
+                                        .h(rems(1.5625))
                                         .pl(px(8.))
                                         .pr(px(4.))
                                         .rounded(px(5.))
                                         .border_1()
                                         .border_color(rgb(if is_active {
-                                            ACTIVE_BORDER
+                                            BORDER_STRONG
                                         } else {
-                                            PANEL
+                                            SIDEBAR_BG
                                         }))
-                                        .bg(rgb(if is_active { 0x203351 } else { PANEL }))
-                                        .cursor_pointer()
+                                        .bg(rgb(if is_active { PANEL } else { SIDEBAR_BG }))
                                         .hover(move |tab| {
-                                            tab.bg(rgb(if is_active { 0x203351 } else { HOVER }))
+                                            tab.bg(rgb(if is_active { PANEL } else { HOVER }))
                                         })
                                         .child(file_type_icon(&open.path))
                                         .child(
-                                            elide(label).max_w(px(150.)).text_color(rgb(
-                                                if dirty { WARNING } else { TEXT },
-                                            )),
+                                            elide(label)
+                                                .max_w(px(150.))
+                                                .when(is_active, |t| {
+                                                    t.font_weight(FontWeight::MEDIUM)
+                                                })
+                                                .text_color(rgb(if dirty {
+                                                    WARNING
+                                                } else if is_active {
+                                                    TEXT
+                                                } else {
+                                                    MUTED
+                                                })),
                                         )
                                         .child(
                                             div()
@@ -162,7 +173,7 @@ impl DesktopView {
                                                 .justify_center()
                                                 .text_size(px(11.))
                                                 .text_color(rgb(SUBTLE))
-                                                .hover(|s| s.bg(rgb(ACTIVE)).text_color(rgb(TEXT)))
+                                                .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
                                                 .child("×")
                                                 .on_click(cx.listener(move |view, _, _, cx| {
                                                     cx.stop_propagation();
@@ -196,7 +207,10 @@ impl DesktopView {
                                 tr("提交 Diff", "Commit Diff"),
                                 commit_diff,
                             )
-                            .child(icon(Icon::File, TEXT))
+                            .child(icon(
+                                Icon::File,
+                                if commit_diff { BRAND_TEXT } else { MUTED },
+                            ))
                             .child(elide(tab_label).max_w(px(180.)))
                             .when(!commit_diff, |tab| {
                                 tab.on_click(cx.listener(|view, _, _, cx| {
@@ -220,6 +234,7 @@ impl DesktopView {
                                 Icon::Close,
                                 tr("关闭提交 Diff", "Close Commit Diff"),
                             )
+                            .size(px(22.))
                             .on_click(cx.listener(|view, _, _, cx| view.close_diff(cx))),
                         )
                     })
@@ -230,7 +245,10 @@ impl DesktopView {
                                 tr("工作区 Diff", "Working Diff"),
                                 working_diff,
                             )
-                            .child(icon(Icon::File, TEXT))
+                            .child(icon(
+                                Icon::File,
+                                if working_diff { BRAND_TEXT } else { MUTED },
+                            ))
                             .child(tr("工作区 Diff", "Working Diff"))
                             .when(!working_diff, |tab| {
                                 tab.on_click(cx.listener(|view, _, _, cx| {
@@ -244,6 +262,7 @@ impl DesktopView {
                                 Icon::Close,
                                 tr("关闭工作区 Diff", "Close Working Diff"),
                             )
+                            .size(px(22.))
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.dispatch_daily(DailyAction::CloseChange, cx)
                             })),
@@ -252,7 +271,10 @@ impl DesktopView {
                     .when(self.stash_patch_available(), |tabs| {
                         tabs.child(
                             workspace_tab("stash-diff-tab", "Stash Diff", stash_diff)
-                                .child(icon(Icon::File, TEXT))
+                                .child(icon(
+                                    Icon::File,
+                                    if stash_diff { BRAND_TEXT } else { MUTED },
+                                ))
                                 .child("Stash Diff")
                                 .when(!stash_diff, |tab| {
                                     tab.on_click(cx.listener(|view, _, _, cx| {
@@ -266,13 +288,17 @@ impl DesktopView {
                                 Icon::Close,
                                 tr("关闭 Stash Diff", "Close Stash Diff"),
                             )
+                            .size(px(22.))
                             .on_click(cx.listener(|view, _, _, cx| view.close_stash_patch(cx))),
                         )
                     })
                     .when(self.shelf_patch_available(), |tabs| {
                         tabs.child(
                             workspace_tab("shelf-diff-tab", "Shelf Diff", shelf_diff)
-                                .child(icon(Icon::File, TEXT))
+                                .child(icon(
+                                    Icon::File,
+                                    if shelf_diff { BRAND_TEXT } else { MUTED },
+                                ))
                                 .child("Shelf Diff")
                                 .when(!shelf_diff, |tab| {
                                     tab.on_click(cx.listener(|view, _, _, cx| {
@@ -286,29 +312,82 @@ impl DesktopView {
                                 Icon::Close,
                                 tr("关闭 Shelf Diff", "Close Shelf Diff"),
                             )
+                            .size(px(22.))
                             .on_click(cx.listener(|view, _, _, cx| view.close_shelf_patch(cx))),
                         )
                     })
                     .child(div().flex_1())
                     .when(log_active, |tabs| {
-                        let shown = self.show_commit_details;
+                        let bcol = self.show_branches_panel;
+                        let details_shown = self.show_commit_details;
                         tabs.child(
-                            text_button(
-                                "toggle-commit-details",
-                                if shown {
-                                    tr("隐藏详情", "Hide Details")
+                            div()
+                                .id("toggle-branches-col")
+                                .role(Role::Button)
+                                .aria_label(tr(
+                                    "显示 / 隐藏独立分支分栏 (⌘B)",
+                                    "Toggle Standalone Branches Column (⌘B)",
+                                ))
+                                .aria_expanded(bcol)
+                                .tab_index(0)
+                                .tooltip(tooltip(
+                                    tr(
+                                        "显示 / 隐藏独立分支分栏 (⌘B)",
+                                        "Toggle Standalone Branches Column (⌘B)",
+                                    )
+                                    .to_owned(),
+                                ))
+                                .size(px(24.))
+                                .rounded(px(5.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(bcol, |b| b.bg(rgb(SELECT_SOFT)))
+                                .hover(move |s| s.bg(rgb(if bcol { SELECT_SOFT } else { HOVER })))
+                                .child(icon(Icon::PanelLeft, if bcol { BRAND_TEXT } else { MUTED }))
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.toggle_branches_panel(cx);
+                                    view.refresh_app_menus(cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id("toggle-commit-details")
+                                .role(Role::Button)
+                                .aria_label(if details_shown {
+                                    tr("隐藏提交详情面板", "Hide Commit Details")
                                 } else {
-                                    tr("显示详情", "Show Details")
-                                },
-                                false,
-                            )
-                            .h(rems(1.5625))
-                            .text_size(rems(0.76))
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.show_commit_details = !view.show_commit_details;
-                                view.save_preferences();
-                                cx.notify();
-                            })),
+                                    tr("显示提交详情面板", "Show Commit Details")
+                                })
+                                .aria_expanded(details_shown)
+                                .tab_index(0)
+                                .tooltip(tooltip(
+                                    if details_shown {
+                                        tr("隐藏提交详情面板", "Hide Commit Details")
+                                    } else {
+                                        tr("显示提交详情面板", "Show Commit Details")
+                                    }
+                                    .to_owned(),
+                                ))
+                                .size(px(24.))
+                                .rounded(px(5.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(details_shown, |b| b.bg(rgb(SELECT_SOFT)))
+                                .hover(move |s| {
+                                    s.bg(rgb(if details_shown { SELECT_SOFT } else { HOVER }))
+                                })
+                                .child(icon(
+                                    Icon::PanelRight,
+                                    if details_shown { BRAND_TEXT } else { MUTED },
+                                ))
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.show_commit_details = !view.show_commit_details;
+                                    view.save_preferences();
+                                    view.refresh_app_menus(cx);
+                                    cx.notify();
+                                })),
                         )
                     }),
             )
@@ -323,29 +402,15 @@ impl DesktopView {
             } else if let Some(open) = active_project_file.as_ref() {
                 self.project_file_viewer(open, cx)
             } else {
-                let branches_column: AnyElement = if self.show_branches_panel {
-                    self.branches_panel(branches_panel_width, cx)
-                        .into_any_element()
-                } else {
-                    self.branches_collapsed_stripe(cx)
-                };
+                let mut row = div().flex().flex_1().min_h_0().min_w_0();
+                if self.show_branches_panel {
+                    row = row.child(self.branches_panel(branches_panel_width, cx));
+                }
                 if self.show_commit_details {
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .child(branches_column)
-                        .child(self.log((log_and_details_width - details_width).max(px(200.)), cx))
+                    row.child(self.log((log_and_details_width - details_width).max(px(220.)), cx))
                         .child(self.details(details_width, cx))
                 } else {
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .child(branches_column)
-                        .child(self.log(log_and_details_width, cx))
+                    row.child(self.log(log_and_details_width, cx))
                 }
             })
     }
@@ -390,153 +455,187 @@ impl DesktopView {
         let filtered = !query_parts.is_empty();
         let can_load_more =
             !self.workspace.history_loading && commits.len() >= self.workspace.history_limit;
-        let selected_oid = self.workspace.selected_commit.clone();
-        let cherry_pick_enabled = selected_oid.is_some() && self.can_start_cherry_pick();
-        let cherry_pick_tip = if self.active_cherry_pick().is_some() {
-            tr(
-                "当前已有进行中的 Cherry-pick，请先继续或中止",
-                "A Cherry-pick is already in progress; continue or abort it first",
+
+        let toolbar = div()
+            .h(rems(2.375))
+            .px(px(10.))
+            .gap(px(7.))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(140.))
+                    .max_w(px(320.))
+                    .h(px(26.))
+                    .px(px(8.))
+                    .gap(px(6.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.))
+                    .bg(rgb(CARD))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(icon(Icon::Search, SUBTLE))
+                    .child(div().flex_1().min_w_0().child(self.search.clone()))
+                    .when(filtered, |box_div| {
+                        box_div.child(
+                            icon_button(
+                                "clear-search",
+                                Icon::Close,
+                                tr("清除提交搜索", "Clear search"),
+                            )
+                            .size(px(17.))
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.search
+                                    .update(cx, |search, cx| search.clear(window, cx))
+                            })),
+                        )
+                    }),
             )
-        } else if selected_oid.is_none() {
-            tr(
-                "请先选择要 Cherry-pick 的提交",
-                "Select a commit to Cherry-pick",
-            )
-        } else {
-            tr(
-                "将所选提交 Cherry-pick 到当前分支…",
-                "Cherry-pick selected commit onto current branch…",
-            )
-        };
-        let toolbar =
+            .when(!filtered && width >= px(520.), |row| {
+                row.child(
+                    div()
+                        .id("search-syntax-hint")
+                        .flex_shrink_0()
+                        .px(px(6.))
+                        .py(px(2.))
+                        .rounded(px(4.))
+                        .bg(rgb(CARD))
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .font_family(mono_font())
+                        .text_size(px(10.))
+                        .text_color(rgb(SUBTLE))
+                        .tooltip(tooltip(
+                            tr(
+                                "支持过滤语法：author:姓名  branch:分支  after:2026-01-01  before:2026-12-31",
+                                "Filter syntax: author:name  branch:ref  after:YYYY-MM-DD  before:YYYY-MM-DD",
+                            )
+                            .to_owned(),
+                        ))
+                        .child("author: · branch: · after:"),
+                )
+            })
+            .when_some(self.workspace.branch_filter.clone(), |row, active_ref| {
+                let display = short_branch_display(&active_ref).to_owned();
+                row.child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .gap(px(5.))
+                        .h(px(24.))
+                        .pl(px(8.))
+                        .pr(px(4.))
+                        .rounded(px(5.))
+                        .bg(rgb(BRAND_BG))
+                        .border_1()
+                        .border_color(rgb(BRAND_BORDER))
+                        .text_size(px(11.5))
+                        .child(div().text_color(rgb(SUBTLE)).child(tr("分支:", "Branch:")))
+                        .child(
+                            elide(display.clone())
+                                .max_w(px(150.))
+                                .text_color(rgb(BRAND_TEXT))
+                                .font_weight(FontWeight::MEDIUM),
+                        )
+                        .child(
+                            div()
+                                .id("clear-branch-filter-chip")
+                                .role(Role::Button)
+                                .aria_label(tr("清除分支筛选", "Clear branch filter"))
+                                .tab_index(0)
+                                .tooltip(tooltip(
+                                    tr("清除分支筛选，显示全部分支", "Clear branch filter")
+                                        .to_owned(),
+                                ))
+                                .size(px(16.))
+                                .rounded(px(3.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .text_color(rgb(MUTED))
+                                .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                .child("×")
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.dispatch(Action::SetBranchFilter(None), cx);
+                                })),
+                        ),
+                )
+            })
+            .child(div().flex_1().min_w_0())
+            .when(can_load_more, |row| {
+                row.child(
+                    command_button(
+                        "load-more-history",
+                        tr("加载更多", "Load More"),
+                        false,
+                        true,
+                    )
+                    .h(rems(1.5))
+                    .px(px(8.))
+                    .text_size(rems(0.73))
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.dispatch(Action::LoadMoreHistory, cx);
+                    })),
+                )
+            })
+            .when(width >= px(340.), |row| {
+                row.child(div().text_size(rems(0.73)).text_color(rgb(SUBTLE)).child(
+                    if is_zh() {
+                        format!("{count} 条提交")
+                    } else {
+                        format!("{count} commits")
+                    },
+                ))
+            });
+
+        let graph = (!filtered && count > 0).then(|| graph::Graph::from_commits(commits));
+        let natural_width = graph.as_ref().map_or(18., |g| g.width);
+        let graph_width = natural_width.min(f32::from(width) / 3.2).max(24.);
+
+        let header_row = (count > 0).then(|| {
             div()
-                .h(rems(2.375))
-                .px(px(8.))
-                .gap(px(6.))
+                .h(px(25.))
+                .px(px(10.))
+                .gap(px(8.))
                 .flex()
                 .flex_shrink_0()
                 .items_center()
                 .border_b_1()
                 .border_color(rgb(BORDER))
-                .child(icon(Icon::Search, SUBTLE))
+                .text_size(rems(0.6875))
+                .text_color(rgb(SUBTLE))
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .max_w(px(260.))
-                        .child(self.search.clone()),
+                        .w(px(graph_width))
+                        .flex_shrink_0()
+                        .child(tr("图谱", "Graph")),
                 )
-                .when(filtered, |row| {
-                    row.child(
-                        icon_button(
-                            "clear-search",
-                            Icon::Close,
-                            tr("清除提交搜索", "Clear search"),
-                        )
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.search
-                                .update(cx, |search, cx| search.clear(window, cx))
-                        })),
-                    )
-                })
-                .when_some(self.workspace.branch_filter.clone(), |row, active_ref| {
-                    let display = short_branch_display(&active_ref).to_owned();
-                    row.child(
+                .child(div().flex_1().min_w_0().child(tr("提交说明", "Subject")))
+                .when(width >= px(360.), |r| {
+                    r.child(
                         div()
-                            .flex()
+                            .w(px(118.))
                             .flex_shrink_0()
-                            .items_center()
-                            .gap(px(5.))
-                            .h(px(23.))
-                            .pl(px(8.))
-                            .pr(px(4.))
-                            .rounded(px(4.))
-                            .bg(rgb(ACCENT_BG))
-                            .border_1()
-                            .border_color(rgb(ACCENT_BORDER))
-                            .text_size(px(11.5))
-                            .child(div().text_color(rgb(SUBTLE)).child(tr("分支:", "Branch:")))
-                            .child(
-                                elide(display.clone())
-                                    .max_w(px(160.))
-                                    .text_color(rgb(LINK))
-                                    .font_weight(FontWeight::MEDIUM),
-                            )
-                            .child(
-                                div()
-                                    .id("clear-branch-filter-chip")
-                                    .role(Role::Button)
-                                    .aria_label(tr("清除分支筛选", "Clear branch filter"))
-                                    .tab_index(0)
-                                    .tooltip(tooltip(
-                                        tr("清除分支筛选，显示全部分支", "Clear branch filter")
-                                            .to_owned(),
-                                    ))
-                                    .size(px(16.))
-                                    .rounded(px(3.))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .text_color(rgb(MUTED))
-                                    .hover(|s| s.bg(rgb(ACTIVE)).text_color(rgb(TEXT)))
-                                    .child("×")
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.dispatch(Action::SetBranchFilter(None), cx);
-                                    })),
-                            ),
+                            .child(tr("作者", "Author")),
                     )
                 })
-                .child(div().flex_1().min_w_0())
-                .child(
-                    command_button(
-                        "toolbar-cherry-pick",
-                        "Cherry-pick…",
-                        false,
-                        cherry_pick_enabled,
-                    )
-                    .h(rems(1.625))
-                    .px(px(9.))
-                    .text_size(rems(0.76))
-                    .when(!cherry_pick_enabled, |button| {
-                        button.tooltip(tooltip(cherry_pick_tip.to_owned()))
-                    })
-                    .child(icon(
-                        Icon::CherryPick,
-                        if cherry_pick_enabled { TEXT } else { SUBTLE },
-                    ))
-                    .when(cherry_pick_enabled, |button| {
-                        let oid = selected_oid.clone().unwrap_or_default();
-                        button.on_click(cx.listener(move |view, _, window, cx| {
-                            view.open_cherry_pick_dialog(oid.clone(), window, cx);
-                        }))
-                    }),
-                )
-                .when(can_load_more, |row| {
-                    row.child(
-                        command_button(
-                            "load-more-history",
-                            tr("加载更多", "Load More"),
-                            false,
-                            true,
-                        )
-                        .h(rems(1.5625))
-                        .px(px(8.))
-                        .text_size(rems(0.74))
-                        .on_click(cx.listener(|view, _, _, cx| {
-                            view.dispatch(Action::LoadMoreHistory, cx);
-                        })),
+                .when(width >= px(440.), |r| {
+                    r.child(
+                        div()
+                            .w(px(78.))
+                            .flex_shrink_0()
+                            .text_align(TextAlign::Right)
+                            .child(tr("时间", "When")),
                     )
                 })
-                .when(width >= px(380.), |row| {
-                    row.child(div().text_size(rems(0.74)).text_color(rgb(SUBTLE)).child(
-                        if is_zh() {
-                            format!("{count} 条提交")
-                        } else {
-                            format!("{count} commits")
-                        },
-                    ))
-                });
+        });
+
         let content = if count == 0 {
             let message = if self.workspace.history_loading {
                 tr("正在读取最近提交…", "Loading recent commits…")
@@ -560,13 +659,7 @@ impl DesktopView {
             empty(message).into_any_element()
         } else {
             let view = cx.weak_entity();
-            let graph = if filtered {
-                None
-            } else {
-                Some(graph::Graph::from_commits(commits))
-            };
-            let natural_width = graph.as_ref().map_or(14., |graph| graph.width);
-            let graph_width = natural_width.min(f32::from(width) / 3.).max(14.);
+            let today_days = current_epoch_days();
             uniform_list("commit-list", count, move |range, window, cx| {
                 let Some(entity) = view.upgrade() else {
                     return Vec::new();
@@ -580,7 +673,7 @@ impl DesktopView {
                             view.workspace.selected_commit.as_deref() == Some(commit.oid.as_str());
                         let oid = commit.oid.clone();
                         let context_oid = commit.oid.clone();
-                        let graph_row = graph.as_ref().map(|graph| graph.rows[source].clone());
+                        let graph_row = graph.as_ref().map(|g| g.rows[source].clone());
                         Some(
                             log_entry()
                                 .id(("commit", source))
@@ -593,12 +686,12 @@ impl DesktopView {
                                 ))
                                 .aria_selected(selected)
                                 .tab_index(0)
-                                .cursor_pointer()
-                                .when(selected, |row| row.bg(rgb(ACTIVE)))
+                                .relative()
+                                .when(selected, |row| row.bg(rgb(ACTIVE)).child(selection_bar()))
                                 .hover(move |s| s.bg(rgb(if selected { ACTIVE } else { HOVER })))
                                 .focus_visible(|s| s.bg(rgb(ACTIVE)))
                                 .child(graph::cell(graph_row, graph_width, natural_width))
-                                .child(commit_columns(commit, width))
+                                .child(commit_columns(commit, width, today_days))
                                 .on_click(window.listener_for(&entity, move |view, _, _, cx| {
                                     view.dispatch(Action::SelectCommit(oid.clone()), cx);
                                 }))
@@ -638,6 +731,7 @@ impl DesktopView {
             .flex_1()
             .child(toolbar)
             .children(self.ongoing_operation_banner(cx))
+            .children(header_row)
             .child(content)
     }
 
@@ -655,10 +749,10 @@ impl DesktopView {
                 .flex_col()
                 .border_l_1()
                 .border_color(rgb(BORDER))
-                .child(pane_heading(tr("变更文件", "Changed Files"), None))
+                .child(pane_heading(tr("提交详情", "Commit Details"), None))
                 .child(empty(tr(
-                    "选择提交后查看变更",
-                    "Select a commit to view changed files",
+                    "选择提交后查看详情与变更文件",
+                    "Select a commit to view details and changed files",
                 )));
         };
         let patch_open = self.workspace.selected_file.is_some();
@@ -670,10 +764,7 @@ impl DesktopView {
                 format!("{file_count} files")
             }
         });
-        let lower = match &self.workspace.selected_file {
-            Some(path) => self.patch(path, cx).into_any_element(),
-            None => self.commit_summary(commit, cx).into_any_element(),
-        };
+
         div()
             .w(width)
             .min_h_0()
@@ -682,20 +773,50 @@ impl DesktopView {
             .flex_col()
             .border_l_1()
             .border_color(rgb(BORDER))
-            .child(pane_heading(
-                tr("变更文件", "Changed Files"),
-                file_count_label,
-            ))
+            .child(self.commit_summary(commit, patch_open, cx))
+            .child(
+                div()
+                    .h(rems(1.9375))
+                    .px(px(12.))
+                    .gap(px(6.))
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_size(rems(0.74))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(MUTED))
+                            .child(tr("变更文件", "Changed Files")),
+                    )
+                    .children(file_count_label.map(|lbl| {
+                        div()
+                            .text_size(rems(0.7))
+                            .text_color(rgb(SUBTLE))
+                            .child(lbl)
+                    }))
+                    .child(div().flex_1())
+                    .when(!patch_open && file_count > 0, |h| {
+                        h.child(div().text_size(px(10.5)).text_color(rgb(SUBTLE)).child(tr(
+                            "单击预览 · 双击展开",
+                            "Click preview · Double-click expand",
+                        )))
+                    }),
+            )
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .min_h_0()
-                    .when(patch_open, |pane| pane.h(px(168.)).flex_shrink_0())
+                    .when(patch_open, |pane| pane.h(px(142.)).flex_shrink_0())
                     .when(!patch_open, |pane| pane.flex_1())
                     .child(self.changed_files(cx)),
             )
-            .child(lower)
+            .when_some(self.workspace.selected_file.as_deref(), |col, path| {
+                col.child(self.patch(path, cx))
+            })
     }
 
     fn changed_files(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -770,7 +891,6 @@ impl DesktopView {
             .aria_level(depth + 1)
             .aria_expanded(expanded)
             .tab_index(0)
-            .cursor_pointer()
             .hover(|style| style.bg(rgb(HOVER)))
             .focus_visible(|s| s.bg(rgb(HOVER)))
             .child(icon(
@@ -783,9 +903,11 @@ impl DesktopView {
             ))
             .child(folder_type_icon(&name, expanded))
             .child(elide(name))
-            .on_click(cx.listener(move |view, _, _, cx| {
-                view.history_details.changes.toggle(&path);
-                cx.notify();
+            .on_click(cx.listener(move |view, event: &gpui::ClickEvent, _, cx| {
+                if event.click_count() == 1 {
+                    view.history_details.changes.toggle(&path);
+                    cx.notify();
+                }
             }))
             .into_any_element()
     }
@@ -800,37 +922,53 @@ impl DesktopView {
     ) -> AnyElement {
         let path = file.path.clone();
         let selected = self.workspace.selected_file.as_ref() == Some(&path);
-        let name = file_name(&path);
-        let status_color = match file.status.as_bytes().first() {
-            Some(b'A') => 0x92c58a,
-            Some(b'D') => ERROR,
-            Some(b'R' | b'C') => WARNING,
-            _ => LINK,
+        let name = match &file.previous_path {
+            Some(old) => format!("{} → {}", file_name(old), file_name(&path)),
+            None => file_name(&path),
+        };
+        let (status_fg, status_bg) = match file.status.as_bytes().first() {
+            Some(b'A') => (SUCCESS, SUCCESS_BG),
+            Some(b'D') => (ERROR, DANGER_BG),
+            Some(b'R' | b'C') => (WARNING, WARN_BG),
+            _ => (LINK, ACCENT_BG),
         };
         let location = file.previous_path.as_ref().map_or_else(
             || path.display().to_string(),
             |old| format!("{} → {}", old.display(), path.display()),
         );
+        let hover_loc = location.clone();
         file_row(depth)
             .id(("change-file", source_index))
             .role(Role::TreeItem)
             .aria_label(name.clone())
             .aria_level(depth + 1)
-            .aria_description(location.clone())
+            .aria_description(location)
             .aria_selected(selected)
             .tab_index(0)
-            .cursor_pointer()
-            .when(selected, |row| row.bg(rgb(ACTIVE)))
+            .relative()
+            .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                view.set_hovered_hint(hovered.then(|| hover_loc.clone()), cx);
+            }))
+            .when(selected, |row| row.bg(rgb(ACTIVE)).child(selection_bar()))
             .hover(move |s| s.bg(rgb(if selected { ACTIVE } else { HOVER })))
             .focus_visible(|s| s.bg(rgb(ACTIVE)))
             .child(optional_icon(None, SUBTLE))
             .child(file_type_icon(&path))
-            .child(elide(name).flex_1().text_color(rgb(status_color)))
+            .child(elide(name).flex_1().text_color(rgb(TEXT)))
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(10.5))
-                    .text_color(rgb(SUBTLE))
+                    .min_w(px(16.))
+                    .h(px(15.))
+                    .px(px(3.5))
+                    .rounded(px(3.5))
+                    .bg(rgb(status_bg))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(9.5))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(status_fg))
                     .child(file.status.clone()),
             )
             .on_click(cx.listener(move |view, event: &gpui::ClickEvent, _, cx| {
@@ -848,9 +986,17 @@ impl DesktopView {
             .into_any_element()
     }
 
-    fn commit_summary(&self, commit: &Commit, cx: &mut Context<Self>) -> impl IntoElement {
+    fn commit_summary(
+        &self,
+        commit: &Commit,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let oid = commit.oid.clone();
         let pick_oid = commit.oid.clone();
+        let branch_oid = commit.oid.clone();
+        let branch_subject = commit.subject.clone();
+        let menu_oid = commit.oid.clone();
         let short_oid = short_oid(&oid).to_owned();
         let parents = commit
             .parents
@@ -859,18 +1005,30 @@ impl DesktopView {
             .collect::<Vec<_>>()
             .join("  ");
         let can_pick = self.can_start_cherry_pick();
+        let writable = self.daily_can_write();
+        let rel_date = format_relative_date(&commit.date, current_epoch_days());
+        let date_display = if rel_date != commit.date {
+            format!("{} · {rel_date}", commit.date)
+        } else {
+            commit.date.clone()
+        };
+
         div()
             .id("commit-details")
-            .h(px(214.))
             .flex_shrink_0()
-            .overflow_y_scroll()
-            .border_t_1()
+            .when(compact, |d| d.max_h(px(138.)).overflow_y_scroll())
+            .when(!compact, |d| d.max_h(px(236.)).overflow_y_scroll())
+            .border_b_1()
             .border_color(rgb(BORDER))
-            .p(px(11.))
+            .bg(rgb(SIDEBAR_BG))
+            .px(px(13.))
+            .py(px(if compact { 9. } else { 12. }))
+            .flex()
+            .flex_col()
+            .gap(px(if compact { 6. } else { 8. }))
             .when(!commit.refs.is_empty(), |pane| {
                 pane.child(
                     div()
-                        .mb(px(7.))
                         .flex()
                         .flex_wrap()
                         .items_center()
@@ -880,64 +1038,165 @@ impl DesktopView {
             })
             .child(
                 div()
-                    .line_height(px(18.))
+                    .text_size(rems(0.85))
+                    .line_height(rems(1.25))
                     .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT))
                     .child(subject(commit).to_owned()),
             )
             .child(
                 div()
-                    .mt(px(10.))
                     .flex()
                     .items_center()
-                    .gap(px(5.))
+                    .gap(px(7.))
+                    .min_w_0()
+                    .text_size(rems(0.75))
+                    .child(author_avatar(&commit.author, 18.))
                     .child(
-                        div()
-                            .id("copy-commit-id")
-                            .role(Role::Button)
-                            .aria_label(tr("复制提交 ID", "Copy commit hash"))
-                            .tab_index(0)
-                            .tooltip(tooltip(format!(
-                                "{}\n{oid}",
-                                tr("复制提交 ID", "Copy commit hash")
-                            )))
-                            .cursor_pointer()
-                            .text_color(rgb(LINK))
-                            .hover(|s| s.bg(rgb(HOVER)))
-                            .child(short_oid)
-                            .on_click(cx.listener(move |_, _, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(oid.clone()));
-                            })),
+                        elide(commit.author.clone())
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(TEXT)),
                     )
-                    .child(elide(commit.author.clone()).flex_1()),
+                    .child(
+                        elide(date_display)
+                            .flex_1()
+                            .text_size(rems(0.72))
+                            .text_color(rgb(SUBTLE)),
+                    ),
             )
             .child(
                 div()
-                    .mt(px(2.))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(rems(0.72))
                     .text_color(rgb(SUBTLE))
-                    .child(commit.date.clone()),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(tr("提交", "Commit"))
+                            .child(
+                                div()
+                                    .id("copy-commit-id")
+                                    .role(Role::Button)
+                                    .aria_label(tr("复制提交 ID", "Copy commit hash"))
+                                    .tab_index(0)
+                                    .tooltip(tooltip(format!(
+                                        "{}\n{oid}",
+                                        tr("点击复制完整提交 ID", "Click to copy full commit hash")
+                                    )))
+                                    .px(px(5.))
+                                    .py(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(rgb(ACCENT_BG))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .font_family(mono_font())
+                                    .text_color(rgb(LINK))
+                                    .hover(|s| s.bg(rgb(HOVER)))
+                                    .child(short_oid)
+                                    .child(icon(Icon::Copy, SUBTLE))
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            oid.clone(),
+                                        ));
+                                        view.notice = Some(
+                                            tr("已复制提交 ID", "Copied commit hash").to_owned(),
+                                        );
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .when(!parents.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .child(tr("父提交", "Parents"))
+                                .child(
+                                    div()
+                                        .font_family(mono_font())
+                                        .text_color(rgb(MUTED))
+                                        .child(parents),
+                                ),
+                        )
+                    }),
             )
-            .when(!parents.is_empty(), |pane| {
+            .when(!compact, |pane| {
                 pane.child(
                     div()
-                        .mt(px(8.))
-                        .text_color(rgb(SUBTLE))
-                        .child(format!("{}  {parents}", tr("父提交", "Parents"))),
+                        .pt(px(2.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            icon_text_button(
+                                "detail-cherry-pick",
+                                Icon::CherryPick,
+                                "Cherry-pick…",
+                                false,
+                                can_pick,
+                            )
+                            .h(px(25.))
+                            .text_size(px(11.5))
+                            .when(can_pick, |btn| {
+                                btn.on_click(cx.listener(move |view, _, window, cx| {
+                                    view.open_cherry_pick_dialog(pick_oid.clone(), window, cx);
+                                }))
+                            }),
+                        )
+                        .child(
+                            icon_text_button(
+                                "detail-new-branch",
+                                Icon::Branch,
+                                tr("新建分支…", "New Branch…"),
+                                false,
+                                writable,
+                            )
+                            .h(px(25.))
+                            .text_size(px(11.5))
+                            .when(writable, |btn| {
+                                btn.on_click(cx.listener(move |view, _, window, cx| {
+                                    view.open_create_branch_at_dialog(
+                                        branch_oid.clone(),
+                                        branch_subject.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }))
+                            }),
+                        )
+                        .child(
+                            icon_button(
+                                "detail-more-commit-ops",
+                                Icon::More,
+                                tr(
+                                    "更多提交操作 (Revert / Reset / Rebase / 标签 / 比较…)",
+                                    "More Commit Actions…",
+                                ),
+                            )
+                            .size(px(25.))
+                            .border_1()
+                            .border_color(rgb(BORDER_STRONG))
+                            .bg(rgb(CARD))
+                            .on_click(cx.listener(
+                                move |view, event: &gpui::ClickEvent, window, cx| {
+                                    view.open_menu(
+                                        MenuKind::Commit(menu_oid.clone()),
+                                        event.position(),
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            )),
+                        ),
                 )
             })
-            .child(
-                div().mt(px(10.)).flex().items_center().gap(px(6.)).child(
-                    command_button("detail-cherry-pick", "Cherry-pick…", false, can_pick)
-                        .h(px(25.))
-                        .px(px(8.))
-                        .text_size(px(11.5))
-                        .child(icon(Icon::CherryPick, if can_pick { TEXT } else { SUBTLE }))
-                        .when(can_pick, |btn| {
-                            btn.on_click(cx.listener(move |view, _, window, cx| {
-                                view.open_cherry_pick_dialog(pick_oid.clone(), window, cx);
-                            }))
-                        }),
-                ),
-            )
     }
 
     pub(super) fn close_diff(&mut self, cx: &mut Context<Self>) {
@@ -1043,7 +1302,6 @@ impl DesktopView {
                             .id("expanded-diff-path")
                             .min_w_0()
                             .flex_1()
-                            .tooltip(tooltip(path_label.clone()))
                             .child(elide(path_label)),
                     )
                     .child(self.diff_mode_toggle("expanded-commit-diff-mode", cx))
@@ -1122,7 +1380,6 @@ impl DesktopView {
                             .id("diff-path")
                             .min_w_0()
                             .flex_1()
-                            .tooltip(tooltip(path_label.clone()))
                             .child(elide(path_label)),
                     )
                     .child(
@@ -1219,14 +1476,18 @@ fn log_entry() -> Div {
         .w_full()
         .min_w_0()
         .h(rems(1.75))
-        .pl(px(4.))
-        .pr(px(10.))
-        .gap(px(4.))
+        .px(px(10.))
+        .gap(px(8.))
 }
 
-fn commit_columns(commit: &Commit, width: Pixels) -> impl IntoElement {
+fn commit_columns(commit: &Commit, width: Pixels, today_days: Option<i64>) -> impl IntoElement {
     let max_refs = if width >= px(480.) { 3 } else { 2 };
     let extra_refs = commit.refs.len().saturating_sub(max_refs);
+    let subj_view = render_styled_subject(subject(commit));
+    let rel = today_days
+        .map(|today| format_relative_date(&commit.date, Some(today)))
+        .unwrap_or_else(|| commit.date.clone());
+
     div()
         .flex()
         .flex_1()
@@ -1243,45 +1504,191 @@ fn commit_columns(commit: &Commit, width: Pixels) -> impl IntoElement {
                 .when(!commit.refs.is_empty(), |row| {
                     row.children(commit.refs.iter().take(max_refs).map(ref_pill))
                         .when(extra_refs > 0, |row| {
-                            row.child(pill(format!("+{extra_refs}"), CHROME, BORDER, SUBTLE))
+                            row.child(pill(format!("+{extra_refs}"), CARD, BORDER_STRONG, MUTED))
                         })
                 })
-                .child(elide(subject(commit).to_owned()).flex_1()),
+                .child(subj_view),
         )
-        .when(width >= px(380.), |row| {
+        .when(width >= px(360.), |row| {
             row.child(
-                elide(commit.author.clone())
-                    .w(px(112.))
+                div()
+                    .w(px(118.))
                     .flex_shrink_0()
-                    .text_color(rgb(MUTED)),
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .min_w_0()
+                    .child(author_avatar(&commit.author, 17.))
+                    .child(
+                        elide(commit.author.clone())
+                            .flex_1()
+                            .text_size(rems(0.76))
+                            .text_color(rgb(MUTED)),
+                    ),
             )
         })
-        .when(width >= px(560.), |row| {
+        .when(width >= px(440.), |row| {
             row.child(
-                elide(commit.date.clone())
-                    .w(px(88.))
+                div()
+                    .w(px(78.))
                     .flex_shrink_0()
-                    .text_color(rgb(MUTED)),
+                    .text_align(TextAlign::Right)
+                    .text_size(rems(0.74))
+                    .text_color(rgb(SUBTLE))
+                    .child(rel),
             )
         })
+}
+
+fn render_styled_subject(raw: &str) -> Div {
+    if let Some(colon_idx) = raw.find(": ")
+        && colon_idx > 0
+        && colon_idx <= 24
+    {
+        let prefix = &raw[..=colon_idx];
+        let rest = raw[colon_idx + 1..].trim_start();
+        if prefix.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '(' | ')' | '-' | '_' | '/' | '!' | ':')
+        }) && !rest.is_empty()
+        {
+            let full = format!("{prefix} {rest}");
+            let p_len = prefix.len();
+            let highlights = vec![
+                (
+                    0..p_len,
+                    HighlightStyle {
+                        color: Some(rgb(MUTED).into()),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    p_len..full.len(),
+                    HighlightStyle {
+                        color: Some(rgb(TEXT).into()),
+                        ..Default::default()
+                    },
+                ),
+            ];
+            return div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(StyledText::new(full).with_highlights(highlights));
+        }
+    }
+    elide(raw.to_owned()).flex_1()
+}
+
+fn author_avatar(author: &str, size_px: f32) -> Div {
+    const PALETTE: [u32; 8] = [
+        0x8ed6c6, 0x9abaff, 0xc9abff, 0xedc87e, 0x98dba6, 0xf2ab9b, 0x8cd0eb, 0xe0a5c8,
+    ];
+    let mut hash: usize = 5381;
+    for b in author.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(b as usize);
+    }
+    let bg = PALETTE[hash % PALETTE.len()];
+    let initials = extract_initials(author);
+    div()
+        .size(px(size_px))
+        .flex_shrink_0()
+        .rounded(px(999.))
+        .bg(rgb(bg))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px((size_px * 0.52).max(9.)))
+        .font_weight(FontWeight::BOLD)
+        .text_color(rgb(0x0f1316))
+        .child(initials)
+}
+
+fn extract_initials(author: &str) -> String {
+    let trimmed = author.trim();
+    if trimmed.is_empty() {
+        return "?".to_owned();
+    }
+    let mut parts = trimmed.split(|c: char| c.is_whitespace() || matches!(c, '.' | '_' | '-'));
+    let first = parts.next().and_then(|s| s.chars().next());
+    let second = parts.next().and_then(|s| s.chars().next());
+    match (first, second) {
+        (Some(a), Some(b)) if a.is_ascii() && b.is_ascii() => {
+            format!("{}{}", a.to_ascii_uppercase(), b.to_ascii_uppercase())
+        }
+        (Some(a), None) if a.is_ascii() => {
+            let mut chars = trimmed.chars();
+            let c1 = chars.next().unwrap().to_ascii_uppercase();
+            if let Some(c2) = chars.next().filter(|c| c.is_ascii_alphanumeric()) {
+                format!("{c1}{}", c2.to_ascii_uppercase())
+            } else {
+                c1.to_string()
+            }
+        }
+        (Some(a), _) => a.to_string(),
+        (None, _) => "?".to_owned(),
+    }
+}
+
+fn current_epoch_days() -> Option<i64> {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    // Shift by +8h local approximation when UTC offset is unavailable in std; civil date diff within +/-1d stays accurate for YYYY-MM-DD.
+    Some((secs + 8 * 3600).div_euclid(86_400))
+}
+
+fn parse_ymd_days(ymd: &str) -> Option<i64> {
+    let mut it = ymd.trim().split('-');
+    let y: i64 = it.next()?.parse().ok()?;
+    let m: i64 = it.next()?.parse().ok()?;
+    let d: i64 = it.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Howard Hinnant's civil-from-days inverse
+    let y_adj = y - i64::from(m <= 2);
+    let era = y_adj.div_euclid(400);
+    let yoe = y_adj - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe - 719_468)
+}
+
+fn format_relative_date(date: &str, today_days: Option<i64>) -> String {
+    let (Some(today), Some(commit_day)) = (today_days, parse_ymd_days(date)) else {
+        return date.to_owned();
+    };
+    let diff = today - commit_day;
+    if diff <= 0 {
+        tr("今天", "Today").to_owned()
+    } else if diff == 1 {
+        tr("昨天", "Yesterday").to_owned()
+    } else if diff < 7 {
+        if is_zh() {
+            format!("{diff} 天前")
+        } else {
+            format!("{diff}d ago")
+        }
+    } else {
+        date.to_owned()
+    }
 }
 
 fn ref_pill(reference: &CommitRef) -> Div {
     match reference.kind {
         CommitRefKind::Head => pill(
             format!("● {}", reference.name),
-            ACCENT_BG,
-            ACCENT_BORDER,
-            0xdceeff,
+            BRAND_BG,
+            BRAND_BORDER,
+            BRAND_TEXT,
         )
         .font_weight(FontWeight::MEDIUM)
         .max_w(px(140.))
         .truncate(),
-        CommitRefKind::LocalBranch => {
-            pill(reference.name.clone(), SUCCESS_BG, SUCCESS_BORDER, SUCCESS)
-                .max_w(px(130.))
-                .truncate()
-        }
+        CommitRefKind::LocalBranch => pill(reference.name.clone(), ACCENT_BG, ACCENT_BORDER, LINK)
+            .max_w(px(130.))
+            .truncate(),
         CommitRefKind::RemoteBranch => pill(
             reference.name.clone(),
             REMOTE_BG,

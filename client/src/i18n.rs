@@ -202,6 +202,7 @@ pub struct AppPreferences {
     pub show_commit_details: bool,
     pub diff_side_by_side: bool,
     pub show_branches_panel: bool,
+    pub show_branches_drawer: bool,
     pub branches_group_by_dir: bool,
     pub branches_show_tags: bool,
     pub branches_only_favorites: bool,
@@ -238,7 +239,8 @@ impl Default for AppPreferences {
             pull_strategy: PullStrategy::FastForwardOnly,
             show_commit_details: true,
             diff_side_by_side: true,
-            show_branches_panel: true,
+            show_branches_panel: false,
+            show_branches_drawer: true,
             branches_group_by_dir: true,
             branches_show_tags: false,
             branches_only_favorites: false,
@@ -266,6 +268,7 @@ impl AppPreferences {
             return Self::default();
         };
         let mut prefs = Self::default();
+        let mut has_branches_drawer_key = false;
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -293,6 +296,10 @@ impl AppPreferences {
                 "show_commit_details" => prefs.show_commit_details = parse_bool(value),
                 "diff_side_by_side" => prefs.diff_side_by_side = parse_bool(value),
                 "show_branches_panel" => prefs.show_branches_panel = parse_bool(value),
+                "show_branches_drawer" => {
+                    has_branches_drawer_key = true;
+                    prefs.show_branches_drawer = parse_bool(value);
+                }
                 "branches_group_by_dir" => prefs.branches_group_by_dir = parse_bool(value),
                 "branches_show_tags" => prefs.branches_show_tags = parse_bool(value),
                 "branches_only_favorites" => prefs.branches_only_favorites = parse_bool(value),
@@ -316,6 +323,10 @@ impl AppPreferences {
                 _ => {}
             }
         }
+        if !has_branches_drawer_key {
+            prefs.show_branches_drawer = true;
+            prefs.show_branches_panel = false;
+        }
         prefs
     }
 
@@ -335,13 +346,14 @@ impl AppPreferences {
             .collect::<Vec<_>>()
             .join(",");
         let content = format!(
-            "language={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\n",
+            "language={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nshow_branches_drawer={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\n",
             self.language.as_key(),
             normalize_ui_scale(self.ui_scale),
             pull_key,
             self.show_commit_details,
             self.diff_side_by_side,
             self.show_branches_panel,
+            self.show_branches_drawer,
             self.branches_group_by_dir,
             self.branches_show_tags,
             self.branches_only_favorites,
@@ -403,7 +415,8 @@ mod tests {
             pull_strategy: PullStrategy::Rebase,
             show_commit_details: false,
             diff_side_by_side: false,
-            show_branches_panel: false,
+            show_branches_panel: true,
+            show_branches_drawer: false,
             branches_group_by_dir: false,
             branches_show_tags: true,
             branches_only_favorites: true,

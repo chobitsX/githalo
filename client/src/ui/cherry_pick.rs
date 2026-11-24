@@ -663,11 +663,10 @@ impl DesktopView {
                                             .border_color(rgb(BORDER))
                                             .child(icon(Icon::File, ERROR))
                                             .child(
-                                                elide(display.clone())
+                                                elide(display)
                                                     .id(("conflict-path", index))
                                                     .flex_1()
-                                                    .text_color(rgb(TEXT))
-                                                    .tooltip(tooltip(display)),
+                                                    .text_color(rgb(TEXT)),
                                             )
                                             .child(
                                                 command_button(
@@ -1090,7 +1089,6 @@ impl DesktopView {
                     .rounded(px(4.))
                     .px(px(4.))
                     .py(px(3.))
-                    .cursor_pointer()
                     .hover(|row| row.bg(rgb(HOVER)))
                     .focus_visible(|row| row.bg(rgb(HOVER)))
                     .child(check_indicator(form.append_source))

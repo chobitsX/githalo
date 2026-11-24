@@ -11,8 +11,8 @@ use super::components::*;
 use super::file_viewer::{ProjectEntryFormKind, reveal_in_file_manager};
 use super::overlay::{Dialog, PathOperation, dialog_heading};
 use super::{
-    DesktopView, FocusSearch, OpenCommit, Quit, SaveFile, ToggleBranches, TriggerPull, TriggerPush,
-    code_editor, text_field,
+    DesktopView, FocusSearch, OpenCommandPalette, OpenCommit, Quit, SaveFile, ToggleBranches,
+    TriggerPull, TriggerPush, code_editor, text_field,
 };
 
 const GITHUB_URL: &str = "https://github.com/chobitsX/githalo";
@@ -107,7 +107,7 @@ impl Default for AppMenuState {
     fn default() -> Self {
         Self {
             sidebar_visible: true,
-            show_branches_panel: true,
+            show_branches_panel: false,
             show_commit_details: true,
             diff_side_by_side: true,
             language_pref: LanguagePreference::System,
@@ -241,9 +241,14 @@ pub(super) fn set_menus(cx: &mut App, state: AppMenuState) {
     ]);
 
     let view_menu = Menu::new(tr("视图", "View")).items([
+        MenuItem::action(tr("命令面板…", "Command Palette…"), OpenCommandPalette),
+        MenuItem::separator(),
         MenuItem::action(tr("侧边栏", "Sidebar"), ToggleSidebar).checked(state.sidebar_visible),
-        MenuItem::action(tr("Log 分支面板", "Branches Panel"), ToggleBranches)
-            .checked(state.show_branches_panel),
+        MenuItem::action(
+            tr("独立分支分栏", "Standalone Branches Column"),
+            ToggleBranches,
+        )
+        .checked(state.show_branches_panel),
         MenuItem::action(tr("提交详情面板", "Commit Details"), ToggleCommitDetails)
             .checked(state.show_commit_details),
         MenuItem::separator(),
@@ -764,6 +769,10 @@ impl DesktopView {
             (
                 tr("通用与布局", "General & Layout"),
                 vec![
+                    (
+                        format!("⇧{m}P"),
+                        tr("打开命令与仓库跳转面板", "Open Command Palette"),
+                    ),
                     (format!("{m},"), tr("打开设置", "Open Settings")),
                     (format!("{m}O"), tr("添加本地仓库", "Add Local Repository")),
                     (format!("{m}\\"), tr("显示 / 隐藏侧边栏", "Toggle Sidebar")),
@@ -918,7 +927,7 @@ mod tests {
     fn default_menu_state_tracks_expected_defaults() {
         let state = AppMenuState::default();
         assert!(state.sidebar_visible);
-        assert!(state.show_branches_panel);
+        assert!(!state.show_branches_panel);
         assert!(state.show_commit_details);
         assert!(state.diff_side_by_side);
         assert_eq!(state.panel, Panel::Repositories);

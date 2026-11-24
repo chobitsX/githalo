@@ -20,6 +20,7 @@ mod stash;
 mod text_field;
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use githalo::branch_ops::{PullStrategy, RemoteOperation};
@@ -31,14 +32,16 @@ use githalo::workspace::{
 };
 use githalo::worktree::WorktreeTarget;
 use gpui::{
-    App, Context, CursorStyle, Div, Entity, FocusHandle, Focusable, KeyBinding, MouseButton,
-    Pixels, Role, UniformListScrollHandle, Window, actions, div, prelude::*, px, rems, rgb,
+    AnyElement, App, Context, CursorStyle, Div, Entity, FocusHandle, Focusable, FontWeight,
+    KeyBinding, MouseButton, Pixels, Role, UniformListScrollHandle, Window, actions, div,
+    prelude::*, px, rems, rgb,
 };
 
 use components::*;
 use daily::DailyUi;
+use file_viewer::{ProjectEntryFormKind, reveal_in_file_manager};
 use history::HistoryDetails;
-use overlay::{MenuKind, Overlay};
+use overlay::{Dialog, MenuKind, Overlay, PathOperation};
 use shelf::ShelfUi;
 use stash::StashUi;
 use text_field::TextField;
@@ -48,8 +51,11 @@ actions!(
     [
         Dismiss,
         Confirm,
+        PaletteUp,
+        PaletteDown,
         FocusNext,
         FocusPrevious,
+        OpenCommandPalette,
         OpenCommit,
         TriggerPull,
         TriggerPush,
@@ -64,6 +70,46 @@ actions!(
     ]
 );
 
+#[derive(Clone)]
+enum PaletteCommand {
+    SwitchRepo(WorktreeId),
+    ShowPanel(Panel),
+    Fetch,
+    Pull,
+    Push,
+    NewBranch,
+    CreateTag,
+    ManageTags,
+    ManageRemotes,
+    ManageWorktrees,
+    StashSave,
+    ShelveChanges,
+    ScanNested,
+    AddLocalRepo,
+    CloneRepo,
+    InitRepo,
+    NewGroup,
+    NewFile,
+    RevealInFinder,
+    ReloadAll,
+    ToggleBranchesColumn,
+    ToggleBranchesDrawer,
+    ToggleCommitDetails,
+    ToggleDiffMode,
+    OpenSettings,
+    OpenShortcuts,
+    OpenAbout,
+}
+
+struct PaletteEntry {
+    category: &'static str,
+    title: String,
+    subtitle: Option<String>,
+    shortcut: Option<String>,
+    icon: Icon,
+    cmd: PaletteCommand,
+}
+
 pub fn bind_keys(cx: &mut App) {
     text_field::bind_keys(cx);
     code_editor::bind_keys(cx);
@@ -77,8 +123,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", Dismiss, Some("GitClient")),
         KeyBinding::new("enter", Confirm, Some("GroupNameDialog")),
         KeyBinding::new("enter", Confirm, Some("StashForm")),
+        KeyBinding::new("enter", Confirm, Some("CommandPalette")),
+        KeyBinding::new("up", PaletteUp, Some("CommandPalette")),
+        KeyBinding::new("down", PaletteDown, Some("CommandPalette")),
         KeyBinding::new("tab", FocusNext, Some("GitClient")),
         KeyBinding::new("shift-tab", FocusPrevious, Some("GitClient")),
+        KeyBinding::new(
+            &format!("{mod_key}-shift-p"),
+            OpenCommandPalette,
+            Some("GitClient"),
+        ),
         KeyBinding::new(&format!("{mod_key}-k"), OpenCommit, Some("GitClient")),
         KeyBinding::new(
             &format!("{mod_key}-shift-k"),
@@ -138,6 +192,9 @@ pub struct DesktopView {
     pub(super) show_commit_details: bool,
     pub(super) diff_side_by_side: bool,
     pub(super) show_branches_panel: bool,
+    pub(super) show_branches_drawer: bool,
+    pub(super) branches_drawer_height: Pixels,
+    pub(super) branches_drawer_drag: Option<(Pixels, Pixels)>,
     pub(super) branches_group_by_dir: bool,
     pub(super) branches_show_tags: bool,
     pub(super) branches_only_favorites: bool,
@@ -151,6 +208,7 @@ pub struct DesktopView {
     pub(super) commit_show_conventional: bool,
     pub(super) commit_diff_expanded: bool,
     pub(super) pending_push_commit: Option<WorktreeTarget>,
+    pub(super) hovered_hint: Option<String>,
     last_activation_reload: Option<Instant>,
 }
 
@@ -163,10 +221,7 @@ impl DesktopView {
         let (workspace, updates) = Workspace::new(database_path());
         let search = cx.new(|cx| {
             TextField::new(
-                tr(
-                    "搜索说明/哈希，或 author: branch: after: before:",
-                    "Search message/hash, or author: branch: after: before:",
-                ),
+                tr("搜索提交说明、哈希…", "Search message or hash…"),
                 String::new(),
                 false,
                 cx,
@@ -184,6 +239,7 @@ impl DesktopView {
                         view.workspace.apply(update);
                         view.sync_history_view();
                         view.sync_branches_panel(None, cx);
+                        view.ensure_branches_loaded_if_visible(cx);
                         view.sync_file_viewer(None, cx);
                         view.sync_daily_view(cx);
                         view.sync_stash_view();
@@ -246,6 +302,9 @@ impl DesktopView {
             show_commit_details: prefs.show_commit_details,
             diff_side_by_side: prefs.diff_side_by_side,
             show_branches_panel: prefs.show_branches_panel,
+            show_branches_drawer: prefs.show_branches_drawer,
+            branches_drawer_height: px(236.),
+            branches_drawer_drag: None,
             branches_group_by_dir: prefs.branches_group_by_dir,
             branches_show_tags: prefs.branches_show_tags,
             branches_only_favorites: prefs.branches_only_favorites,
@@ -259,10 +318,34 @@ impl DesktopView {
             commit_show_conventional: prefs.commit_show_conventional,
             commit_diff_expanded: false,
             pending_push_commit: None,
+            hovered_hint: None,
             last_activation_reload: Some(Instant::now()),
         };
         view.refresh_app_menus(cx);
         view
+    }
+
+    pub(super) fn set_hovered_hint(&mut self, hint: Option<String>, cx: &mut Context<Self>) {
+        if self.hovered_hint != hint {
+            self.hovered_hint = hint;
+            cx.notify();
+        }
+    }
+
+    pub(super) fn ensure_branches_loaded_if_visible(&mut self, cx: &mut Context<Self>) {
+        let visible = self.show_branches_panel
+            || (self.sidebar_visible
+                && self.workspace.panel == Panel::Repositories
+                && self.show_branches_drawer);
+        if visible
+            && self.active_worktree().is_some()
+            && self.active_branch_snapshot().is_none()
+            && !self.workspace.daily.branches_loading
+        {
+            self.workspace
+                .dispatch(Action::Daily(DailyAction::LoadBranches));
+            cx.notify();
+        }
     }
 
     pub(super) fn save_preferences(&self) {
@@ -273,6 +356,7 @@ impl DesktopView {
             show_commit_details: self.show_commit_details,
             diff_side_by_side: self.diff_side_by_side,
             show_branches_panel: self.show_branches_panel,
+            show_branches_drawer: self.show_branches_drawer,
             branches_group_by_dir: self.branches_group_by_dir,
             branches_show_tags: self.branches_show_tags,
             branches_only_favorites: self.branches_only_favorites,
@@ -324,26 +408,26 @@ impl DesktopView {
             .flex()
             .flex_shrink_0()
             .items_center()
-            .rounded(px(5.))
+            .rounded(px(6.))
             .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(CHROME))
-            .p(px(1.))
+            .p(px(1.5))
             .child(
                 div()
                     .id((id, 0usize))
                     .role(Role::Button)
                     .aria_selected(split)
                     .tab_index(0)
-                    .h(rems(1.4375))
+                    .h(rems(1.375))
                     .px(px(8.))
                     .rounded(px(4.))
                     .flex()
                     .items_center()
                     .text_size(rems(0.75))
-                    .cursor_pointer()
-                    .bg(rgb(if split { ACTIVE } else { CHROME }))
+                    .bg(rgb(if split { SELECT_SOFT } else { CHROME }))
                     .text_color(rgb(if split { TEXT } else { SUBTLE }))
+                    .when(split, |s| s.font_weight(FontWeight::MEDIUM))
                     .hover(|s| s.text_color(rgb(TEXT)))
                     .child(tr("左右对比", "Split"))
                     .on_click(cx.listener(|view, _, _, cx| {
@@ -356,15 +440,15 @@ impl DesktopView {
                     .role(Role::Button)
                     .aria_selected(!split)
                     .tab_index(0)
-                    .h(rems(1.4375))
+                    .h(rems(1.375))
                     .px(px(8.))
                     .rounded(px(4.))
                     .flex()
                     .items_center()
                     .text_size(rems(0.75))
-                    .cursor_pointer()
-                    .bg(rgb(if !split { ACTIVE } else { CHROME }))
+                    .bg(rgb(if !split { SELECT_SOFT } else { CHROME }))
                     .text_color(rgb(if !split { TEXT } else { SUBTLE }))
+                    .when(!split, |s| s.font_weight(FontWeight::MEDIUM))
                     .hover(|s| s.text_color(rgb(TEXT)))
                     .child(tr("统一视图", "Unified"))
                     .on_click(cx.listener(|view, _, _, cx| {
@@ -380,8 +464,8 @@ impl DesktopView {
         self.search.update(cx, |field, cx| {
             field.set_placeholder(
                 tr(
-                    "搜索说明/哈希，或 author: branch: after: before:",
-                    "Search message/hash, or author: branch: after: before:",
+                    "搜索说明、哈希，支持过滤语法…",
+                    "Search message/hash, or filter…",
                 ),
                 cx,
             );
@@ -397,6 +481,7 @@ impl DesktopView {
         self.workspace.dispatch(action);
         self.sync_history_view();
         self.sync_branches_panel(None, cx);
+        self.ensure_branches_loaded_if_visible(cx);
         self.sync_file_viewer(None, cx);
         self.sync_daily_view(cx);
         self.sync_stash_view();
@@ -461,6 +546,649 @@ impl DesktopView {
         }
     }
 
+    pub(super) fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = cx.new(|cx| {
+            TextField::new(
+                tr(
+                    "输入命令或仓库名快速跳转…",
+                    "Type a command or repository name…",
+                ),
+                String::new(),
+                false,
+                cx,
+            )
+        });
+        cx.subscribe(&input, |view, _, _: &text_field::Changed, cx| {
+            if let Some(Overlay::Dialog(Dialog::CommandPalette { selected_idx, .. })) =
+                &mut view.overlay
+            {
+                *selected_idx = 0;
+            }
+            cx.notify();
+        })
+        .detach();
+        self.open_confirmation(
+            Dialog::CommandPalette {
+                input: input.clone(),
+                selected_idx: 0,
+            },
+            window,
+            cx,
+        );
+        input.focus_handle(cx).focus(window, cx);
+    }
+
+    fn build_palette_entries(&self, query: &str) -> Vec<PaletteEntry> {
+        let m = if cfg!(target_os = "macos") {
+            "⌘"
+        } else {
+            "Ctrl+"
+        };
+        let opt = if cfg!(target_os = "macos") {
+            "⌥"
+        } else {
+            "Alt+"
+        };
+        let has_repo = self.workspace.selected.is_some();
+        let mut list = Vec::new();
+
+        // 1. 高频 Git 操作
+        if has_repo {
+            list.extend([
+                PaletteEntry {
+                    category: tr("Git", "Git"),
+                    title: tr("获取远端更新 (Fetch)", "Fetch Remote Updates").into(),
+                    subtitle: None,
+                    shortcut: Some(format!("⇧{m}T")),
+                    icon: Icon::Refresh,
+                    cmd: PaletteCommand::Fetch,
+                },
+                PaletteEntry {
+                    category: tr("Git", "Git"),
+                    title: tr("拉取当前分支 (Pull)…", "Pull Current Branch…").into(),
+                    subtitle: None,
+                    shortcut: Some(format!("{m}T")),
+                    icon: Icon::Download,
+                    cmd: PaletteCommand::Pull,
+                },
+                PaletteEntry {
+                    category: tr("Git", "Git"),
+                    title: tr("推送当前分支 (Push)…", "Push Current Branch…").into(),
+                    subtitle: None,
+                    shortcut: Some(format!("⇧{m}K")),
+                    icon: Icon::Upload,
+                    cmd: PaletteCommand::Push,
+                },
+                PaletteEntry {
+                    category: tr("Git", "Git"),
+                    title: tr("打开 Commit 提交面板", "Open Commit Panel").into(),
+                    subtitle: None,
+                    shortcut: Some(format!("{m}K")),
+                    icon: Icon::File,
+                    cmd: PaletteCommand::ShowPanel(Panel::Commit),
+                },
+                PaletteEntry {
+                    category: tr("Git", "Git"),
+                    title: tr("新建分支…", "New Branch…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Branch,
+                    cmd: PaletteCommand::NewBranch,
+                },
+                PaletteEntry {
+                    category: tr("Git", "Git"),
+                    title: tr("新建标签 (Tag)…", "Create Tag…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Tag,
+                    cmd: PaletteCommand::CreateTag,
+                },
+                PaletteEntry {
+                    category: tr("Git", "Git"),
+                    title: tr("保存 Stash…", "Stash Working Changes…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Shelve,
+                    cmd: PaletteCommand::StashSave,
+                },
+                PaletteEntry {
+                    category: tr("Git", "Git"),
+                    title: tr("搁置改动到 Shelf…", "Shelve Changes…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Shelve,
+                    cmd: PaletteCommand::ShelveChanges,
+                },
+                PaletteEntry {
+                    category: tr("管理", "Manage"),
+                    title: tr("管理远端仓库 (Remotes)…", "Manage Remotes…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Globe,
+                    cmd: PaletteCommand::ManageRemotes,
+                },
+                PaletteEntry {
+                    category: tr("管理", "Manage"),
+                    title: tr("管理标签与推送 (Tags)…", "Manage & Push Tags…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Tag,
+                    cmd: PaletteCommand::ManageTags,
+                },
+                PaletteEntry {
+                    category: tr("管理", "Manage"),
+                    title: tr("管理关联工作树 (Worktrees)…", "Manage Worktrees…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Repositories,
+                    cmd: PaletteCommand::ManageWorktrees,
+                },
+                PaletteEntry {
+                    category: tr("管理", "Manage"),
+                    title: tr("扫描嵌套子仓库…", "Scan Nested Repositories…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Stack,
+                    cmd: PaletteCommand::ScanNested,
+                },
+                PaletteEntry {
+                    category: tr("文件", "File"),
+                    title: tr("新建项目文件…", "New Project File…").into(),
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Add,
+                    cmd: PaletteCommand::NewFile,
+                },
+                PaletteEntry {
+                    category: tr("文件", "File"),
+                    title: if cfg!(target_os = "macos") {
+                        tr("在 Finder 中显示当前仓库", "Reveal Repository in Finder").into()
+                    } else {
+                        tr(
+                            "在文件管理器中显示当前仓库",
+                            "Reveal Repository in File Manager",
+                        )
+                        .into()
+                    },
+                    subtitle: None,
+                    shortcut: None,
+                    icon: Icon::Folder,
+                    cmd: PaletteCommand::RevealInFinder,
+                },
+            ]);
+        }
+
+        // 2. 仓库快速跳转
+        for repo in &self.workspace.repos {
+            let is_current = self.workspace.selected == Some(repo.target.id);
+            let sub = format!(
+                "{} · {}",
+                if repo.branch.is_empty() {
+                    "—"
+                } else {
+                    &repo.branch
+                },
+                abbreviate_home_path(&repo.target.root.to_string_lossy())
+            );
+            list.push(PaletteEntry {
+                category: tr("跳转仓库", "Switch Repo"),
+                title: if is_current {
+                    format!("{}  ✓", repo.name)
+                } else {
+                    repo.name.clone()
+                },
+                subtitle: Some(sub),
+                shortcut: None,
+                icon: Icon::RepoBook,
+                cmd: PaletteCommand::SwitchRepo(repo.target.id),
+            });
+        }
+
+        // 3. 全局仓库登记与视图控制
+        list.extend([
+            PaletteEntry {
+                category: tr("仓库", "Repo"),
+                title: tr("添加本地仓库…", "Add Local Repository…").into(),
+                subtitle: None,
+                shortcut: Some(format!("{m}O")),
+                icon: Icon::Add,
+                cmd: PaletteCommand::AddLocalRepo,
+            },
+            PaletteEntry {
+                category: tr("仓库", "Repo"),
+                title: tr("克隆远程仓库 (Clone)…", "Clone Repository…").into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::Download,
+                cmd: PaletteCommand::CloneRepo,
+            },
+            PaletteEntry {
+                category: tr("仓库", "Repo"),
+                title: tr("初始化新仓库 (Init)…", "Initialize New Repository…").into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::Add,
+                cmd: PaletteCommand::InitRepo,
+            },
+            PaletteEntry {
+                category: tr("仓库", "Repo"),
+                title: tr("新建仓库分组…", "New Repository Group…").into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::Folder,
+                cmd: PaletteCommand::NewGroup,
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr("切换到仓库列表", "Show Repositories Panel").into(),
+                subtitle: None,
+                shortcut: Some(format!("{m}1")),
+                icon: Icon::Repositories,
+                cmd: PaletteCommand::ShowPanel(Panel::Repositories),
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr("切换到项目文件树", "Show Project Files Panel").into(),
+                subtitle: None,
+                shortcut: Some(format!("{m}2")),
+                icon: Icon::Folder,
+                cmd: PaletteCommand::ShowPanel(Panel::ProjectFiles),
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr("切换到 Stash 面板", "Show Stash Panel").into(),
+                subtitle: None,
+                shortcut: Some(format!("{m}4")),
+                icon: Icon::Shelve,
+                cmd: PaletteCommand::ShowPanel(Panel::Stash),
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr("切换到 Shelf 面板", "Show Shelf Panel").into(),
+                subtitle: None,
+                shortcut: Some(format!("{m}5")),
+                icon: Icon::Shelve,
+                cmd: PaletteCommand::ShowPanel(Panel::Shelf),
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr(
+                    "显示 / 隐藏独立分支分栏",
+                    "Toggle Standalone Branches Column",
+                )
+                .into(),
+                subtitle: None,
+                shortcut: Some(format!("{m}B")),
+                icon: Icon::PanelLeft,
+                cmd: PaletteCommand::ToggleBranchesColumn,
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr(
+                    "显示 / 隐藏侧栏底部分支抽屉",
+                    "Toggle Sidebar Branches Drawer",
+                )
+                .into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::Branch,
+                cmd: PaletteCommand::ToggleBranchesDrawer,
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr("显示 / 隐藏右侧提交详情面板", "Toggle Commit Details Pane").into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::PanelRight,
+                cmd: PaletteCommand::ToggleCommitDetails,
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr(
+                    "切换左右并排 / 统一 Diff 视图",
+                    "Toggle Split / Unified Diff",
+                )
+                .into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::Compare,
+                cmd: PaletteCommand::ToggleDiffMode,
+            },
+            PaletteEntry {
+                category: tr("系统", "App"),
+                title: tr("从磁盘重新加载全部状态", "Reload All from Disk").into(),
+                subtitle: None,
+                shortcut: Some(format!("{opt}{m}Y")),
+                icon: Icon::Reload,
+                cmd: PaletteCommand::ReloadAll,
+            },
+            PaletteEntry {
+                category: tr("系统", "App"),
+                title: tr("偏好设置…", "Preferences & Settings…").into(),
+                subtitle: None,
+                shortcut: Some(format!("{m},")),
+                icon: Icon::Settings,
+                cmd: PaletteCommand::OpenSettings,
+            },
+            PaletteEntry {
+                category: tr("系统", "App"),
+                title: tr("查看快捷键一览…", "Keyboard Shortcuts…").into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::Eye,
+                cmd: PaletteCommand::OpenShortcuts,
+            },
+            PaletteEntry {
+                category: tr("系统", "App"),
+                title: tr("关于 GitHalo", "About GitHalo").into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::RepoBook,
+                cmd: PaletteCommand::OpenAbout,
+            },
+        ]);
+
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return list;
+        }
+        let tokens: Vec<&str> = q.split_whitespace().collect();
+        list.into_iter()
+            .filter(|item| {
+                let hay = format!(
+                    "{} {} {}",
+                    item.category.to_lowercase(),
+                    item.title.to_lowercase(),
+                    item.subtitle.as_deref().unwrap_or_default().to_lowercase()
+                );
+                tokens.iter().all(|tok| hay.contains(tok))
+            })
+            .collect()
+    }
+
+    fn execute_palette_command(
+        &mut self,
+        cmd: PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_overlay(window, cx);
+        match cmd {
+            PaletteCommand::SwitchRepo(id) => self.select_repo(id, None, window, cx),
+            PaletteCommand::ShowPanel(panel) => {
+                self.sidebar_visible = true;
+                self.dispatch(Action::ShowPanel(panel), cx);
+                self.refresh_app_menus(cx);
+            }
+            PaletteCommand::Fetch => {
+                if let Some(id) = self.workspace.selected {
+                    self.dispatch(Action::RefreshRepo(id), cx);
+                }
+            }
+            PaletteCommand::Pull => self.prepare_remote(RemoteOperation::Pull, window, cx),
+            PaletteCommand::Push => self.prepare_remote(RemoteOperation::Push, window, cx),
+            PaletteCommand::NewBranch => {
+                if let Some(snapshot) = self.active_branch_snapshot() {
+                    self.open_branch_form(snapshot, window, cx);
+                } else {
+                    self.dispatch_daily(DailyAction::LoadBranches, cx);
+                }
+            }
+            PaletteCommand::CreateTag => {
+                if let Some(oid) = self
+                    .workspace
+                    .selected_commit
+                    .clone()
+                    .or_else(|| self.workspace.commits.first().map(|c| c.oid.clone()))
+                {
+                    self.open_create_tag_dialog(oid, window, cx);
+                }
+            }
+            PaletteCommand::ManageTags => {
+                if let Some(target) = self.active_worktree().cloned() {
+                    self.open_tags_dialog(target, None, window, cx);
+                }
+            }
+            PaletteCommand::ManageRemotes => {
+                if let Some(target) = self.active_worktree().cloned() {
+                    self.open_remotes_dialog(target, window, cx);
+                }
+            }
+            PaletteCommand::ManageWorktrees => {
+                if let Some(target) = self.active_worktree().cloned() {
+                    self.open_worktrees_dialog(target, window, cx);
+                }
+            }
+            PaletteCommand::StashSave => {
+                self.sidebar_visible = true;
+                self.dispatch(Action::ShowPanel(Panel::Stash), cx);
+                self.open_stash_save(window, cx);
+                self.refresh_app_menus(cx);
+            }
+            PaletteCommand::ShelveChanges => {
+                self.sidebar_visible = true;
+                self.dispatch(Action::ShowPanel(Panel::Shelf), cx);
+                self.open_shelve_dialog(Vec::new(), window, cx);
+                self.refresh_app_menus(cx);
+            }
+            PaletteCommand::ScanNested => {
+                if let Some(id) = self.workspace.selected {
+                    self.dispatch(Action::ScanNested(id), cx);
+                }
+            }
+            PaletteCommand::AddLocalRepo => {
+                self.select_path(PathOperation::Add(None), window, cx);
+            }
+            PaletteCommand::CloneRepo => self.open_clone_dialog(None, window, cx),
+            PaletteCommand::InitRepo => self.open_init_dialog(None, window, cx),
+            PaletteCommand::NewGroup => self.open_group_name(None, window, cx),
+            PaletteCommand::NewFile => {
+                if self.active_worktree().is_some() {
+                    self.open_project_entry_form(
+                        ProjectEntryFormKind::NewFile,
+                        PathBuf::new(),
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+            }
+            PaletteCommand::RevealInFinder => {
+                if let Some(target) = self.active_worktree()
+                    && let Err(err) = reveal_in_file_manager(&target.root)
+                {
+                    self.notice = Some(err);
+                    cx.notify();
+                }
+            }
+            PaletteCommand::ReloadAll => {
+                self.dispatch(Action::Reload, cx);
+            }
+            PaletteCommand::ToggleBranchesColumn => {
+                self.toggle_branches_panel(cx);
+                self.refresh_app_menus(cx);
+            }
+            PaletteCommand::ToggleBranchesDrawer => {
+                self.show_branches_drawer = !self.show_branches_drawer;
+                self.ensure_branches_loaded_if_visible(cx);
+                self.save_preferences();
+                cx.notify();
+            }
+            PaletteCommand::ToggleCommitDetails => {
+                self.show_commit_details = !self.show_commit_details;
+                self.save_preferences();
+                self.refresh_app_menus(cx);
+                cx.notify();
+            }
+            PaletteCommand::ToggleDiffMode => {
+                self.set_diff_side_by_side(!self.diff_side_by_side, cx);
+            }
+            PaletteCommand::OpenSettings => self.open_settings_dialog(window, cx),
+            PaletteCommand::OpenShortcuts => self.open_confirmation(Dialog::Shortcuts, window, cx),
+            PaletteCommand::OpenAbout => self.open_confirmation(Dialog::About, window, cx),
+        }
+    }
+
+    fn command_palette_dialog(
+        &self,
+        input: &Entity<TextField>,
+        selected_idx: usize,
+        viewport_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let query = input.read(cx).text().to_owned();
+        let entries = self.build_palette_entries(&query);
+        let count = entries.len();
+        let clamped_sel = if count == 0 {
+            0
+        } else {
+            selected_idx.min(count - 1)
+        };
+        let confirm_cmd = entries.get(clamped_sel).map(|e| e.cmd.clone());
+        let max_h = (viewport_height * 0.55).clamp(px(220.), px(420.));
+
+        div()
+            .key_context("CommandPalette")
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .on_action(cx.listener(move |view, _: &PaletteUp, _, cx| {
+                if let Some(Overlay::Dialog(Dialog::CommandPalette { selected_idx, .. })) =
+                    &mut view.overlay
+                    && count > 0
+                {
+                    *selected_idx = if *selected_idx == 0 {
+                        count - 1
+                    } else {
+                        *selected_idx - 1
+                    };
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(move |view, _: &PaletteDown, _, cx| {
+                if let Some(Overlay::Dialog(Dialog::CommandPalette { selected_idx, .. })) =
+                    &mut view.overlay
+                    && count > 0
+                {
+                    *selected_idx = (*selected_idx + 1) % count;
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(move |view, _: &Confirm, window, cx| {
+                if let Some(cmd) = confirm_cmd.clone() {
+                    view.execute_palette_command(cmd, window, cx);
+                }
+            }))
+            .child(
+                div()
+                    .h(px(34.))
+                    .px(px(10.))
+                    .gap(px(8.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(6.))
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER_STRONG))
+                    .child(icon(Icon::Search, BRAND))
+                    .child(div().flex_1().min_w_0().child(input.clone()))
+                    .child(
+                        div()
+                            .px(px(5.))
+                            .py(px(1.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(rgb(BORDER_STRONG))
+                            .text_size(px(10.5))
+                            .text_color(rgb(SUBTLE))
+                            .child("Esc"),
+                    ),
+            )
+            .child(if entries.is_empty() {
+                empty(tr(
+                    "没有匹配的命令或仓库",
+                    "No matching commands or repositories",
+                ))
+                .h(px(120.))
+                .into_any_element()
+            } else {
+                div()
+                    .id("command-palette-list")
+                    .max_h(max_h)
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .children(entries.into_iter().enumerate().map(|(idx, entry)| {
+                        let is_sel = idx == clamped_sel;
+                        let cmd = entry.cmd;
+                        div()
+                            .id(("palette-item", idx))
+                            .role(Role::MenuItem)
+                            .aria_selected(is_sel)
+                            .relative()
+                            .px(px(10.))
+                            .py(px(6.))
+                            .rounded(px(6.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .when(is_sel, |r| r.bg(rgb(ACTIVE)).child(selection_bar()))
+                            .hover(move |s| s.bg(rgb(if is_sel { ACTIVE } else { HOVER })))
+                            .child(icon(entry.icon, if is_sel { BRAND_TEXT } else { MUTED }))
+                            .child(
+                                div()
+                                    .px(px(5.))
+                                    .py(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(rgb(CARD))
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(SUBTLE))
+                                    .child(entry.category),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        elide(entry.title)
+                                            .text_color(rgb(TEXT))
+                                            .when(is_sel, |t| t.font_weight(FontWeight::MEDIUM)),
+                                    )
+                                    .when_some(entry.subtitle, |r, sub| {
+                                        r.child(
+                                            elide(sub)
+                                                .flex_1()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(SUBTLE)),
+                                        )
+                                    }),
+                            )
+                            .when_some(entry.shortcut, |r, sc| {
+                                r.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px(px(5.))
+                                        .py(px(1.))
+                                        .rounded(px(4.))
+                                        .border_1()
+                                        .border_color(rgb(BORDER_STRONG))
+                                        .text_size(px(10.5))
+                                        .text_color(rgb(MUTED))
+                                        .child(sc),
+                                )
+                            })
+                            .on_click(cx.listener(move |view, _, window, cx| {
+                                view.execute_palette_command(cmd.clone(), window, cx);
+                            }))
+                    }))
+                    .into_any_element()
+            })
+    }
+
     fn titlebar(&self, cx: &mut Context<Self>) -> Div {
         let selected = self
             .workspace
@@ -469,16 +1197,12 @@ impl DesktopView {
         let title = selected.map_or(tr("选择仓库", "Select Repository"), |repo| {
             repo.name.as_str()
         });
-        let worktree_tooltip = selected.map_or_else(
-            || {
-                tr(
-                    "选择已有仓库，或添加本地仓库",
-                    "Select a repository or add a local repository",
-                )
-                .to_owned()
-            },
-            |repo| repo.target.root.to_string_lossy().into_owned(),
-        );
+        let has_nested = selected.is_some_and(|repo| {
+            self.workspace
+                .nested
+                .get(&repo.target.id)
+                .is_some_and(|n| !n.children.is_empty())
+        });
         let writable = self.daily_can_write();
         let branch = selected.map(|repo| {
             let current = if repo.branch.is_empty() {
@@ -504,18 +1228,16 @@ impl DesktopView {
                 .items_center()
                 .gap(px(5.))
                 .min_w_0()
-                .h(rems(1.8125))
-                .px(px(7.))
-                .max_w(px(300.))
-                .rounded(px(5.))
-                .tooltip(tooltip(current.to_owned()))
-                .child(icon(Icon::Branch, MUTED))
-                .child(elide(current))
+                .h(rems(1.75))
+                .px(px(8.))
+                .max_w(px(280.))
+                .rounded(px(6.))
+                .child(icon(Icon::Branch, BRAND))
+                .child(elide(current).font_weight(FontWeight::MEDIUM))
                 .child(icon(Icon::ChevronDown, SUBTLE))
                 .when(writable, |button| {
                     button
                         .tab_index(0)
-                        .cursor_pointer()
                         .hover(|button| button.bg(rgb(HOVER)))
                         .focus_visible(|button| button.bg(rgb(HOVER)))
                         .on_click(cx.listener(|view, event: &gpui::ClickEvent, window, cx| {
@@ -523,22 +1245,157 @@ impl DesktopView {
                         }))
                 })
         });
-        let sync_button = |id, label, kind| {
-            command_button(id, label, false, writable).when(writable, |button| {
-                button.on_click(
-                    cx.listener(move |view, _, window, cx| view.prepare_remote(kind, window, cx)),
+
+        let sync_pill = selected.and_then(|repo| {
+            let counts = repo.counts.filter(|_| repo.issue.is_none())?;
+            Some(
+                div()
+                    .id("titlebar-sync-pill")
+                    .flex_shrink_0()
+                    .h(px(22.))
+                    .px(px(8.))
+                    .rounded(px(999.))
+                    .bg(rgb(CARD))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(rems(0.72))
+                    .child(
+                        div()
+                            .text_color(rgb(if counts.behind > 0 { LINK } else { SUBTLE }))
+                            .when(counts.behind > 0, |t| t.font_weight(FontWeight::SEMIBOLD))
+                            .child(format!("↓{}", counts.behind)),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(if counts.ahead > 0 { BRAND_TEXT } else { SUBTLE }))
+                            .when(counts.ahead > 0, |t| t.font_weight(FontWeight::SEMIBOLD))
+                            .child(format!("↑{}", counts.ahead)),
+                    ),
+            )
+        });
+
+        let action_group: Option<AnyElement> = selected.map(|repo| {
+            let repo_id = repo.target.id;
+            let fetching = repo.fetching;
+            let seg = |id: &'static str,
+                       ico: Icon,
+                       label: &'static str,
+                       tip: &'static str,
+                       enabled: bool,
+                       tint: Option<u32>| {
+                div()
+                    .id(id)
+                    .role(Role::Button)
+                    .aria_label(tip)
+                    .tooltip(tooltip(tip.to_owned()))
+                    .h_full()
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .text_size(rems(0.76))
+                    .text_color(rgb(if !enabled {
+                        SUBTLE
+                    } else if let Some(c) = tint {
+                        c
+                    } else {
+                        TEXT
+                    }))
+                    .child(icon(
+                        ico,
+                        if !enabled {
+                            SUBTLE
+                        } else if let Some(c) = tint {
+                            c
+                        } else {
+                            MUTED
+                        },
+                    ))
+                    .child(label)
+                    .when(enabled, |b| b.tab_index(0).hover(|s| s.bg(rgb(HOVER))))
+            };
+            div()
+                .flex_shrink_0()
+                .h(rems(1.6875))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(rgb(BORDER_STRONG))
+                .bg(rgb(CARD))
+                .overflow_hidden()
+                .flex()
+                .items_center()
+                .child(
+                    seg(
+                        "refresh-current",
+                        Icon::Refresh,
+                        if fetching {
+                            tr("获取中…", "Fetching…")
+                        } else {
+                            tr("获取", "Fetch")
+                        },
+                        tr("获取远端更新 (⇧⌘T)", "Fetch Remote Updates (⇧⌘T)"),
+                        !fetching,
+                        fetching.then_some(BRAND_TEXT),
+                    )
+                    .when(!fetching, |b| {
+                        b.on_click(cx.listener(move |view, _, _, cx| {
+                            view.dispatch(Action::RefreshRepo(repo_id), cx);
+                        }))
+                    }),
                 )
-            })
+                .child(div().w(px(1.)).h_full().bg(rgb(BORDER_STRONG)))
+                .child(
+                    seg(
+                        "pull-current",
+                        Icon::Download,
+                        tr("拉取", "Pull"),
+                        tr("拉取当前分支 (⌘T)", "Pull Current Branch (⌘T)"),
+                        writable,
+                        None,
+                    )
+                    .when(writable, |b| {
+                        b.on_click(cx.listener(|view, _, window, cx| {
+                            view.prepare_remote(RemoteOperation::Pull, window, cx);
+                        }))
+                    }),
+                )
+                .child(div().w(px(1.)).h_full().bg(rgb(BORDER_STRONG)))
+                .child(
+                    seg(
+                        "push-current",
+                        Icon::Upload,
+                        tr("推送", "Push"),
+                        tr("推送当前分支 (⇧⌘K)", "Push Current Branch (⇧⌘K)"),
+                        writable,
+                        None,
+                    )
+                    .when(writable, |b| {
+                        b.on_click(cx.listener(|view, _, window, cx| {
+                            view.prepare_remote(RemoteOperation::Push, window, cx);
+                        }))
+                    }),
+                )
+                .into_any_element()
+        });
+
+        let palette_shortcut = if cfg!(target_os = "macos") {
+            "⇧⌘P"
+        } else {
+            "Ctrl+Shift+P"
         };
 
         div()
             .h(rems(2.625))
             .flex_shrink_0()
-            .pl(px(if cfg!(target_os = "macos") { 81. } else { 12. }))
-            .pr(px(12.))
+            .pl(px(if cfg!(target_os = "macos") { 80. } else { 12. }))
+            .pr(px(10.))
             .flex()
             .items_center()
-            .gap(px(9.))
+            .gap(px(7.))
+            .bg(rgb(CHROME))
             .child(
                 div()
                     .id("worktree-picker")
@@ -547,18 +1404,23 @@ impl DesktopView {
                     .tab_index(0)
                     .flex()
                     .items_center()
-                    .gap(px(5.))
-                    .h(rems(1.8125))
-                    .px(px(7.))
+                    .gap(px(6.))
+                    .h(rems(1.75))
+                    .px(px(8.))
                     .min_w(px(96.))
-                    .max_w(px(280.))
-                    .rounded(px(5.))
-                    .cursor_pointer()
+                    .max_w(px(260.))
+                    .rounded(px(6.))
                     .hover(|s| s.bg(rgb(HOVER)))
                     .focus_visible(|s| s.bg(rgb(HOVER)))
-                    .tooltip(tooltip(worktree_tooltip))
-                    .child(icon(Icon::Folder, MUTED))
-                    .child(elide(title))
+                    .child(icon(
+                        if has_nested {
+                            Icon::Stack
+                        } else {
+                            Icon::RepoBook
+                        },
+                        MUTED,
+                    ))
+                    .child(elide(title).font_weight(FontWeight::MEDIUM))
                     .child(icon(Icon::ChevronDown, SUBTLE))
                     .on_click(cx.listener(|view, event: &gpui::ClickEvent, window, cx| {
                         view.open_menu(MenuKind::Worktrees, event.position(), window, cx);
@@ -566,54 +1428,75 @@ impl DesktopView {
             )
             .children(selected.map(|_| vertical_rule()))
             .children(branch)
-            .when(selected.is_some(), |bar| {
-                bar.child(sync_button("pull-current", "Pull", RemoteOperation::Pull))
-                    .child(sync_button("push-current", "Push", RemoteOperation::Push))
-            })
+            .children(sync_pill)
+            .child(div().flex_1().h_full().min_w(px(24.)).on_mouse_down(
+                MouseButton::Left,
+                |event, window, _| {
+                    if cfg!(target_os = "macos") {
+                        if event.click_count == 2 {
+                            window.titlebar_double_click();
+                        } else {
+                            window.start_window_move();
+                        }
+                    }
+                },
+            ))
+            .children(action_group)
+            .child(
+                div()
+                    .id("command-palette-trigger")
+                    .role(Role::Button)
+                    .aria_label(tr("命令与仓库快速跳转", "Command Palette"))
+                    .tab_index(0)
+                    .h(rems(1.6875))
+                    .w(px(196.))
+                    .px(px(9.))
+                    .gap(px(6.))
+                    .flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(CARD))
+                    .hover(|s| s.bg(rgb(HOVER)).border_color(rgb(BORDER_STRONG)))
+                    .child(icon(Icon::Search, SUBTLE))
+                    .child(
+                        elide(tr("命令与跳转…", "Commands & Go to…"))
+                            .flex_1()
+                            .text_size(rems(0.75))
+                            .text_color(rgb(SUBTLE)),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px(px(4.))
+                            .py(px(0.5))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(rgb(BORDER_STRONG))
+                            .text_size(px(10.))
+                            .text_color(rgb(SUBTLE))
+                            .child(palette_shortcut),
+                    )
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.open_command_palette(window, cx);
+                    })),
+            )
             .child(
                 icon_button(
                     "repo-admin-menu",
                     Icon::More,
-                    tr("仓库管理与偏好设置", "Repository Tools & Settings"),
+                    tr(
+                        "仓库管理与偏好设置 (Remotes / Tags / Worktrees / 设置)",
+                        "Repository Tools & Preferences",
+                    ),
                 )
                 .on_click(cx.listener(
                     |view, event: &gpui::ClickEvent, window, cx| {
                         view.open_menu(MenuKind::RepoAdmin, event.position(), window, cx);
                     },
                 )),
-            )
-            .children(selected.map(|repo| {
-                let id = repo.target.id;
-                if repo.fetching {
-                    div()
-                        .text_color(rgb(LINK))
-                        .child(tr("刷新中", "Fetching"))
-                        .into_any_element()
-                } else {
-                    icon_button(
-                        "refresh-current",
-                        Icon::Refresh,
-                        tr("刷新本仓", "Fetch repository"),
-                    )
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        view.dispatch(Action::RefreshRepo(id), cx);
-                    }))
-                    .into_any_element()
-                }
-            }))
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .on_mouse_down(MouseButton::Left, |event, window, _| {
-                        if cfg!(target_os = "macos") {
-                            if event.click_count == 2 {
-                                window.titlebar_double_click();
-                            } else {
-                                window.start_window_move();
-                            }
-                        }
-                    }),
             )
     }
 
@@ -624,79 +1507,100 @@ impl DesktopView {
             if counts.commit_conflicts {
                 Some(ERROR)
             } else if counts.commit_files > 0 {
-                Some(0x69a9ff)
+                Some(LINK)
             } else if counts.diverged_repos > 0 {
-                Some(0x69e8ce)
+                Some(BRAND)
             } else {
                 None
             }
         } else {
             None
         };
-        let button = |id, panel, icon, label, dot_color: Option<u32>| {
+        let button = |id: &'static str,
+                      panel: Panel,
+                      ico: Icon,
+                      label: &'static str,
+                      dot_color: Option<u32>| {
             let active = self.sidebar_visible && rail_panel(self.workspace.panel) == panel;
-            icon_button(id, icon, label)
-                .relative()
-                .when(active, |div| div.bg(rgb(0x3c4046)))
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
                 .aria_expanded(active)
+                .tab_index(0)
+                .tooltip(tooltip(label.to_owned()))
+                .relative()
+                .size(rems(1.75))
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(active, |b| b.bg(rgb(BRAND_BG)))
+                .hover(move |s| s.bg(rgb(if active { BRAND_BG } else { HOVER })))
+                .child(icon(ico, if active { BRAND_TEXT } else { SUBTLE }))
                 .when_some(dot_color, |btn, color| {
                     btn.child(
                         div()
                             .absolute()
                             .top(px(2.))
                             .right(px(2.))
-                            .w(px(7.))
-                            .h(px(7.))
+                            .size(px(6.5))
                             .rounded(px(999.))
                             .bg(rgb(color))
                             .border_1()
-                            .border_color(rgb(CHROME)),
+                            .border_color(rgb(RAIL_BG)),
                     )
                 })
                 .on_click(cx.listener(move |view, _, _, cx| view.toggle_panel(panel, cx)))
         };
         div()
-            .w(rems(2.5))
+            .w(rems(2.375))
             .flex_shrink_0()
             .flex()
             .flex_col()
             .items_center()
-            .pt(px(5.))
+            .pt(px(8.))
             .gap(px(6.))
+            .bg(rgb(RAIL_BG))
+            .border_r_1()
+            .border_color(rgb(BORDER))
             .child(button(
                 "repo-tool",
                 Panel::Repositories,
                 Icon::Repositories,
-                tr("仓库", "Repositories"),
+                tr("仓库与版本控制 (⌘1)", "Repositories & Git (⌘1)"),
                 repo_dot_color,
             ))
             .child(button(
                 "project-tool",
                 Panel::ProjectFiles,
                 Icon::Folder,
-                tr("项目文件", "Project Files"),
+                tr("项目文件与代码编辑器 (⌘2)", "Project Files & Editor (⌘2)"),
                 None,
             ))
     }
 
     fn sidebar_width_for(&self, viewport: Pixels) -> Pixels {
         let scale = self.ui_scale as f32 / 100.;
-        let min_w = px(200. * scale);
-        let default_min = px(244. * scale);
-        let default_max = px(328. * scale);
-        let max = (viewport * 0.36).clamp(min_w, px(390. * scale));
+        let min_w = px(216. * scale);
+        let default_min = px(262. * scale);
+        let default_max = px(332. * scale);
+        let max = (viewport * 0.36).clamp(min_w, px(400. * scale));
         self.sidebar_width
-            .unwrap_or_else(|| (viewport * 0.20).clamp(default_min, default_max))
+            .unwrap_or_else(|| (viewport * 0.215).clamp(default_min, default_max))
             .clamp(min_w, max)
     }
 
     fn sash(&self, width: Pixels, cx: &mut Context<Self>) -> Div {
         div()
-            .w(px(5.))
+            .w(px(4.))
             .h_full()
             .flex_shrink_0()
+            .border_l_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(PANEL))
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|s| s.bg(rgb(ACTIVE_BORDER)))
+            .hover(|s| s.bg(rgb(BRAND)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
@@ -708,14 +1612,14 @@ impl DesktopView {
 
     fn status_bar(&self, cx: &mut Context<Self>) -> Div {
         let state = &self.workspace.daily;
-        let message = if self
+        let running = self
             .workspace
             .selected
-            .is_some_and(|id| self.workspace.writing(id))
-        {
+            .is_some_and(|id| self.workspace.writing(id));
+        let message = if running {
             Some((
                 tr("正在执行 Git 操作…", "Running Git operation…"),
-                LINK,
+                BRAND_TEXT,
                 false,
             ))
         } else if let Some(error) = &state.error {
@@ -730,27 +1634,68 @@ impl DesktopView {
                 .as_deref()
                 .map(|message| (message, WARNING, true))
         };
-        let path = self
+        let repo_info = self
             .workspace
             .selected
-            .and_then(|id| self.workspace.repo(id))
-            .map(|repo| repo.target.root.to_string_lossy().into_owned());
+            .and_then(|id| self.workspace.repo(id));
+        let full_path = repo_info.map(|repo| repo.target.root.to_string_lossy().into_owned());
+        let short_path = full_path.as_deref().map(abbreviate_home_path);
+        let hovered_hint = self.hovered_hint.clone();
+
         div()
-            .h(rems(1.875))
+            .h(rems(1.625))
             .flex_shrink_0()
-            .px(px(11.))
+            .px(px(12.))
             .flex()
             .items_center()
-            .gap(px(6.))
-            .text_size(rems(0.75))
+            .gap(px(10.))
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(CHROME))
+            .text_size(rems(0.72))
             .text_color(rgb(SUBTLE))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(div().size(px(6.)).rounded(px(999.)).bg(rgb(if running {
+                        LINK
+                    } else {
+                        BRAND
+                    })))
+                    .child(if running {
+                        tr("运行中", "Busy")
+                    } else {
+                        tr("就绪", "Ready")
+                    }),
+            )
+            .child(if let Some(hint) = hovered_hint {
+                div()
+                    .id("status-hovered-hint")
+                    .min_w_0()
+                    .flex_1()
+                    .text_color(rgb(MUTED))
+                    .child(elide(hint))
+                    .into_any_element()
+            } else if let Some(short) = short_path {
+                div()
+                    .id("status-path")
+                    .min_w_0()
+                    .flex_1()
+                    .child(elide(short))
+                    .into_any_element()
+            } else {
+                div().flex_1().into_any_element()
+            })
             .children(message.map(|(message, color, dismissible)| {
                 div()
                     .min_w_0()
+                    .max_w(px(620.))
                     .flex()
-                    .flex_1()
                     .items_center()
-                    .gap(px(7.))
+                    .gap(px(6.))
                     .text_color(rgb(color))
                     .child(
                         div()
@@ -765,6 +1710,7 @@ impl DesktopView {
                     .when(dismissible, |bar| {
                         bar.child(
                             icon_button("clear-message", Icon::Close, tr("关闭消息", "Dismiss"))
+                                .size(px(18.))
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.notice = None;
                                     view.dispatch(Action::ClearMessage, cx);
@@ -772,14 +1718,24 @@ impl DesktopView {
                         )
                     })
             }))
-            .children(path.filter(|_| message.is_none()).map(|path| {
-                div()
-                    .id("status-path")
-                    .min_w_0()
-                    .tooltip(tooltip(path.clone()))
-                    .child(elide(path))
-            }))
     }
+}
+
+pub(super) fn abbreviate_home_path(raw: &str) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        let home = home.trim_end_matches('/');
+        if !home.is_empty()
+            && let Some(rest) = raw.strip_prefix(home)
+        {
+            if rest.is_empty() {
+                return "~".to_owned();
+            }
+            if rest.starts_with('/') {
+                return format!("~{rest}");
+            }
+        }
+    }
+    raw.to_owned()
 }
 
 impl Render for DesktopView {
@@ -788,12 +1744,13 @@ impl Render for DesktopView {
         window.set_rem_size(px(16. * scale));
         self.sync_container_discovery_dialog(window, cx);
         self.ensure_project_file_editors(window, cx);
+        self.ensure_branches_loaded_if_visible(cx);
         let viewport = window.viewport_size().width;
         let sidebar_width = self.sidebar_width_for(viewport);
         let available = viewport
-            - px(48. * scale)
+            - px(38. * scale)
             - if self.sidebar_visible {
-                sidebar_width
+                sidebar_width + px(4.)
             } else {
                 px(0.)
             };
@@ -808,7 +1765,7 @@ impl Render for DesktopView {
             .overflow_hidden()
             .bg(rgb(CHROME))
             .text_color(rgb(TEXT))
-            .text_size(rems(0.84375))
+            .text_size(rems(0.8125))
             .line_height(rems(1.22))
             .on_action(cx.listener(|view, _: &Dismiss, window, cx| {
                 if view.overlay.is_some() {
@@ -836,6 +1793,9 @@ impl Render for DesktopView {
             }))
             .on_action(cx.listener(|view, _: &FocusPrevious, window, cx| {
                 view.advance_focus(true, window, cx);
+            }))
+            .on_action(cx.listener(|view, _: &OpenCommandPalette, window, cx| {
+                view.open_command_palette(window, cx);
             }))
             .on_action(cx.listener(|view, _: &OpenCommit, _, cx| {
                 view.sidebar_visible = true;
@@ -876,6 +1836,10 @@ impl Render for DesktopView {
                 } else if let Some((origin, width)) = view.branches_ui.drag {
                     view.branches_ui.width = Some(width + event.position.x - origin);
                     cx.notify();
+                } else if let Some((origin_y, start_h)) = view.branches_drawer_drag {
+                    let next = (start_h + origin_y - event.position.y).clamp(px(140.), px(460.));
+                    view.branches_drawer_height = next;
+                    cx.notify();
                 } else if let Some((origin_y, start_h)) = view.daily_ui.draft_drag {
                     let next = (start_h + origin_y - event.position.y).clamp(px(64.), px(260.));
                     view.daily_ui.draft_height = next;
@@ -888,6 +1852,7 @@ impl Render for DesktopView {
                 cx.listener(|view, _, _, _| {
                     view.sidebar_drag = None;
                     view.branches_ui.drag = None;
+                    view.branches_drawer_drag = None;
                     view.daily_ui.draft_drag = None;
                 }),
             )
@@ -896,6 +1861,7 @@ impl Render for DesktopView {
                 cx.listener(|view, _, _, _| {
                     view.sidebar_drag = None;
                     view.branches_ui.drag = None;
+                    view.branches_drawer_drag = None;
                     view.daily_ui.draft_drag = None;
                 }),
             )
@@ -905,7 +1871,8 @@ impl Render for DesktopView {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .pr(px(8.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
                     .child(self.rail(cx))
                     .when(self.sidebar_visible, |this| {
                         this.child(self.sidebar(sidebar_width, cx))
