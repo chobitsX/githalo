@@ -164,12 +164,9 @@ cargo test --release --locked --no-default-features --test workspace_flow first_
 
 ### 下载预编译安装包（macOS）
 
-直接前往 **[GitHub Releases](https://github.com/chobitsX/githalo/releases/latest)** 下载最新版 macOS Apple Silicon `.dmg` 安装包（仅约 6.6 MiB），将 **GitHalo.app** 拖入 `/Applications` 即可使用。
+直接前往 **[GitHub Releases](https://github.com/chobitsX/githalo/releases/latest)** 下载最新版 macOS Apple Silicon `.dmg` 安装包，将 **GitHalo.app** 拖入 `/Applications` 即可使用。
 
-> **macOS 首次启动提示**：开源初版暂未接入 Apple 公证签名，若系统提示无法打开，可在终端执行一次：
-> ```bash
-> xattr -dr com.apple.quarantine /Applications/GitHalo.app
-> ```
+> **已签名并通过 Apple 官方公证**：自 `v0.6.0` 起，官方发布的 macOS 安装包均已使用 Apple Developer ID 证书（Hardened Runtime）签名、通过 Apple 公证服务审核并离线装订公证票据，下载拖入 `/Applications` 后即可直接打开，无需手动解除隔离或绕过 Gatekeeper。
 
 ### 从源码构建运行
 

@@ -164,12 +164,9 @@ cargo test --release --locked --no-default-features --test workspace_flow first_
 
 ### Download Prebuilt Release (macOS)
 
-Download the latest Apple Silicon `.dmg` (~6.6 MiB) directly from the **[GitHub Releases](https://github.com/chobitsX/githalo/releases/latest)** page and drag **GitHalo.app** into `/Applications`.
+Download the latest Apple Silicon `.dmg` directly from the **[GitHub Releases](https://github.com/chobitsX/githalo/releases/latest)** page and drag **GitHalo.app** into `/Applications`.
 
-> **Note for macOS Gatekeeper:** Because initial open-source builds are not yet Apple-notarized, if macOS blocks the first launch, run:
-> ```bash
-> xattr -dr com.apple.quarantine /Applications/GitHalo.app
-> ```
+> **Signed & Apple-Notarized:** Official macOS release builds (starting from `v0.6.0`) are signed with an Apple Developer ID certificate (Hardened Runtime), notarized by Apple, and stapled for offline Gatekeeper verification — drag to `/Applications` and open directly with no quarantine warnings.
 
 ### Build & Run from Source
 
