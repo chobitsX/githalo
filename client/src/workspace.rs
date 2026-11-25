@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::git::{self, FetchOutcome};
-pub use crate::history::{BlameLine, ChangedFile, Commit, CommitRef, CommitRefKind};
+pub use crate::history::{
+    BlameLine, ChangedFile, Commit, CommitChangesBundle, CommitRef, CommitRefKind,
+};
 pub use crate::nested::{
     DEFAULT_MAX_DEPTH, DEFAULT_MAX_DIRS, DiscoveredNestedRepo, NestedScanOutcome,
 };
@@ -150,6 +152,11 @@ pub enum Action {
         to: GroupId,
     },
     SelectCommit(String),
+    SelectCommits {
+        oids: Vec<String>,
+        primary: Option<String>,
+        anchor: Option<String>,
+    },
     SetBranchFilter(Option<String>),
     LoadMoreHistory,
     SelectFile(PathBuf),
@@ -231,7 +238,8 @@ enum Event {
         comparison: Option<(OsString, crate::registry::HistoricalCounts)>,
     },
     History(u64, Result<Vec<Commit>, String>),
-    Changes(u64, Result<Vec<ChangedFile>, String>),
+    Changes(u64, Result<CommitChangesBundle, String>),
+    CommitRefs(u64, Result<Vec<CommitRef>, String>),
     Patch(u64, Result<String, String>),
     Directory(u64, PathBuf, Result<Vec<ProjectEntry>, String>),
     ProjectGitStatus(u64, BTreeMap<PathBuf, FileGitStatus>),
@@ -298,7 +306,13 @@ pub struct Workspace {
     pub branch_filter: Option<String>,
     pub history_limit: usize,
     pub selected_commit: Option<String>,
+    pub selected_commits: Vec<String>,
+    pub selection_anchor: Option<String>,
+    pub selected_commit_bodies: BTreeMap<String, String>,
+    pub selected_commit_refs: Vec<CommitRef>,
+    pub commit_refs_loading: bool,
     pub changes: Vec<ChangedFile>,
+    pub changes_contiguous: bool,
     pub selected_file: Option<PathBuf>,
     pub diff: Option<String>,
     pub tree: Vec<ProjectEntry>,
@@ -313,6 +327,7 @@ pub struct Workspace {
     sequence: u64,
     history_request: u64,
     changes_request: u64,
+    commit_refs_request: u64,
     patch_request: u64,
     dir_requests: BTreeMap<PathBuf, u64>,
     project_status_request: u64,
@@ -369,7 +384,13 @@ impl Workspace {
                 branch_filter: None,
                 history_limit: crate::history::RECENT_LIMIT,
                 selected_commit: None,
+                selected_commits: vec![],
+                selection_anchor: None,
+                selected_commit_bodies: BTreeMap::new(),
+                selected_commit_refs: vec![],
+                commit_refs_loading: false,
                 changes: vec![],
+                changes_contiguous: true,
                 selected_file: None,
                 diff: None,
                 tree: vec![],
@@ -384,6 +405,7 @@ impl Workspace {
                 sequence: 0,
                 history_request: 0,
                 changes_request: 0,
+                commit_refs_request: 0,
                 patch_request: 0,
                 dir_requests: BTreeMap::new(),
                 project_status_request: 0,
@@ -801,6 +823,11 @@ impl Workspace {
                 self.edit_catalog(move |db| db.move_member(id, from, to))
             }
             Action::SelectCommit(oid) => self.select_commit(&oid),
+            Action::SelectCommits {
+                oids,
+                primary,
+                anchor,
+            } => self.select_commits(&oids, primary.as_deref(), anchor.as_deref()),
             Action::SetBranchFilter(filter) => {
                 if self.branch_filter != filter {
                     self.branch_filter = filter;
@@ -992,6 +1019,9 @@ impl Workspace {
             } => self.apply_time(target, config, tracking, at, comparison),
             Event::History(tag, data) if tag == self.history_request => self.apply_history(data),
             Event::Changes(tag, data) if tag == self.changes_request => self.apply_changes(data),
+            Event::CommitRefs(tag, data) if tag == self.commit_refs_request => {
+                self.apply_commit_refs(data)
+            }
             Event::Patch(tag, data) if tag == self.patch_request => {
                 self.diff_loading = false;
                 self.diff = Some(data.unwrap_or_else(|e| format!("读取 Diff 失败（{e}）")));

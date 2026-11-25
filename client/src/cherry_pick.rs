@@ -261,6 +261,77 @@ pub fn execute(
     Err(operation_failure("无法执行 Cherry-pick", &output))
 }
 
+/// Execute a batch cherry-pick for multiple commits ordered oldest -> newest.
+pub fn execute_batch(
+    target: &WorktreeTarget,
+    oids_oldest_first: &[String],
+    append_source: bool,
+) -> Result<CherryPickOutcome, String> {
+    if oids_oldest_first.is_empty() {
+        return Err("请至少选择一条提交".into());
+    }
+    for oid in oids_oldest_first {
+        if !is_oid(oid.as_bytes()) {
+            return Err("包含无效的提交 ID".into());
+        }
+    }
+    let checkout = Checkout::read(target)?;
+    checkout.ensure_idle()?;
+    let existing_conflicts = checkout.unmerged_paths()?;
+    if !existing_conflicts.is_empty() {
+        return Err(format!(
+            "当前工作树仍有未解决的冲突文件（{}），请先处理冲突",
+            join_paths(&existing_conflicts)
+        ));
+    }
+    let head = checkout.head()?;
+    if head.oid.is_none() {
+        return Err("当前分支尚无提交，无法执行 Cherry-pick".into());
+    }
+    for oid in oids_oldest_first {
+        let commit = checkout.commit_metadata(oid)?;
+        if commit.parents.len() > 1 {
+            let short = oid.get(..8).unwrap_or(oid);
+            return Err(format!(
+                "所选提交中包含合并提交 {short}，请单独对该合并提交执行 Cherry-pick 并指定主线父提交"
+            ));
+        }
+    }
+
+    let mut command = checkout.write_command();
+    command.arg("cherry-pick");
+    if append_source {
+        command.arg("-x");
+    }
+    for oid in oids_oldest_first {
+        command.arg(oid);
+    }
+
+    let output = run(&mut command)?;
+    if output.status.success() {
+        if checkout.pseudo_ref_oid("CHERRY_PICK_HEAD")?.is_some() {
+            let status = read_state(target)?
+                .ok_or_else(|| "Cherry-pick 结束后状态不一致，请刷新检查工作树".to_owned())?;
+            return Ok(CherryPickOutcome::Stopped {
+                status: Box::new(status),
+                details: command_details(&output),
+            });
+        }
+        let head = checkout.head()?;
+        let new_head_oid = head.oid.ok_or("Cherry-pick 后无法读取当前 HEAD")?;
+        return Ok(CherryPickOutcome::Applied { new_head_oid });
+    }
+
+    if let Some(status) = read_state(target)? {
+        return Ok(CherryPickOutcome::Stopped {
+            status: Box::new(status),
+            details: command_details(&output),
+        });
+    }
+
+    Err(operation_failure("无法执行批量 Cherry-pick", &output))
+}
+
 /// Stage a resolved conflicted path during an in-progress cherry-pick.
 pub fn mark_resolved(status: &CherryPickStatus, path: &Path) -> Result<(), String> {
     let checkout = Checkout::read(&status.worktree)?;

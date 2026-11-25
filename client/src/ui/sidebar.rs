@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use githalo::i18n::{is_zh, tr};
 use githalo::staging::ChangeKind;
@@ -9,8 +9,8 @@ use githalo::workspace::{
 };
 use githalo::worktree::WorktreeId;
 use gpui::{
-    AnyElement, Context, Div, ExternalPaths, FontWeight, MouseButton, Pixels, Render, Role, Window,
-    div, prelude::*, px, rems, rgb, transparent_black,
+    AnyElement, Context, Div, ExternalDragPayload, ExternalPaths, FileDragPaths, FontWeight,
+    MouseButton, Pixels, Render, Role, Window, div, prelude::*, px, rems, rgb, transparent_black,
 };
 
 use super::DesktopView;
@@ -131,6 +131,17 @@ struct DraggedRepo {
     id: WorktreeId,
     from: Option<GroupId>,
     name: String,
+    path: PathBuf,
+}
+
+fn outbound_repo_drag_payload(path: &Path) -> Option<ExternalDragPayload> {
+    if !path.is_dir() {
+        return None;
+    }
+    Some(ExternalDragPayload::Files(FileDragPaths::new([(
+        path.to_path_buf(),
+        true,
+    )])))
 }
 
 struct DragRepoBadge(String);
@@ -1656,6 +1667,7 @@ impl DesktopView {
         );
 
         let drag_name = repo.name.clone();
+        let drag_path = repo.target.root.clone();
         let hover_summary = repo_hover_summary(repo);
         let has_nested_children = nested_summary.is_some();
         // 子仓库与无异常的独立单仓采用清爽紧凑单行布局；含子仓胶囊或需重点凸显多行历史异常的主仓采用自适应结构
@@ -1683,9 +1695,13 @@ impl DesktopView {
                     id,
                     from: group,
                     name: drag_name,
+                    path: drag_path,
                 },
                 |dragged, _, _, cx| cx.new(|_| DragRepoBadge(dragged.name.clone())),
             )
+            .external_drag_payload(|dragged: &DraggedRepo, _, _| {
+                outbound_repo_drag_payload(&dragged.path)
+            })
             .when(selected, |row| {
                 row.bg(rgb(theme().active)).child(selection_bar())
             })
@@ -2594,5 +2610,19 @@ mod tests {
         let diverged_query = RepoFilter::new("base", true);
         assert!(diverged_query.matches(&auth));
         assert!(!diverged_query.matches(&skin));
+    }
+
+    #[test]
+    fn outbound_repo_drag_payload_accepts_existing_dirs_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("README.md");
+        std::fs::write(&file, "hello").expect("write file");
+        let missing = dir.path().join("missing-repo");
+
+        let payload = outbound_repo_drag_payload(dir.path()).expect("existing dir payload");
+        let ExternalDragPayload::Files(paths) = payload;
+        assert_eq!(paths.entries(), &[(dir.path().to_path_buf(), true)]);
+        assert!(outbound_repo_drag_payload(&file).is_none());
+        assert!(outbound_repo_drag_payload(&missing).is_none());
     }
 }

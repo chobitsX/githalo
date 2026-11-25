@@ -195,3 +195,208 @@ fn project_file_tree_does_not_descend_into_symlinks() {
     }
     assert!(children(&root, Path::new("real")).unwrap().is_empty());
 }
+
+fn run_git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Tester")
+        .env("GIT_AUTHOR_EMAIL", "tester@example.com")
+        .env("GIT_COMMITTER_NAME", "Tester")
+        .env("GIT_COMMITTER_EMAIL", "tester@example.com")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn multi_commit_selection_computes_contiguous_net_diff_and_non_contiguous_combined_diff() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("multi-repo");
+    fs::create_dir_all(&root).unwrap();
+    run_git(&root, &["init", "-b", "main"]);
+
+    fs::write(root.join("alpha.txt"), "line1\n").unwrap();
+    run_git(&root, &["add", "alpha.txt"]);
+    run_git(&root, &["commit", "-m", "c1: init\n\nDetailed body for c1"]);
+    let c1 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    fs::write(root.join("alpha.txt"), "line1\nline2\n").unwrap();
+    fs::write(root.join("temp.txt"), "transient\n").unwrap();
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "c2: add line2 and temp"]);
+    let c2 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    fs::remove_file(root.join("temp.txt")).unwrap();
+    fs::write(root.join("beta.txt"), "beta\n").unwrap();
+    run_git(&root, &["add", "-A"]);
+    run_git(&root, &["commit", "-m", "c3: remove temp and add beta"]);
+    let c3 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    fs::write(root.join("alpha.txt"), "line1\nline2\nline3\n").unwrap();
+    run_git(&root, &["add", "alpha.txt"]);
+    run_git(&root, &["commit", "-m", "c4: add line3"]);
+    let c4 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    // 1. Contiguous range [c4, c3, c2]: temp.txt was added in c2 and deleted in c3 -> net change cancels out!
+    let contiguous =
+        history::changed_files_for_commits(&root, &[c4.clone(), c3.clone(), c2.clone()]).unwrap();
+    assert!(contiguous.contiguous);
+    let paths: Vec<_> = contiguous
+        .files
+        .iter()
+        .map(|f| f.path.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(paths, vec!["alpha.txt", "beta.txt"]);
+    let alpha = contiguous
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("alpha.txt"))
+        .unwrap();
+    let net_diff =
+        history::file_diff_for_commits(&root, &[c4.clone(), c3.clone(), c2.clone()], alpha)
+            .unwrap();
+    assert!(net_diff.contains("+line2"));
+    assert!(net_diff.contains("+line3"));
+
+    // 2. Contiguous range reaching root commit [c2, c1] reads body and uses empty tree base.
+    let from_root = history::changed_files_for_commits(&root, &[c2.clone(), c1.clone()]).unwrap();
+    assert!(from_root.contiguous);
+    assert_eq!(
+        from_root.bodies.get(&c1).map(String::as_str),
+        Some("Detailed body for c1")
+    );
+    assert!(
+        from_root
+            .files
+            .iter()
+            .any(|f| f.path == Path::new("alpha.txt") && f.status == "A")
+    );
+
+    // 3. Non-contiguous selection [c4, c2] (skipping c3): combined diff includes both c2 and c4 sections.
+    let non_contig = history::changed_files_for_commits(&root, &[c4.clone(), c2.clone()]).unwrap();
+    assert!(!non_contig.contiguous);
+    assert!(
+        non_contig
+            .files
+            .iter()
+            .any(|f| f.path == Path::new("temp.txt"))
+    );
+    let alpha_nc = non_contig
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("alpha.txt"))
+        .unwrap();
+    let combined_diff = history::file_diff_for_commits(&root, &[c4, c2], alpha_nc).unwrap();
+    assert!(combined_diff.contains("+line2"));
+    assert!(combined_diff.contains("+line3"));
+    assert!(combined_diff.contains("commit "));
+}
+
+#[test]
+fn batch_cherry_pick_and_batch_revert_apply_multiple_commits() {
+    use githalo::cherry_pick::{self, CherryPickOutcome};
+    use githalo::history_ops::{self, RevertOutcome};
+    use githalo::worktree::{WorktreeId, WorktreeTarget};
+
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("batch-ops");
+    fs::create_dir_all(&root).unwrap();
+    run_git(&root, &["init", "-b", "main"]);
+
+    fs::write(root.join("base.txt"), "base\n").unwrap();
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "base"]);
+
+    run_git(&root, &["checkout", "-b", "feature"]);
+    fs::write(root.join("f1.txt"), "one\n").unwrap();
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "feat: one"]);
+    let f1 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    fs::write(root.join("f2.txt"), "two\n").unwrap();
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "feat: two"]);
+    let f2 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    run_git(&root, &["checkout", "main"]);
+    let target = WorktreeTarget {
+        id: WorktreeId::new(1).unwrap(),
+        root: root.canonicalize().unwrap(),
+        path_revision: 1,
+    };
+
+    // Batch cherry-pick oldest -> newest onto main
+    let outcome = cherry_pick::execute_batch(&target, &[f1, f2], true).unwrap();
+    assert!(matches!(outcome, CherryPickOutcome::Applied { .. }));
+    assert!(root.join("f1.txt").exists());
+    assert!(root.join("f2.txt").exists());
+
+    let main_log = history::recent_for_branch(&root, 20, Some("main")).unwrap();
+    assert_eq!(main_log.len(), 3);
+    let newest = main_log[0].oid.clone();
+    let second = main_log[1].oid.clone();
+
+    // Batch revert newest -> oldest on main
+    let rev = history_ops::execute_revert_batch(&target, &[newest, second]).unwrap();
+    assert!(matches!(rev, RevertOutcome::Reverted { .. }));
+    assert!(!root.join("f1.txt").exists());
+    assert!(!root.join("f2.txt").exists());
+}
+
+#[test]
+fn containing_refs_lists_head_local_branches_and_tags_for_a_commit() {
+    use githalo::history::CommitRefKind;
+
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("contains-repo");
+    fs::create_dir_all(&root).unwrap();
+    run_git(&root, &["init", "-b", "main"]);
+
+    fs::write(root.join("a.txt"), "base\n").unwrap();
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "base"]);
+    let base_oid = run_git(&root, &["rev-parse", "HEAD"]);
+
+    run_git(&root, &["branch", "release/31.40"]);
+    run_git(&root, &["tag", "v1.0.0"]);
+
+    run_git(&root, &["checkout", "-b", "release/31.41"]);
+    fs::write(root.join("b.txt"), "only-41\n").unwrap();
+    run_git(&root, &["add", "."]);
+    run_git(&root, &["commit", "-m", "only on 31.41"]);
+    let tip_41 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    let base_refs = history::containing_refs(&root, &base_oid).unwrap();
+    assert_eq!(base_refs[0].name, "release/31.41");
+    assert_eq!(base_refs[0].kind, CommitRefKind::Head);
+    assert!(
+        base_refs
+            .iter()
+            .any(|r| r.name == "main" && r.kind == CommitRefKind::LocalBranch)
+    );
+    assert!(
+        base_refs
+            .iter()
+            .any(|r| r.name == "release/31.40" && r.kind == CommitRefKind::LocalBranch)
+    );
+    assert!(
+        base_refs
+            .iter()
+            .any(|r| r.name == "v1.0.0" && r.kind == CommitRefKind::Tag)
+    );
+
+    let tip_refs = history::containing_refs(&root, &tip_41).unwrap();
+    assert_eq!(tip_refs.len(), 1);
+    assert_eq!(tip_refs[0].name, "release/31.41");
+    assert_eq!(tip_refs[0].kind, CommitRefKind::Head);
+}

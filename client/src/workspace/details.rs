@@ -9,12 +9,19 @@ impl Workspace {
         self.selected = id;
         self.history_request = self.next_id();
         self.changes_request = self.next_id();
+        self.commit_refs_request = self.next_id();
         self.close_diff();
         self.selected_commit = None;
+        self.selected_commits.clear();
+        self.selection_anchor = None;
+        self.selected_commit_bodies.clear();
+        self.selected_commit_refs.clear();
+        self.commit_refs_loading = false;
         self.commits.clear();
         self.branch_filter = None;
         self.history_limit = history::RECENT_LIMIT;
         self.changes.clear();
+        self.changes_contiguous = true;
         self.history_loading = false;
         self.changes_loading = false;
         self.expanded_dirs.clear();
@@ -73,68 +80,159 @@ impl Workspace {
             self.message = Some(format!("无法读取提交历史（{e}）"));
             vec![]
         });
-        let chosen = self
+        let existing_set: std::collections::HashSet<&str> =
+            commits.iter().map(|c| c.oid.as_str()).collect();
+        let kept: Vec<String> = self
+            .selected_commits
+            .iter()
+            .filter(|oid| existing_set.contains(oid.as_str()))
+            .cloned()
+            .collect();
+        let prev_primary = self
             .selected_commit
             .as_ref()
-            .filter(|oid| commits.iter().any(|c| &c.oid == *oid))
-            .cloned()
-            .or_else(|| commits.first().map(|c| c.oid.clone()));
+            .filter(|oid| existing_set.contains(oid.as_str()))
+            .cloned();
+        let prev_anchor = self
+            .selection_anchor
+            .as_ref()
+            .filter(|oid| existing_set.contains(oid.as_str()))
+            .cloned();
         self.commits = commits;
-        if let Some(oid) = chosen {
-            if self.selected_commit.as_ref() != Some(&oid)
-                || (self.changes.is_empty() && !self.changes_loading)
-            {
-                self.select_commit(&oid);
+        if !kept.is_empty() {
+            let primary = prev_primary.or_else(|| kept.first().cloned());
+            let anchor = prev_anchor.or_else(|| primary.clone());
+            let same_selection = self.selected_commits == kept && self.selected_commit == primary;
+            if !same_selection || (self.changes.is_empty() && !self.changes_loading) {
+                self.select_commits(&kept, primary.as_deref(), anchor.as_deref());
             }
+        } else if let Some(oid) =
+            prev_primary.or_else(|| self.commits.first().map(|c| c.oid.clone()))
+        {
+            self.select_commit(&oid);
         } else {
             self.selected_commit = None;
+            self.selected_commits.clear();
+            self.selection_anchor = None;
+            self.selected_commit_bodies.clear();
+            self.selected_commit_refs.clear();
+            self.commit_refs_request = self.next_id();
+            self.commit_refs_loading = false;
             self.changes_request = self.next_id();
             self.changes_loading = false;
             self.changes.clear();
+            self.changes_contiguous = true;
             self.close_diff();
         }
     }
 
     pub(super) fn select_commit(&mut self, oid: &str) {
+        self.select_commits(&[oid.to_owned()], Some(oid), Some(oid));
+    }
+
+    pub(super) fn select_commits(
+        &mut self,
+        oids: &[String],
+        primary: Option<&str>,
+        anchor: Option<&str>,
+    ) {
         let Some(root) = self.current_target().map(|t| t.root) else {
             return;
         };
-        if !self.commits.iter().any(|c| c.oid == oid) {
+        let requested: std::collections::HashSet<&str> = oids.iter().map(String::as_str).collect();
+        // Normalize selection into log order (newest -> oldest) and drop unknown OIDs.
+        let ordered: Vec<String> = self
+            .commits
+            .iter()
+            .filter(|c| requested.contains(c.oid.as_str()))
+            .map(|c| c.oid.clone())
+            .collect();
+        if ordered.is_empty() {
             return;
         }
-        let same_commit = self.selected_commit.as_deref() == Some(oid);
-        if !same_commit {
+        let next_primary = primary
+            .filter(|p| ordered.iter().any(|o| o == p))
+            .map(str::to_owned)
+            .or_else(|| ordered.first().cloned());
+        let next_anchor = anchor
+            .filter(|a| self.commits.iter().any(|c| c.oid == *a))
+            .map(str::to_owned)
+            .or_else(|| next_primary.clone());
+        let same_selection = self.selected_commits == ordered;
+        if !same_selection {
             self.close_diff();
             self.changes.clear();
+            self.selected_commit_bodies.clear();
+            self.selected_commit_refs.clear();
+            self.changes_contiguous = true;
         }
-        self.selected_commit = Some(oid.into());
+        self.selected_commit = next_primary;
+        self.selected_commits = ordered.clone();
+        self.selection_anchor = next_anchor;
         self.message = None;
         let tag = self.next_id();
         self.changes_request = tag;
-        self.changes_loading = !same_commit || self.changes.is_empty();
-        let oid = oid.to_owned();
-        self.runtime
-            .detail
-            .run(move || Event::Changes(tag, history::changed_files(&root, &oid)));
+        self.changes_loading = !same_selection || self.changes.is_empty();
+        let changes_root = root.clone();
+        let changes_oids = ordered.clone();
+        self.runtime.detail.run(move || {
+            Event::Changes(
+                tag,
+                history::changed_files_for_commits(&changes_root, &changes_oids),
+            )
+        });
+
+        let refs_tag = self.next_id();
+        self.commit_refs_request = refs_tag;
+        if ordered.len() == 1 {
+            self.commit_refs_loading = !same_selection || self.selected_commit_refs.is_empty();
+            let single_oid = ordered[0].clone();
+            self.runtime.detail.run(move || {
+                Event::CommitRefs(refs_tag, history::containing_refs(&root, &single_oid))
+            });
+        } else {
+            self.commit_refs_loading = false;
+            self.selected_commit_refs.clear();
+        }
     }
 
-    pub(super) fn apply_changes(&mut self, result: Result<Vec<ChangedFile>, String>) {
+    pub(super) fn apply_commit_refs(&mut self, result: Result<Vec<CommitRef>, String>) {
+        self.commit_refs_loading = false;
+        match result {
+            Ok(refs) => self.selected_commit_refs = refs,
+            Err(_) => self.selected_commit_refs.clear(),
+        }
+    }
+
+    pub(super) fn apply_changes(&mut self, result: Result<CommitChangesBundle, String>) {
         self.changes_loading = false;
         match result {
-            Ok(changed) => self.changes = changed,
+            Ok(bundle) => {
+                self.changes = bundle.files;
+                self.selected_commit_bodies = bundle.bodies;
+                self.changes_contiguous = bundle.contiguous;
+            }
             Err(e) => {
                 self.changes.clear();
-                self.message = Some(format!("无法读取本次提交的变更（{e}）"));
+                self.selected_commit_bodies.clear();
+                self.changes_contiguous = true;
+                self.message = Some(format!("无法读取所选提交的变更（{e}）"));
             }
         }
     }
 
     pub(super) fn select_file(&mut self, path: &Path) {
-        let (Some(target), Some(oid), Some(file)) = (
+        let (Some(target), Some(file)) = (
             self.current_target(),
-            self.selected_commit.clone(),
             self.changes.iter().find(|f| f.path == path).cloned(),
         ) else {
+            return;
+        };
+        let oids = if !self.selected_commits.is_empty() {
+            self.selected_commits.clone()
+        } else if let Some(oid) = self.selected_commit.clone() {
+            vec![oid]
+        } else {
             return;
         };
         self.selected_file = Some(path.to_owned());
@@ -142,9 +240,12 @@ impl Workspace {
         self.diff_loading = true;
         let tag = self.next_id();
         self.patch_request = tag;
-        self.runtime
-            .detail
-            .run(move || Event::Patch(tag, history::file_diff(&target.root, &oid, &file)));
+        self.runtime.detail.run(move || {
+            Event::Patch(
+                tag,
+                history::file_diff_for_commits(&target.root, &oids, &file),
+            )
+        });
     }
 
     pub(super) fn close_diff(&mut self) {

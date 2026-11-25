@@ -399,6 +399,69 @@ pub fn execute_revert(
     Err(operation_failure("无法执行 Revert", &output))
 }
 
+/// Execute a batch revert for multiple commits ordered newest -> oldest.
+pub fn execute_revert_batch(
+    target: &WorktreeTarget,
+    oids_newest_first: &[String],
+) -> Result<RevertOutcome, String> {
+    if oids_newest_first.is_empty() {
+        return Err("请至少选择一条提交".into());
+    }
+    for oid in oids_newest_first {
+        if !is_oid(oid.as_bytes()) {
+            return Err("包含无效的提交 ID".into());
+        }
+    }
+    let checkout = Checkout::read(target)?;
+    checkout.ensure_idle()?;
+    let existing_conflicts = checkout.unmerged_paths()?;
+    if !existing_conflicts.is_empty() {
+        return Err(format!(
+            "当前工作树仍有未解决的冲突文件（{}），请先处理冲突",
+            join_paths(&existing_conflicts)
+        ));
+    }
+    let head = checkout.head()?;
+    if head.oid.is_none() {
+        return Err("当前分支尚无提交，无法执行 Revert".into());
+    }
+    for oid in oids_newest_first {
+        let commit = checkout.commit_metadata(oid)?;
+        if commit.parents.len() > 1 {
+            let short = oid.get(..8).unwrap_or(oid);
+            return Err(format!(
+                "所选提交中包含合并提交 {short}，请单独对该合并提交执行 Revert 并指定主线父提交"
+            ));
+        }
+    }
+
+    let mut command = checkout.write_command();
+    command.args(["revert", "--no-edit"]);
+    for oid in oids_newest_first {
+        command.arg(oid);
+    }
+
+    let output = run(&mut command)?;
+    if output.status.success() {
+        if let Some(status) = read_revert_state(target)? {
+            return Ok(RevertOutcome::Stopped {
+                status: Box::new(status),
+                details: command_details(&output),
+            });
+        }
+        let head = checkout.head()?;
+        let new_head_oid = head.oid.ok_or("Revert 后无法读取当前 HEAD")?;
+        return Ok(RevertOutcome::Reverted { new_head_oid });
+    }
+    if let Some(status) = read_revert_state(target)? {
+        return Ok(RevertOutcome::Stopped {
+            status: Box::new(status),
+            details: command_details(&output),
+        });
+    }
+    Err(operation_failure("无法执行批量 Revert", &output))
+}
+
 /// Stage a resolved conflict path during an in-progress revert.
 pub fn mark_revert_resolved(status: &RevertStatus, path: &Path) -> Result<(), String> {
     let checkout = Checkout::read(&status.worktree)?;

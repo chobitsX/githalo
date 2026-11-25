@@ -12,6 +12,7 @@ use gpui::{
 use super::DesktopView;
 use super::components::*;
 use super::daily::check_indicator;
+use super::history::mono_font;
 use super::operations::{branch_label, review_detail};
 use super::overlay::{Dialog, Overlay, dialog_heading, menu_item, menu_rule};
 
@@ -20,6 +21,19 @@ pub(super) struct CherryPickDialog {
     pub(super) oid: String,
     pub(super) append_source: bool,
     pub(super) mainline: usize,
+}
+
+pub(super) struct BatchCherryPickDialog {
+    pub(super) target: WorktreeTarget,
+    /// Ordered oldest -> newest for chronological replay.
+    pub(super) oids_oldest_first: Vec<String>,
+    pub(super) append_source: bool,
+}
+
+pub(super) struct BatchRevertDialog {
+    pub(super) target: WorktreeTarget,
+    /// Ordered newest -> oldest to unwind cleanly.
+    pub(super) oids_newest_first: Vec<String>,
 }
 
 pub(super) struct CherryPickAbortDialog {
@@ -450,6 +464,628 @@ impl DesktopView {
             },
         ));
         items
+    }
+
+    pub(super) fn open_batch_cherry_pick_dialog(
+        &mut self,
+        oids_newest_first: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_start_cherry_pick() || oids_newest_first.is_empty() {
+            return;
+        }
+        if oids_newest_first.len() == 1 {
+            self.open_cherry_pick_dialog(oids_newest_first[0].clone(), window, cx);
+            return;
+        }
+        let Some(target) = self.active_worktree().cloned() else {
+            return;
+        };
+        let mut oids_oldest_first = oids_newest_first;
+        oids_oldest_first.reverse();
+        self.open_confirmation(
+            Dialog::BatchCherryPick(BatchCherryPickDialog {
+                target,
+                oids_oldest_first,
+                append_source: false,
+            }),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn open_batch_revert_dialog(
+        &mut self,
+        oids_newest_first: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_start_cherry_pick() || oids_newest_first.is_empty() {
+            return;
+        }
+        if oids_newest_first.len() == 1 {
+            self.open_revert_dialog(oids_newest_first[0].clone(), window, cx);
+            return;
+        }
+        let Some(target) = self.active_worktree().cloned() else {
+            return;
+        };
+        self.open_confirmation(
+            Dialog::BatchRevert(BatchRevertDialog {
+                target,
+                oids_newest_first,
+            }),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn multi_commit_menu_items(
+        &self,
+        oids_newest_first: &[String],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let selected: Vec<_> = oids_newest_first
+            .iter()
+            .filter_map(|oid| {
+                self.workspace
+                    .commits
+                    .iter()
+                    .find(|commit| &commit.oid == oid)
+                    .cloned()
+            })
+            .collect();
+        if selected.len() < 2 {
+            return selected
+                .first()
+                .map(|c| self.commit_menu_items(&c.oid, cx))
+                .unwrap_or_default();
+        }
+        let count = selected.len();
+        let can_pick = self.can_start_cherry_pick();
+        let target_branch = self
+            .workspace
+            .selected
+            .and_then(|id| self.workspace.repo(id))
+            .map(|repo| {
+                if repo.branch.is_empty() {
+                    tr("当前仓库", "current repository").to_owned()
+                } else {
+                    repo.branch.clone()
+                }
+            })
+            .unwrap_or_else(|| tr("当前仓库", "current repository").to_owned());
+
+        let mut items = Vec::new();
+        if count == 2 {
+            let newer = &selected[0];
+            let older = &selected[1];
+            let from_oid = older.oid.clone();
+            let to_oid = newer.oid.clone();
+            let from_short = short_oid(&from_oid).to_owned();
+            let to_short = short_oid(&to_oid).to_owned();
+            items.push(menu_item(
+                "multi-context-compare-two",
+                tr("对比这两次提交…", "Compare Selected 2 Commits…"),
+                Some(format!("{from_short} → {to_short}")),
+                cx,
+                move |view, _, window, cx| {
+                    view.close_overlay(window, cx);
+                    view.open_compare_revisions_dialog(
+                        from_oid.clone(),
+                        to_oid.clone(),
+                        window,
+                        cx,
+                    );
+                },
+            ));
+            items.push(menu_rule());
+        }
+        if can_pick {
+            let pick_oids: Vec<String> = selected.iter().map(|c| c.oid.clone()).collect();
+            items.push(menu_item(
+                "multi-context-cherry-pick",
+                if is_zh() {
+                    format!("批量 Cherry-pick 已选 {count} 条提交…")
+                } else {
+                    format!("Cherry-pick {count} Selected Commits…")
+                },
+                Some(if is_zh() {
+                    format!("按从旧到新顺序应用到 {target_branch}")
+                } else {
+                    format!("Apply oldest-to-newest onto {target_branch}")
+                }),
+                cx,
+                move |view, _, window, cx| {
+                    view.close_overlay(window, cx);
+                    view.open_batch_cherry_pick_dialog(pick_oids.clone(), window, cx);
+                },
+            ));
+            let revert_oids: Vec<String> = selected.iter().map(|c| c.oid.clone()).collect();
+            items.push(menu_item(
+                "multi-context-revert",
+                if is_zh() {
+                    format!("批量 Revert 已选 {count} 条提交…")
+                } else {
+                    format!("Revert {count} Selected Commits…")
+                },
+                Some(if is_zh() {
+                    "按从新到旧顺序创建反向提交".to_owned()
+                } else {
+                    "Create revert commits newest-to-oldest".to_owned()
+                }),
+                cx,
+                move |view, _, window, cx| {
+                    view.close_overlay(window, cx);
+                    view.open_batch_revert_dialog(revert_oids.clone(), window, cx);
+                },
+            ));
+        } else {
+            let reason = if self.has_ongoing_operation() {
+                tr(
+                    "已有进行中的 Git 冲突/恢复操作，请先继续或中止",
+                    "Another Git operation is in progress; continue or abort it first",
+                )
+            } else {
+                tr("当前仓库正在执行其他操作", "Repository is currently busy")
+            };
+            items.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_h(px(27.))
+                    .justify_center()
+                    .px(px(8.))
+                    .py(px(3.))
+                    .text_color(rgb(theme().subtle))
+                    .child(tr(
+                        "批量 Cherry-pick / Revert",
+                        "Batch Cherry-pick / Revert",
+                    ))
+                    .child(div().text_size(px(11.)).child(reason))
+                    .into_any_element(),
+            );
+        }
+        items.push(menu_rule());
+        let all_oids = selected
+            .iter()
+            .map(|c| c.oid.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        items.push(menu_item(
+            "multi-context-copy-oids",
+            if is_zh() {
+                format!("复制全部提交 ID（{count} 条）")
+            } else {
+                format!("Copy All Commit Hashes ({count})")
+            },
+            None,
+            cx,
+            move |view, _, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(all_oids.clone()));
+                view.notice = Some(if is_zh() {
+                    format!("已复制 {count} 条提交 ID")
+                } else {
+                    format!("Copied {count} commit hashes")
+                });
+                view.close_overlay(window, cx);
+            },
+        ));
+        let all_short = selected
+            .iter()
+            .map(|c| short_oid(&c.oid))
+            .collect::<Vec<_>>()
+            .join(" ");
+        items.push(menu_item(
+            "multi-context-copy-short-oids",
+            if is_zh() {
+                format!("复制全部短 Hash（{count} 条）")
+            } else {
+                format!("Copy Short Hashes ({count})")
+            },
+            None,
+            cx,
+            move |view, _, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(all_short.clone()));
+                view.notice = Some(if is_zh() {
+                    format!("已复制 {count} 条短 Hash")
+                } else {
+                    format!("Copied {count} short hashes")
+                });
+                view.close_overlay(window, cx);
+            },
+        ));
+        let summary_list = selected
+            .iter()
+            .map(|c| format!("{} {}", short_oid(&c.oid), c.subject))
+            .collect::<Vec<_>>()
+            .join("\n");
+        items.push(menu_item(
+            "multi-context-copy-summary",
+            if is_zh() {
+                format!("复制提交摘要清单（{count} 条）")
+            } else {
+                format!("Copy Commit Summary List ({count})")
+            },
+            None,
+            cx,
+            move |view, _, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(summary_list.clone()));
+                view.notice = Some(if is_zh() {
+                    format!("已复制 {count} 条提交摘要")
+                } else {
+                    format!("Copied {count} commit summaries")
+                });
+                view.close_overlay(window, cx);
+            },
+        ));
+        if let Some(primary) = self
+            .workspace
+            .selected_commit
+            .clone()
+            .or_else(|| selected.first().map(|c| c.oid.clone()))
+        {
+            items.push(menu_rule());
+            items.push(menu_item(
+                "multi-context-collapse-selection",
+                tr("取消多选（仅保留当前提交）", "Clear Multi-selection"),
+                None,
+                cx,
+                move |view, _, window, cx| {
+                    view.close_overlay(window, cx);
+                    view.dispatch(Action::SelectCommit(primary.clone()), cx);
+                },
+            ));
+        }
+        items
+    }
+
+    pub(super) fn batch_cherry_pick_dialog(
+        &self,
+        form: &BatchCherryPickDialog,
+        viewport_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let count = form.oids_oldest_first.len();
+        let commits: Vec<_> = form
+            .oids_oldest_first
+            .iter()
+            .filter_map(|oid| self.workspace.commits.iter().find(|c| &c.oid == oid))
+            .collect();
+        let has_merge = commits.iter().any(|c| c.parents.len() > 1);
+        let can_confirm = !has_merge && self.can_start_cherry_pick();
+        let list_max_h = (viewport_height * 0.42).clamp(px(140.), px(280.));
+        let target_branch = self
+            .workspace
+            .selected
+            .and_then(|id| self.workspace.repo(id))
+            .map(|r| {
+                if r.branch.is_empty() {
+                    tr("当前分支", "current branch").to_owned()
+                } else {
+                    r.branch.clone()
+                }
+            })
+            .unwrap_or_else(|| tr("当前分支", "current branch").to_owned());
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(dialog_heading(if is_zh() {
+                format!("批量 Cherry-pick（{count} 条提交）")
+            } else {
+                format!("Batch Cherry-pick ({count} commits)")
+            }))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(theme().muted))
+                    .child(if is_zh() {
+                        format!("将按从旧到新的顺序依次应用到「{target_branch}」。若中途遇到冲突将暂停并由恢复横幅接管继续或中止。")
+                    } else {
+                        format!("Commits will be applied oldest-to-newest onto \"{target_branch}\". Any conflict will pause so you can resolve and continue or abort.")
+                    }),
+            )
+            .when(has_merge, |col| {
+                col.child(
+                    div()
+                        .px(px(10.))
+                        .py(px(8.))
+                        .rounded(px(6.))
+                        .bg(rgb(theme().danger_bg))
+                        .border_1()
+                        .border_color(rgb(theme().danger_border))
+                        .text_size(px(12.))
+                        .text_color(rgb(theme().error))
+                        .child(tr(
+                            "所选提交中包含合并提交（Merge Commit），请取消勾选合并提交或单独执行 Cherry-pick 并指定主线父提交。",
+                            "Selection contains a merge commit. Deselect merge commits or cherry-pick them individually with a mainline parent.",
+                        )),
+                )
+            })
+            .child(
+                div()
+                    .id("batch-cherry-pick-list")
+                    .max_h(list_max_h)
+                    .overflow_y_scroll()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(theme().border))
+                    .bg(rgb(theme().panel))
+                    .p(px(6.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .children(commits.iter().enumerate().map(|(idx, commit)| {
+                        let is_merge = commit.parents.len() > 1;
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(6.))
+                            .py(px(4.))
+                            .rounded(px(4.))
+                            .bg(rgb(if is_merge {
+                                theme().danger_bg
+                            } else {
+                                theme().card
+                            }))
+                            .child(
+                                div()
+                                    .w(px(20.))
+                                    .flex_shrink_0()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme().subtle))
+                                    .child(format!("{}.", idx + 1)),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .font_family(mono_font())
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(theme().link))
+                                    .child(short_oid(&commit.oid).to_owned()),
+                            )
+                            .child(elide(commit.subject.clone()).flex_1().text_size(px(12.)))
+                            .when(is_merge, |r| {
+                                r.child(pill(
+                                    "Merge",
+                                    theme().danger_bg,
+                                    theme().danger_border,
+                                    theme().error,
+                                ))
+                            })
+                    })),
+            )
+            .child(
+                div()
+                    .id("batch-cherry-pick-append-source")
+                    .role(Role::CheckBox)
+                    .aria_toggled(if form.append_source {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    })
+                    .tab_index(0)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(6.))
+                    .py(px(4.))
+                    .rounded(px(4.))
+                    .hover(|s| s.bg(rgb(theme().hover)))
+                    .child(check_indicator(form.append_source))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .child(tr(
+                                "在提交说明中附加来源标记（git cherry-pick -x）",
+                                "Append source commit reference (git cherry-pick -x)",
+                            )),
+                    )
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        if let Some(Overlay::Dialog(Dialog::BatchCherryPick(form))) =
+                            &mut view.overlay
+                        {
+                            form.append_source = !form.append_source;
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .pt(px(4.))
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        command_button(
+                            "cancel-batch-cherry-pick",
+                            tr("取消", "Cancel"),
+                            false,
+                            true,
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.close_overlay(window, cx);
+                        })),
+                    )
+                    .child(
+                        command_button(
+                            "confirm-batch-cherry-pick",
+                            if is_zh() {
+                                format!("应用 {count} 条提交")
+                            } else {
+                                format!("Cherry-pick {count} Commits")
+                            },
+                            true,
+                            can_confirm,
+                        )
+                        .when(can_confirm, |btn| {
+                            let target = form.target.clone();
+                            let oids_oldest_first = form.oids_oldest_first.clone();
+                            let append_source = form.append_source;
+                            btn.on_click(cx.listener(move |view, _, window, cx| {
+                                view.close_overlay(window, cx);
+                                view.dispatch_cherry_pick(
+                                    CherryPickAction::ExecuteBatch {
+                                        target: target.clone(),
+                                        oids_oldest_first: oids_oldest_first.clone(),
+                                        append_source,
+                                    },
+                                    cx,
+                                );
+                            }))
+                        }),
+                    ),
+            )
+    }
+
+    pub(super) fn batch_revert_dialog(
+        &self,
+        form: &BatchRevertDialog,
+        viewport_height: Pixels,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let count = form.oids_newest_first.len();
+        let commits: Vec<_> = form
+            .oids_newest_first
+            .iter()
+            .filter_map(|oid| self.workspace.commits.iter().find(|c| &c.oid == oid))
+            .collect();
+        let has_merge = commits.iter().any(|c| c.parents.len() > 1);
+        let can_confirm = !has_merge && self.can_start_cherry_pick();
+        let list_max_h = (viewport_height * 0.42).clamp(px(140.), px(280.));
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(dialog_heading(if is_zh() {
+                format!("批量 Revert（{count} 条提交）")
+            } else {
+                format!("Batch Revert ({count} commits)")
+            }))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(theme().muted))
+                    .child(tr(
+                        "将按从新到旧的顺序为每条提交创建反向提交。若中途遇到冲突将暂停并由恢复横幅接管继续或中止。",
+                        "Commits will be reverted newest-to-oldest, creating one revert commit per entry. Any conflict will pause for resolution.",
+                    )),
+            )
+            .when(has_merge, |col| {
+                col.child(
+                    div()
+                        .px(px(10.))
+                        .py(px(8.))
+                        .rounded(px(6.))
+                        .bg(rgb(theme().danger_bg))
+                        .border_1()
+                        .border_color(rgb(theme().danger_border))
+                        .text_size(px(12.))
+                        .text_color(rgb(theme().error))
+                        .child(tr(
+                            "所选提交中包含合并提交（Merge Commit），请单独对合并提交执行 Revert 并指定主线父提交。",
+                            "Selection contains a merge commit. Revert merge commits individually with a mainline parent.",
+                        )),
+                )
+            })
+            .child(
+                div()
+                    .id("batch-revert-list")
+                    .max_h(list_max_h)
+                    .overflow_y_scroll()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(theme().border))
+                    .bg(rgb(theme().panel))
+                    .p(px(6.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .children(commits.iter().enumerate().map(|(idx, commit)| {
+                        let is_merge = commit.parents.len() > 1;
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .px(px(6.))
+                            .py(px(4.))
+                            .rounded(px(4.))
+                            .bg(rgb(if is_merge {
+                                theme().danger_bg
+                            } else {
+                                theme().card
+                            }))
+                            .child(
+                                div()
+                                    .w(px(20.))
+                                    .flex_shrink_0()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(theme().subtle))
+                                    .child(format!("{}.", idx + 1)),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .font_family(mono_font())
+                                    .text_size(px(11.5))
+                                    .text_color(rgb(theme().link))
+                                    .child(short_oid(&commit.oid).to_owned()),
+                            )
+                            .child(elide(commit.subject.clone()).flex_1().text_size(px(12.)))
+                            .when(is_merge, |r| {
+                                r.child(pill(
+                                    "Merge",
+                                    theme().danger_bg,
+                                    theme().danger_border,
+                                    theme().error,
+                                ))
+                            })
+                    })),
+            )
+            .child(
+                div()
+                    .pt(px(4.))
+                    .flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        command_button("cancel-batch-revert", tr("取消", "Cancel"), false, true)
+                            .on_click(cx.listener(|view, _, window, cx| {
+                                view.close_overlay(window, cx);
+                            })),
+                    )
+                    .child(
+                        command_button(
+                            "confirm-batch-revert",
+                            if is_zh() {
+                                format!("Revert {count} 条提交")
+                            } else {
+                                format!("Revert {count} Commits")
+                            },
+                            true,
+                            can_confirm,
+                        )
+                        .when(can_confirm, |btn| {
+                            let target = form.target.clone();
+                            let oids_newest_first = form.oids_newest_first.clone();
+                            btn.on_click(cx.listener(move |view, _, window, cx| {
+                                view.close_overlay(window, cx);
+                                view.dispatch_repo_op(
+                                    RepoOpAction::ExecuteRevertBatch {
+                                        target: target.clone(),
+                                        oids_newest_first: oids_newest_first.clone(),
+                                    },
+                                    cx,
+                                );
+                            }))
+                        }),
+                    ),
+            )
     }
 
     pub(super) fn cherry_pick_banner(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {

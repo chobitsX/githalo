@@ -67,6 +67,11 @@ actions!(
         SaveFile,
         CommitNow,
         CommitAndPushNow,
+        LogSelectPrev,
+        LogSelectNext,
+        LogExtendPrev,
+        LogExtendNext,
+        LogSelectAll,
         Quit
     ]
 );
@@ -159,6 +164,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f2", RenameSelectedBranch, Some("BranchesTree")),
         KeyBinding::new("backspace", DeleteSelectedBranch, Some("BranchesTree")),
         KeyBinding::new("delete", DeleteSelectedBranch, Some("BranchesTree")),
+        KeyBinding::new("up", LogSelectPrev, Some("CommitLog")),
+        KeyBinding::new("down", LogSelectNext, Some("CommitLog")),
+        KeyBinding::new("shift-up", LogExtendPrev, Some("CommitLog")),
+        KeyBinding::new("shift-down", LogExtendNext, Some("CommitLog")),
+        KeyBinding::new(&format!("{mod_key}-a"), LogSelectAll, Some("CommitLog")),
         KeyBinding::new(&format!("{mod_key}-q"), Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -169,6 +179,7 @@ pub struct DesktopView {
     workspace: Workspace,
     focus: FocusHandle,
     overlay_focus: FocusHandle,
+    log_focus: FocusHandle,
     search: Entity<TextField>,
     repo_filter: Entity<TextField>,
     repo_filter_diverged_only: bool,
@@ -215,6 +226,11 @@ pub struct DesktopView {
     pub(super) commit_no_verify: bool,
     pub(super) commit_show_conventional: bool,
     pub(super) commit_diff_expanded: bool,
+    pub(super) commit_diff_block_idx: usize,
+    pub(super) commit_refs_expanded: bool,
+    pub(super) multi_commit_details_expanded: bool,
+    pub(super) multi_commit_details_height: Pixels,
+    pub(super) multi_commit_details_drag: Option<(Pixels, Pixels)>,
     pub(super) pending_push_commit: Option<WorktreeTarget>,
     pub(super) hovered_hint: Option<String>,
     last_activation_reload: Option<Instant>,
@@ -319,6 +335,7 @@ impl DesktopView {
             workspace,
             focus,
             overlay_focus: cx.focus_handle(),
+            log_focus: cx.focus_handle(),
             search,
             repo_filter,
             repo_filter_diverged_only: false,
@@ -365,6 +382,11 @@ impl DesktopView {
             commit_no_verify: prefs.commit_no_verify,
             commit_show_conventional: prefs.commit_show_conventional,
             commit_diff_expanded: false,
+            commit_diff_block_idx: 0,
+            commit_refs_expanded: false,
+            multi_commit_details_expanded: false,
+            multi_commit_details_height: px(220.),
+            multi_commit_details_drag: None,
             pending_push_commit: None,
             hovered_hint: None,
             last_activation_reload: Some(Instant::now()),
@@ -616,9 +638,11 @@ impl DesktopView {
         }
         if selection.commit {
             self.change_scroll = UniformListScrollHandle::new();
+            self.commit_refs_expanded = false;
         }
         if selection.file {
             self.diff_scroll = UniformListScrollHandle::new();
+            self.commit_diff_block_idx = 0;
         }
     }
 
@@ -2040,6 +2064,14 @@ impl Render for DesktopView {
                         .update(cx, |search, cx| search.clear(window, cx));
                 } else if view.workspace.selected_file.is_some() {
                     view.close_diff(cx);
+                } else if view.workspace.selected_commits.len() > 1
+                    && let Some(primary) = view
+                        .workspace
+                        .selected_commit
+                        .clone()
+                        .or_else(|| view.workspace.selected_commits.first().cloned())
+                {
+                    view.dispatch(Action::SelectCommit(primary), cx);
                 }
             }))
             .on_action(cx.listener(|view, _: &FocusNext, window, cx| {
@@ -2099,6 +2131,10 @@ impl Render for DesktopView {
                     view.daily_ui.draft_height = next;
                     view.sync_commit_draft_height(cx);
                     cx.notify();
+                } else if let Some((origin_y, start_h)) = view.multi_commit_details_drag {
+                    let next = (start_h + origin_y - event.position.y).clamp(px(120.), px(520.));
+                    view.multi_commit_details_height = next;
+                    cx.notify();
                 }
             }))
             .on_mouse_up(
@@ -2108,6 +2144,7 @@ impl Render for DesktopView {
                     view.branches_ui.drag = None;
                     view.branches_drawer_drag = None;
                     view.daily_ui.draft_drag = None;
+                    view.multi_commit_details_drag = None;
                 }),
             )
             .on_mouse_up_out(
@@ -2117,6 +2154,7 @@ impl Render for DesktopView {
                     view.branches_ui.drag = None;
                     view.branches_drawer_drag = None;
                     view.daily_ui.draft_drag = None;
+                    view.multi_commit_details_drag = None;
                 }),
             )
             .child(self.titlebar(cx))

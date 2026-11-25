@@ -20,7 +20,10 @@ use gpui::{
 use super::components::*;
 use super::file_icons::{file_type_icon, folder_type_icon};
 use super::file_viewer::reveal_in_file_manager;
-use super::history::{ParsedPatch, SplitDiffRow, split_column_header};
+use super::history::{
+    ParsedPatch, SplitDiffRow, attach_split_hscroll_handlers, diff_overview_ruler,
+    split_column_header, split_horizontal_scrollbar,
+};
 use super::operations::ReviewDialog;
 use super::overlay::{Dialog, MenuKind, Overlay, menu_item, menu_rule};
 use super::{CommitAndPushNow, CommitNow, DesktopView, TextField, text_field};
@@ -2519,41 +2522,62 @@ impl DesktopView {
                     tr("工作区（Working Tree）", "Working Tree"),
                 ),
             };
-            return div()
+            let ruler_scroll = self.daily_ui.patch_scroll.clone();
+            let h_scroll = patch.patch.h_scroll.clone();
+            let container = div()
                 .flex()
                 .flex_col()
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
-                .child(split_column_header(left_label, right_label))
+                .bg(rgb(theme().panel))
+                .child(split_column_header(
+                    left_label,
+                    right_label,
+                    Some(&h_scroll),
+                ))
                 .child(
-                    uniform_list(
-                        "working-patch-split-lines",
-                        patch.patch.split_rows.len(),
-                        cx.processor(|view, range: Range<usize>, _, cx| {
-                            let Some(patch) = view.daily_ui.patch.as_ref() else {
-                                return Vec::new();
-                            };
-                            range
-                                .filter_map(|index| {
-                                    let row = patch.patch.split_rows.get(index)?;
-                                    if let Some(id) = patch.split_headers.get(&index)
-                                        && let SplitDiffRow::Banner { text, .. } = row
-                                    {
-                                        Some(view.hunk_row(patch, *id, text.as_ref(), cx))
-                                    } else {
-                                        Some(row.row().into_any_element())
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                    )
-                    .track_scroll(&self.daily_ui.patch_scroll)
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0(),
+                    div()
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .child(
+                            uniform_list(
+                                "working-patch-split-lines",
+                                patch.patch.split_rows.len(),
+                                cx.processor(|view, range: Range<usize>, _, cx| {
+                                    let Some(patch) = view.daily_ui.patch.as_ref() else {
+                                        return Vec::new();
+                                    };
+                                    let scroll_x = patch.patch.h_scroll.offset();
+                                    range
+                                        .filter_map(|index| {
+                                            let row = patch.patch.split_rows.get(index)?;
+                                            if let Some(id) = patch.split_headers.get(&index)
+                                                && let SplitDiffRow::Banner { text, .. } = row
+                                            {
+                                                Some(view.hunk_row(patch, *id, text.as_ref(), cx))
+                                            } else {
+                                                let meta = patch.patch.split_meta.get(index);
+                                                Some(
+                                                    row.render_modern(meta, scroll_x)
+                                                        .into_any_element(),
+                                                )
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                }),
+                            )
+                            .track_scroll(&self.daily_ui.patch_scroll)
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0(),
+                        )
+                        .child(diff_overview_ruler(&patch.patch, ruler_scroll, false)),
                 )
-                .into_any_element();
+                .children(split_horizontal_scrollbar(&h_scroll));
+            return attach_split_hscroll_handlers(container, h_scroll).into_any_element();
         }
         uniform_list(
             "working-patch-lines",

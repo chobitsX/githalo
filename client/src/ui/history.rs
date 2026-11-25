@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::ops::Range;
@@ -11,9 +12,10 @@ use githalo::workspace::{
     Action, ChangedFile, Commit, CommitRef, CommitRefKind, DailyAction, Workspace, WorktreeId,
 };
 use gpui::{
-    AnyElement, ClipboardItem, Context, Div, FontStyle, FontWeight, HighlightStyle,
-    ListHorizontalSizingBehavior, MouseButton, Pixels, Role, ScrollStrategy, SharedString,
-    StyledText, TextAlign, div, prelude::*, px, rems, rgb, uniform_list,
+    AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Div, FontStyle,
+    FontWeight, HighlightStyle, Hsla, ListHorizontalSizingBehavior, MouseButton, PathBuilder,
+    Pixels, Role, ScrollStrategy, ScrollWheelEvent, SharedString, StyledText, TextAlign, Window,
+    canvas, div, fill, point, prelude::*, px, rems, rgb, rgba, size, uniform_list,
 };
 
 use super::DesktopView;
@@ -22,6 +24,7 @@ use super::components::*;
 use super::file_icons::{file_type_icon, folder_type_icon};
 use super::graph;
 use super::overlay::MenuKind;
+use super::{LogExtendNext, LogExtendPrev, LogSelectAll, LogSelectNext, LogSelectPrev};
 
 impl DesktopView {
     pub(super) fn history(&self, available: Pixels, cx: &mut Context<Self>) -> Div {
@@ -467,11 +470,11 @@ impl DesktopView {
             })
     }
 
-    fn log(&self, width: Pixels, cx: &mut Context<Self>) -> Div {
+    fn visible_commit_indices(&self, cx: &App) -> Vec<usize> {
         let query = self.search.read(cx).text().trim().to_lowercase();
         let query_parts = query.split_whitespace().collect::<Vec<_>>();
-        let commits = &self.workspace.commits;
-        let visible = commits
+        self.workspace
+            .commits
             .iter()
             .enumerate()
             .filter_map(|(index, commit)| {
@@ -502,9 +505,203 @@ impl DesktopView {
                     })
                     .then_some(index)
             })
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    fn handle_commit_click(
+        &mut self,
+        oid: &str,
+        shift: bool,
+        toggle: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.log_focus.focus(window, cx);
+        if shift {
+            let visible = self.visible_commit_indices(cx);
+            let anchor = self
+                .workspace
+                .selection_anchor
+                .as_deref()
+                .or(self.workspace.selected_commit.as_deref())
+                .unwrap_or(oid)
+                .to_owned();
+            let pos_of = |target: &str| {
+                visible.iter().position(|&idx| {
+                    self.workspace
+                        .commits
+                        .get(idx)
+                        .is_some_and(|c| c.oid == target)
+                })
+            };
+            if let (Some(a), Some(b)) = (pos_of(&anchor), pos_of(oid)) {
+                let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                let oids: Vec<String> = visible[lo..=hi]
+                    .iter()
+                    .filter_map(|&idx| self.workspace.commits.get(idx).map(|c| c.oid.clone()))
+                    .collect();
+                self.dispatch(
+                    Action::SelectCommits {
+                        oids,
+                        primary: Some(oid.to_owned()),
+                        anchor: Some(anchor),
+                    },
+                    cx,
+                );
+                return;
+            }
+        }
+        if toggle {
+            let mut oids = if !self.workspace.selected_commits.is_empty() {
+                self.workspace.selected_commits.clone()
+            } else if let Some(cur) = self.workspace.selected_commit.clone() {
+                vec![cur]
+            } else {
+                Vec::new()
+            };
+            if let Some(pos) = oids.iter().position(|existing| existing == oid) {
+                if oids.len() > 1 {
+                    oids.remove(pos);
+                    let next_primary = if self.workspace.selected_commit.as_deref() == Some(oid) {
+                        oids.first().cloned()
+                    } else {
+                        self.workspace.selected_commit.clone()
+                    };
+                    let next_anchor = next_primary.clone();
+                    self.dispatch(
+                        Action::SelectCommits {
+                            oids,
+                            primary: next_primary,
+                            anchor: next_anchor,
+                        },
+                        cx,
+                    );
+                }
+            } else {
+                oids.push(oid.to_owned());
+                self.dispatch(
+                    Action::SelectCommits {
+                        oids,
+                        primary: Some(oid.to_owned()),
+                        anchor: Some(oid.to_owned()),
+                    },
+                    cx,
+                );
+            }
+            return;
+        }
+        self.dispatch(Action::SelectCommit(oid.to_owned()), cx);
+    }
+
+    fn move_commit_selection(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let visible = self.visible_commit_indices(cx);
+        if visible.is_empty() {
+            return;
+        }
+        let cur_pos = self
+            .workspace
+            .selected_commit
+            .as_deref()
+            .and_then(|oid| {
+                visible.iter().position(|&idx| {
+                    self.workspace
+                        .commits
+                        .get(idx)
+                        .is_some_and(|c| c.oid == oid)
+                })
+            })
+            .unwrap_or(0);
+        let next_pos = if delta < 0 {
+            cur_pos.saturating_sub(delta.unsigned_abs())
+        } else {
+            (cur_pos + delta as usize).min(visible.len() - 1)
+        };
+        let Some(next_oid) = self
+            .workspace
+            .commits
+            .get(visible[next_pos])
+            .map(|c| c.oid.clone())
+        else {
+            return;
+        };
+        if extend {
+            let anchor_oid = self
+                .workspace
+                .selection_anchor
+                .clone()
+                .or_else(|| self.workspace.selected_commit.clone())
+                .unwrap_or_else(|| next_oid.clone());
+            let anchor_pos = visible
+                .iter()
+                .position(|&idx| {
+                    self.workspace
+                        .commits
+                        .get(idx)
+                        .is_some_and(|c| c.oid == anchor_oid)
+                })
+                .unwrap_or(cur_pos);
+            let (lo, hi) = if anchor_pos <= next_pos {
+                (anchor_pos, next_pos)
+            } else {
+                (next_pos, anchor_pos)
+            };
+            let oids: Vec<String> = visible[lo..=hi]
+                .iter()
+                .filter_map(|&idx| self.workspace.commits.get(idx).map(|c| c.oid.clone()))
+                .collect();
+            self.dispatch(
+                Action::SelectCommits {
+                    oids,
+                    primary: Some(next_oid),
+                    anchor: Some(anchor_oid),
+                },
+                cx,
+            );
+        } else {
+            self.dispatch(Action::SelectCommit(next_oid), cx);
+        }
+        self.log_scroll
+            .scroll_to_item(next_pos, ScrollStrategy::Nearest);
+    }
+
+    fn select_all_visible_commits(&mut self, cx: &mut Context<Self>) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let visible = self.visible_commit_indices(cx);
+        if visible.is_empty() {
+            return;
+        }
+        let oids: Vec<String> = visible
+            .iter()
+            .filter_map(|&idx| self.workspace.commits.get(idx).map(|c| c.oid.clone()))
+            .collect();
+        let primary = self
+            .workspace
+            .selected_commit
+            .clone()
+            .filter(|p| oids.iter().any(|o| o == p))
+            .or_else(|| oids.first().cloned());
+        let anchor = primary.clone();
+        self.dispatch(
+            Action::SelectCommits {
+                oids,
+                primary,
+                anchor,
+            },
+            cx,
+        );
+    }
+
+    fn log(&self, width: Pixels, cx: &mut Context<Self>) -> Div {
+        let filtered = !self.search.read(cx).text().trim().is_empty();
+        let commits = &self.workspace.commits;
+        let visible = self.visible_commit_indices(cx);
         let count = visible.len();
-        let filtered = !query_parts.is_empty();
+        let selected_count = self.workspace.selected_commits.len();
         let can_load_more =
             !self.workspace.history_loading && commits.len() >= self.workspace.history_limit;
 
@@ -620,6 +817,64 @@ impl DesktopView {
                 )
             })
             .child(div().flex_1().min_w_0())
+            .when(selected_count > 1, |row| {
+                let clear_primary = self
+                    .workspace
+                    .selected_commit
+                    .clone()
+                    .or_else(|| self.workspace.selected_commits.first().cloned());
+                row.child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .gap(px(4.))
+                        .h(px(23.))
+                        .pl(px(8.))
+                        .pr(px(4.))
+                        .rounded(px(5.))
+                        .bg(rgb(theme().brand_bg))
+                        .border_1()
+                        .border_color(rgb(theme().brand_border))
+                        .text_size(px(11.))
+                        .text_color(rgb(theme().brand_text))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(if is_zh() {
+                            format!("已选 {selected_count} 条")
+                        } else {
+                            format!("{selected_count} selected")
+                        })
+                        .when_some(clear_primary, |chip, primary| {
+                            chip.child(
+                                div()
+                                    .id("clear-multi-commit-selection")
+                                    .role(Role::Button)
+                                    .aria_label(tr("取消多选", "Clear multi-selection"))
+                                    .tab_index(0)
+                                    .tooltip(tooltip(
+                                        tr(
+                                            "取消多选（Esc），仅保留当前焦点提交",
+                                            "Clear multi-selection (Esc)",
+                                        )
+                                        .to_owned(),
+                                    ))
+                                    .size(px(16.))
+                                    .rounded(px(3.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(theme().muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme().hover)).text_color(rgb(theme().text))
+                                    })
+                                    .child("×")
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.dispatch(Action::SelectCommit(primary.clone()), cx);
+                                    })),
+                            )
+                        }),
+                )
+            })
             .when(can_load_more, |row| {
                 row.child(
                     command_button(
@@ -722,8 +977,14 @@ impl DesktopView {
                     .filter_map(|index| {
                         let source = visible[index];
                         let commit = view.workspace.commits.get(source)?;
-                        let selected =
-                            view.workspace.selected_commit.as_deref() == Some(commit.oid.as_str());
+                        let selected = if !view.workspace.selected_commits.is_empty() {
+                            view.workspace
+                                .selected_commits
+                                .iter()
+                                .any(|oid| oid == &commit.oid)
+                        } else {
+                            view.workspace.selected_commit.as_deref() == Some(commit.oid.as_str())
+                        };
                         let oid = commit.oid.clone();
                         let context_oid = commit.oid.clone();
                         let graph_row = graph.as_ref().map(|g| g.rows[source].clone());
@@ -753,24 +1014,50 @@ impl DesktopView {
                                 .focus_visible(|s| s.bg(rgb(theme().active)))
                                 .child(graph::cell(graph_row, graph_width, natural_width))
                                 .child(commit_columns(commit, width, today_days))
-                                .on_click(window.listener_for(&entity, move |view, _, _, cx| {
-                                    view.dispatch(Action::SelectCommit(oid.clone()), cx);
-                                }))
+                                .on_click(window.listener_for(
+                                    &entity,
+                                    move |view, event: &gpui::ClickEvent, window, cx| {
+                                        let mods = event.modifiers();
+                                        let toggle = mods.secondary();
+                                        view.handle_commit_click(
+                                            &oid, mods.shift, toggle, window, cx,
+                                        );
+                                    },
+                                ))
                                 .on_mouse_down(
                                     MouseButton::Right,
                                     window.listener_for(
                                         &entity,
                                         move |view, event: &gpui::MouseDownEvent, window, cx| {
-                                            view.dispatch(
-                                                Action::SelectCommit(context_oid.clone()),
-                                                cx,
-                                            );
-                                            view.open_menu(
-                                                MenuKind::Commit(context_oid.clone()),
-                                                event.position,
-                                                window,
-                                                cx,
-                                            );
+                                            view.log_focus.focus(window, cx);
+                                            let in_multi = view.workspace.selected_commits.len()
+                                                > 1
+                                                && view
+                                                    .workspace
+                                                    .selected_commits
+                                                    .iter()
+                                                    .any(|o| o == &context_oid);
+                                            if in_multi {
+                                                view.open_menu(
+                                                    MenuKind::Commits(
+                                                        view.workspace.selected_commits.clone(),
+                                                    ),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            } else {
+                                                view.dispatch(
+                                                    Action::SelectCommit(context_oid.clone()),
+                                                    cx,
+                                                );
+                                                view.open_menu(
+                                                    MenuKind::Commit(context_oid.clone()),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
                                             cx.stop_propagation();
                                         },
                                     ),
@@ -785,6 +1072,23 @@ impl DesktopView {
             .into_any_element()
         };
         div()
+            .key_context("CommitLog")
+            .track_focus(&self.log_focus)
+            .on_action(cx.listener(|view, _: &LogSelectPrev, _, cx| {
+                view.move_commit_selection(-1, false, cx);
+            }))
+            .on_action(cx.listener(|view, _: &LogSelectNext, _, cx| {
+                view.move_commit_selection(1, false, cx);
+            }))
+            .on_action(cx.listener(|view, _: &LogExtendPrev, _, cx| {
+                view.move_commit_selection(-1, true, cx);
+            }))
+            .on_action(cx.listener(|view, _: &LogExtendNext, _, cx| {
+                view.move_commit_selection(1, true, cx);
+            }))
+            .on_action(cx.listener(|view, _: &LogSelectAll, _, cx| {
+                view.select_all_visible_commits(cx);
+            }))
             .flex()
             .flex_col()
             .min_w_0()
@@ -797,12 +1101,21 @@ impl DesktopView {
     }
 
     fn details(&self, width: Pixels, cx: &mut Context<Self>) -> Div {
-        let Some(commit) = self.workspace.selected_commit.as_deref().and_then(|oid| {
+        let selected_commits: Vec<&Commit> = if !self.workspace.selected_commits.is_empty() {
             self.workspace
-                .commits
+                .selected_commits
                 .iter()
-                .find(|commit| commit.oid == oid)
-        }) else {
+                .filter_map(|oid| self.workspace.commits.iter().find(|c| &c.oid == oid))
+                .collect()
+        } else {
+            self.workspace
+                .selected_commit
+                .as_deref()
+                .and_then(|oid| self.workspace.commits.iter().find(|c| c.oid == oid))
+                .into_iter()
+                .collect()
+        };
+        if selected_commits.is_empty() {
             return div()
                 .w(width)
                 .flex_shrink_0()
@@ -815,7 +1128,8 @@ impl DesktopView {
                     "选择提交后查看详情与变更文件",
                     "Select a commit to view details and changed files",
                 )));
-        };
+        }
+
         let patch_open = self.workspace.selected_file.is_some();
         let file_count = self.workspace.changes.len();
         let file_count_label = (!self.workspace.changes_loading).then(|| {
@@ -826,6 +1140,72 @@ impl DesktopView {
             }
         });
 
+        let changes_header = div()
+            .h(rems(1.9375))
+            .px(px(12.))
+            .gap(px(6.))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .border_b_1()
+            .border_color(rgb(theme().border))
+            .child(
+                div()
+                    .text_size(rems(0.74))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme().muted))
+                    .child(if selected_commits.len() > 1 {
+                        tr("聚合变更文件", "Combined Changes")
+                    } else {
+                        tr("变更文件", "Changed Files")
+                    }),
+            )
+            .children(file_count_label.map(|lbl| {
+                div()
+                    .text_size(rems(0.7))
+                    .text_color(rgb(theme().subtle))
+                    .child(lbl)
+            }))
+            .child(div().flex_1())
+            .when(!patch_open && file_count > 0 && width >= px(260.), |h| {
+                h.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(10.5))
+                        .text_color(rgb(theme().subtle))
+                        .child(tr("单击预览 · 双击展开", "Click preview · Dbl-click")),
+                )
+            });
+
+        if selected_commits.len() == 1 {
+            let commit = selected_commits[0];
+            return div()
+                .w(width)
+                .min_h_0()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .border_l_1()
+                .border_color(rgb(theme().border))
+                .child(self.commit_summary(commit, patch_open, cx))
+                .child(changes_header)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_h_0()
+                        .when(patch_open, |pane| pane.h(px(142.)).flex_shrink_0())
+                        .when(!patch_open, |pane| pane.flex_1())
+                        .child(self.changed_files(cx)),
+                )
+                .when_some(self.workspace.selected_file.as_deref(), |col, path| {
+                    col.child(self.patch(path, cx))
+                });
+        }
+
+        // Multi-commit selection layout (Rebased / IntelliJ Git Log parity):
+        // Top batch header + combined changed file tree + bottom scrollable list of selected commits.
+        // When a file is clicked for inline diff preview, the bottom commit list collapses to give room to the diff.
         div()
             .w(width)
             .min_h_0()
@@ -834,41 +1214,8 @@ impl DesktopView {
             .flex_col()
             .border_l_1()
             .border_color(rgb(theme().border))
-            .child(self.commit_summary(commit, patch_open, cx))
-            .child(
-                div()
-                    .h(rems(1.9375))
-                    .px(px(12.))
-                    .gap(px(6.))
-                    .flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(theme().border))
-                    .child(
-                        div()
-                            .text_size(rems(0.74))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme().muted))
-                            .child(tr("变更文件", "Changed Files")),
-                    )
-                    .children(file_count_label.map(|lbl| {
-                        div()
-                            .text_size(rems(0.7))
-                            .text_color(rgb(theme().subtle))
-                            .child(lbl)
-                    }))
-                    .child(div().flex_1())
-                    .when(!patch_open && file_count > 0 && width >= px(260.), |h| {
-                        h.child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(10.5))
-                                .text_color(rgb(theme().subtle))
-                                .child(tr("单击预览 · 双击展开", "Click preview · Dbl-click")),
-                        )
-                    }),
-            )
+            .child(self.multi_commit_header(&selected_commits, cx))
+            .child(changes_header)
             .child(
                 div()
                     .flex()
@@ -878,17 +1225,387 @@ impl DesktopView {
                     .when(!patch_open, |pane| pane.flex_1())
                     .child(self.changed_files(cx)),
             )
+            .when(!patch_open, |col| {
+                col.child(self.multi_commit_list(&selected_commits, cx))
+            })
             .when_some(self.workspace.selected_file.as_deref(), |col, path| {
                 col.child(self.patch(path, cx))
             })
     }
 
+    fn multi_commit_header(&self, commits: &[&Commit], cx: &mut Context<Self>) -> Div {
+        let count = commits.len();
+        let oids: Vec<String> = commits.iter().map(|c| c.oid.clone()).collect();
+        let pick_oids = oids.clone();
+        let menu_oids = oids.clone();
+        let can_pick = self.can_start_cherry_pick();
+        let contiguous = self.workspace.changes_contiguous;
+        let mode_badge = if contiguous {
+            tr("净变更", "Net diff")
+        } else {
+            tr("聚合", "Combined")
+        };
+
+        div()
+            .flex_shrink_0()
+            .px(px(12.))
+            .py(px(8.))
+            .gap(px(6.))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .bg(rgb(theme().sidebar_bg))
+            .border_b_1()
+            .border_color(rgb(theme().border))
+            .child(
+                pill(
+                    if is_zh() {
+                        format!("已选 {count} 条提交")
+                    } else {
+                        format!("{count} commits selected")
+                    },
+                    theme().brand_bg,
+                    theme().brand_border,
+                    theme().brand_text,
+                )
+                .font_weight(FontWeight::SEMIBOLD),
+            )
+            .child(pill(
+                mode_badge,
+                theme().card,
+                theme().border_strong,
+                theme().muted,
+            ))
+            .child(div().flex_1())
+            .when(count == 2, |bar| {
+                let from_oid = commits[1].oid.clone();
+                let to_oid = commits[0].oid.clone();
+                bar.child(
+                    icon_text_button(
+                        "multi-detail-compare-two",
+                        Icon::Compare,
+                        tr("对比", "Compare"),
+                        false,
+                        true,
+                    )
+                    .h(px(23.))
+                    .text_size(px(11.))
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        view.open_compare_revisions_dialog(
+                            from_oid.clone(),
+                            to_oid.clone(),
+                            window,
+                            cx,
+                        );
+                    })),
+                )
+            })
+            .child(
+                icon_text_button(
+                    "multi-detail-cherry-pick",
+                    Icon::CherryPick,
+                    "Cherry-pick",
+                    false,
+                    can_pick,
+                )
+                .h(px(23.))
+                .text_size(px(11.))
+                .when(can_pick, |btn| {
+                    btn.on_click(cx.listener(move |view, _, window, cx| {
+                        view.open_batch_cherry_pick_dialog(pick_oids.clone(), window, cx);
+                    }))
+                }),
+            )
+            .child(
+                icon_button(
+                    "multi-detail-more-ops",
+                    Icon::More,
+                    tr("更多批量提交操作…", "More Batch Commit Actions…"),
+                )
+                .size(px(23.))
+                .border_1()
+                .border_color(rgb(theme().border_strong))
+                .bg(rgb(theme().card))
+                .on_click(cx.listener(
+                    move |view, event: &gpui::ClickEvent, window, cx| {
+                        view.open_menu(
+                            MenuKind::Commits(menu_oids.clone()),
+                            event.position(),
+                            window,
+                            cx,
+                        );
+                    },
+                )),
+            )
+    }
+
+    fn multi_commit_list(&self, commits: &[&Commit], cx: &mut Context<Self>) -> Div {
+        let count = commits.len();
+        let expanded = self.multi_commit_details_expanded;
+        let today_days = current_epoch_days();
+        let header = div()
+            .id("toggle-multi-commit-details")
+            .role(Role::Button)
+            .aria_expanded(expanded)
+            .aria_label(if expanded {
+                tr("收起所选提交详情", "Collapse selected commits")
+            } else {
+                tr("展开所选提交详情", "Expand selected commits")
+            })
+            .tab_index(0)
+            .h(rems(1.95))
+            .px(px(10.))
+            .gap(px(5.))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .when(expanded, |h| {
+                h.border_b_1().border_color(rgb(theme().border))
+            })
+            .hover(|s| s.bg(rgb(theme().hover)))
+            .child(icon(
+                if expanded {
+                    Icon::ChevronDown
+                } else {
+                    Icon::ChevronRight
+                },
+                theme().subtle,
+            ))
+            .child(
+                div()
+                    .text_size(rems(0.74))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme().muted))
+                    .child(tr("所选提交详情", "Selected Commits")),
+            )
+            .child(
+                div()
+                    .text_size(rems(0.7))
+                    .text_color(rgb(theme().subtle))
+                    .child(if is_zh() {
+                        format!("{count} 条")
+                    } else {
+                        format!("{count}")
+                    }),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(rgb(theme().subtle))
+                    .child(if expanded {
+                        tr("收起", "Hide")
+                    } else {
+                        tr("展开", "Show")
+                    }),
+            )
+            .on_click(cx.listener(|view, _, _, cx| {
+                view.multi_commit_details_expanded = !view.multi_commit_details_expanded;
+                cx.notify();
+            }));
+
+        if !expanded {
+            return div()
+                .flex_shrink_0()
+                .flex()
+                .flex_col()
+                .border_t_1()
+                .border_color(rgb(theme().border))
+                .bg(rgb(theme().sidebar_bg))
+                .child(header);
+        }
+
+        let resize_handle = div()
+            .id("multi-commit-details-resize")
+            .h(px(4.))
+            .flex_shrink_0()
+            .cursor(CursorStyle::ResizeUpDown)
+            .border_t_1()
+            .border_color(rgb(theme().border))
+            .hover(|s| s.bg(rgb(theme().brand_border)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, event: &gpui::MouseDownEvent, _, cx| {
+                    if event.click_count >= 2 {
+                        view.multi_commit_details_height = px(220.);
+                        view.multi_commit_details_drag = None;
+                        cx.notify();
+                    } else {
+                        view.multi_commit_details_drag =
+                            Some((event.position.y, view.multi_commit_details_height));
+                    }
+                    cx.stop_propagation();
+                }),
+            );
+
+        div()
+            .flex_shrink_0()
+            .h(self.multi_commit_details_height)
+            .flex()
+            .flex_col()
+            .bg(rgb(theme().sidebar_bg))
+            .child(resize_handle)
+            .child(header)
+            .child(
+                div()
+                    .id("multi-commit-details-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .children(commits.iter().enumerate().map(|(idx, commit)| {
+                        let oid = commit.oid.clone();
+                        let copy_oid = commit.oid.clone();
+                        let focus_oid = commit.oid.clone();
+                        let short = short_oid(&oid).to_owned();
+                        let rel = format_relative_date(&commit.date, today_days);
+                        let date_display = if rel != commit.date {
+                            format!("{} · {rel}", commit.date)
+                        } else {
+                            commit.date.clone()
+                        };
+                        let body = self
+                            .workspace
+                            .selected_commit_bodies
+                            .get(&commit.oid)
+                            .cloned();
+
+                        div()
+                            .id(("multi-commit-card", idx))
+                            .px(px(12.))
+                            .py(px(9.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(5.))
+                            .when(idx > 0, |c| {
+                                c.border_t_1().border_color(rgb(theme().border))
+                            })
+                            .when(!commit.refs.is_empty(), |card| {
+                                card.child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .children(commit.refs.iter().map(ref_pill)),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .text_size(rems(0.82))
+                                    .line_height(rems(1.25))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme().text))
+                                    .child(subject(commit).to_owned()),
+                            )
+                            .when_some(body, |card, body_text| {
+                                card.child(
+                                    div()
+                                        .text_size(rems(0.75))
+                                        .line_height(rems(1.32))
+                                        .text_color(rgb(theme().muted))
+                                        .child(body_text),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .min_w_0()
+                                    .text_size(rems(0.71))
+                                    .child(author_avatar(&commit.author, 16.))
+                                    .child(
+                                        elide(commit.author.clone())
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(rgb(theme().text)),
+                                    )
+                                    .child(
+                                        elide(date_display)
+                                            .flex_1()
+                                            .text_color(rgb(theme().subtle)),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("multi-copy-oid", idx))
+                                            .role(Role::Button)
+                                            .aria_label(tr("复制提交 ID", "Copy commit hash"))
+                                            .tab_index(0)
+                                            .tooltip(tooltip(format!(
+                                                "{}\n{copy_oid}",
+                                                tr(
+                                                    "点击复制完整提交 ID",
+                                                    "Click to copy full commit hash"
+                                                )
+                                            )))
+                                            .px(px(5.))
+                                            .py(px(1.))
+                                            .rounded(px(4.))
+                                            .bg(rgb(theme().accent_bg))
+                                            .font_family(mono_font())
+                                            .text_size(px(10.5))
+                                            .text_color(rgb(theme().link))
+                                            .hover(|s| s.bg(rgb(theme().hover)))
+                                            .child(short)
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    copy_oid.clone(),
+                                                ));
+                                                view.notice = Some(
+                                                    tr("已复制提交 ID", "Copied commit hash")
+                                                        .to_owned(),
+                                                );
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("multi-focus-single", idx))
+                                            .role(Role::Button)
+                                            .aria_label(tr(
+                                                "仅查看此提交",
+                                                "Inspect this commit only",
+                                            ))
+                                            .tab_index(0)
+                                            .tooltip(tooltip(
+                                                tr("仅查看此单条提交", "Focus only this commit")
+                                                    .to_owned(),
+                                            ))
+                                            .px(px(4.))
+                                            .py(px(1.))
+                                            .rounded(px(4.))
+                                            .text_size(px(10.5))
+                                            .text_color(rgb(theme().subtle))
+                                            .hover(|s| {
+                                                s.bg(rgb(theme().hover))
+                                                    .text_color(rgb(theme().text))
+                                            })
+                                            .child(tr("单看", "Only"))
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                view.dispatch(
+                                                    Action::SelectCommit(focus_oid.clone()),
+                                                    cx,
+                                                );
+                                            })),
+                                    ),
+                            )
+                    })),
+            )
+    }
+
     fn changed_files(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.workspace.changes.is_empty() {
+            let is_multi = self.workspace.selected_commits.len() > 1;
             return empty(if self.workspace.changes_loading {
                 tr("正在读取变更文件…", "Loading changed files…")
             } else if self.workspace.message.is_some() {
                 tr("无法读取变更文件", "Failed to load changed files")
+            } else if is_multi {
+                tr(
+                    "所选提交合并后没有净文件变更",
+                    "No net file changes across selected commits",
+                )
             } else {
                 tr("此提交没有文件变更", "No file changes in this commit")
             })
@@ -1089,7 +1806,7 @@ impl DesktopView {
             .id("commit-details")
             .flex_shrink_0()
             .when(compact, |d| d.max_h(px(138.)).overflow_y_scroll())
-            .when(!compact, |d| d.max_h(px(236.)).overflow_y_scroll())
+            .when(!compact, |d| d.max_h(px(286.)).overflow_y_scroll())
             .border_b_1()
             .border_color(rgb(theme().border))
             .bg(rgb(theme().sidebar_bg))
@@ -1115,6 +1832,25 @@ impl DesktopView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(theme().text))
                     .child(subject(commit).to_owned()),
+            )
+            .when_some(
+                (!compact)
+                    .then(|| {
+                        self.workspace
+                            .selected_commit_bodies
+                            .get(&commit.oid)
+                            .cloned()
+                    })
+                    .flatten(),
+                |pane, body| {
+                    pane.child(
+                        div()
+                            .text_size(rems(0.76))
+                            .line_height(rems(1.32))
+                            .text_color(rgb(theme().muted))
+                            .child(body),
+                    )
+                },
             )
             .child(
                 div()
@@ -1199,6 +1935,7 @@ impl DesktopView {
                         )
                     }),
             )
+            .when(!compact, |pane| pane.children(self.containing_refs_row(cx)))
             .when(!compact, |pane| {
                 pane.child(
                     div()
@@ -1276,17 +2013,270 @@ impl DesktopView {
         self.dispatch(Action::CloseDiff, cx);
     }
 
-    fn render_commit_patch_body(&self, side_by_side: bool, list_id: &'static str) -> AnyElement {
+    fn containing_refs_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let refs = &self.workspace.selected_commit_refs;
+        let loading = self.workspace.commit_refs_loading;
+        if loading && refs.is_empty() {
+            return Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .text_size(rems(0.71))
+                    .text_color(rgb(theme().subtle))
+                    .child(icon(Icon::Branch, theme().subtle))
+                    .child(tr("正在查询所属分支…", "Checking containing branches…")),
+            );
+        }
+        if refs.is_empty() {
+            return Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .text_size(rems(0.71))
+                    .text_color(rgb(theme().subtle))
+                    .child(icon(Icon::Branch, theme().subtle))
+                    .child(tr("不在任何分支或标签中", "Not in any branch or tag")),
+            );
+        }
+
+        let branch_count = refs
+            .iter()
+            .filter(|r| !matches!(r.kind, CommitRefKind::Tag))
+            .count();
+        let tag_count = refs.len() - branch_count;
+        let summary_label = match (branch_count, tag_count) {
+            (b, 0) if is_zh() => format!("所属分支 ({b})"),
+            (1, 0) => "In 1 branch".to_owned(),
+            (b, 0) => format!("In {b} branches"),
+            (0, t) if is_zh() => format!("所属标签 ({t})"),
+            (0, 1) => "In 1 tag".to_owned(),
+            (0, t) => format!("In {t} tags"),
+            (b, t) if is_zh() => format!("所属分支 ({b}) · 标签 ({t})"),
+            (b, t) => format!("In {b} branches · {t} tags"),
+        };
+
+        const FOLD_LIMIT: usize = 4;
+        let expanded = self.commit_refs_expanded;
+        let total = refs.len();
+        let visible_len = if expanded || total <= FOLD_LIMIT {
+            total
+        } else {
+            FOLD_LIMIT
+        };
+        let hidden = total.saturating_sub(visible_len);
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.))
+                .pt(px(1.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .text_size(rems(0.71))
+                        .text_color(rgb(theme().subtle))
+                        .child(icon(Icon::Branch, theme().subtle))
+                        .child(summary_label),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(4.))
+                        .children(refs.iter().take(visible_len).enumerate().map(|(idx, r)| {
+                            let full_ref = match r.kind {
+                                CommitRefKind::Head | CommitRefKind::LocalBranch => {
+                                    format!("refs/heads/{}", r.name)
+                                }
+                                CommitRefKind::RemoteBranch => format!("refs/remotes/{}", r.name),
+                                CommitRefKind::Tag => format!("refs/tags/{}", r.name),
+                            };
+                            let active =
+                                self.workspace.branch_filter.as_deref() == Some(full_ref.as_str());
+                            let hover_label = if is_zh() {
+                                format!("{}（点击按此引用筛选提交日志）", r.name)
+                            } else {
+                                format!("{} (click to filter log)", r.name)
+                            };
+                            div()
+                                .id(("containing-ref-pill", idx))
+                                .role(Role::Button)
+                                .aria_label(r.name.clone())
+                                .tab_index(0)
+                                .rounded(px(4.))
+                                .when(active, |d| d.border_1().border_color(rgb(theme().brand)))
+                                .hover(|s| s.opacity(0.86))
+                                .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                                    view.set_hovered_hint(hovered.then(|| hover_label.clone()), cx);
+                                }))
+                                .child(ref_pill(r))
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    let next = if view.workspace.branch_filter.as_deref()
+                                        == Some(full_ref.as_str())
+                                    {
+                                        None
+                                    } else {
+                                        Some(full_ref.clone())
+                                    };
+                                    view.dispatch(Action::SetBranchFilter(next), cx);
+                                }))
+                        }))
+                        .when(hidden > 0, |row| {
+                            row.child(
+                                div()
+                                    .id("expand-containing-refs")
+                                    .role(Role::Button)
+                                    .aria_label(tr("展开全部分支", "Show all containing branches"))
+                                    .tab_index(0)
+                                    .px(px(6.))
+                                    .py(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(rgb(theme().card))
+                                    .border_1()
+                                    .border_color(rgb(theme().border_strong))
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(theme().muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme().hover)).text_color(rgb(theme().text))
+                                    })
+                                    .child(if is_zh() {
+                                        format!("+{hidden} 展开")
+                                    } else {
+                                        format!("+{hidden} more")
+                                    })
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.commit_refs_expanded = true;
+                                        cx.notify();
+                                    })),
+                            )
+                        })
+                        .when(expanded && total > FOLD_LIMIT, |row| {
+                            row.child(
+                                div()
+                                    .id("collapse-containing-refs")
+                                    .role(Role::Button)
+                                    .aria_label(tr("收起多余分支", "Collapse containing branches"))
+                                    .tab_index(0)
+                                    .px(px(6.))
+                                    .py(px(1.))
+                                    .rounded(px(4.))
+                                    .bg(rgb(theme().card))
+                                    .border_1()
+                                    .border_color(rgb(theme().border_strong))
+                                    .text_size(px(10.5))
+                                    .text_color(rgb(theme().muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme().hover)).text_color(rgb(theme().text))
+                                    })
+                                    .child(tr("收起", "Less"))
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.commit_refs_expanded = false;
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                ),
+        )
+    }
+
+    fn commit_diff_column_labels(&self, path: Option<&Path>) -> (String, String) {
+        let path_suffix = path
+            .map(|p| format!("  {}", p.display()))
+            .unwrap_or_default();
+        if self.workspace.selected_commits.len() > 1 {
+            let newest = self
+                .workspace
+                .selected_commits
+                .first()
+                .map(|o| short_oid(o))
+                .unwrap_or("HEAD");
+            let oldest = self
+                .workspace
+                .selected_commits
+                .last()
+                .and_then(|o| self.workspace.commits.iter().find(|c| &c.oid == o))
+                .and_then(|c| c.parents.first())
+                .map(|p| short_oid(p))
+                .unwrap_or("root");
+            let left = format!("{oldest}{path_suffix}");
+            let right = format!("{newest}{path_suffix}");
+            return (left, right);
+        }
+        if let Some(commit) = self
+            .workspace
+            .selected_commit
+            .as_deref()
+            .and_then(|oid| self.workspace.commits.iter().find(|c| c.oid == oid))
+        {
+            let parent = commit
+                .parents
+                .first()
+                .map(|p| short_oid(p))
+                .unwrap_or("root");
+            let cur = short_oid(&commit.oid);
+            return (
+                format!("{parent}{path_suffix}"),
+                format!("{cur}{path_suffix}"),
+            );
+        }
+        (
+            tr("变更前（Before）", "Before").to_owned(),
+            tr("变更后（After）", "After").to_owned(),
+        )
+    }
+
+    fn jump_commit_diff_block(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(patch) = self.history_details.patch.as_ref() else {
+            return;
+        };
+        let count = patch.diff_blocks.len();
+        if count == 0 {
+            return;
+        }
+        let next = if delta < 0 {
+            if self.commit_diff_block_idx == 0 {
+                count - 1
+            } else {
+                self.commit_diff_block_idx - 1
+            }
+        } else {
+            (self.commit_diff_block_idx + 1) % count
+        };
+        self.commit_diff_block_idx = next;
+        let raw_row = patch.diff_blocks[next].start_row;
+        let visible_row = patch
+            .visible_split_rows
+            .iter()
+            .position(|&idx| idx == raw_row)
+            .unwrap_or(raw_row);
+        self.diff_scroll
+            .scroll_to_item(visible_row, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    fn render_commit_patch_body(
+        &self,
+        side_by_side: bool,
+        list_id: &'static str,
+        path: Option<&Path>,
+    ) -> AnyElement {
         if self.workspace.diff_loading {
             empty(tr("正在读取 Diff…", "Loading Diff…")).into_any_element()
         } else if let Some(patch) = self.history_details.patch.clone() {
+            let (left_label, right_label) = self.commit_diff_column_labels(path);
             render_patch_view(
                 list_id,
                 patch,
                 side_by_side,
                 &self.diff_scroll,
-                tr("变更前（Before）", "Before"),
-                tr("变更后（After）", "After"),
+                &left_label,
+                &right_label,
             )
         } else {
             empty(tr("此文件没有文本差异", "No text diff for this file")).into_any_element()
@@ -1314,6 +2304,35 @@ impl DesktopView {
             .selected_commit
             .clone()
             .unwrap_or_else(|| "HEAD".to_owned());
+        let multi_count = self.workspace.selected_commits.len();
+        let multi_badge = (multi_count > 1).then(|| {
+            if self.workspace.changes_contiguous {
+                if is_zh() {
+                    format!("{multi_count} 条提交净变更")
+                } else {
+                    format!("{multi_count} commits · net")
+                }
+            } else if is_zh() {
+                format!("{multi_count} 条提交聚合")
+            } else {
+                format!("{multi_count} commits · combined")
+            }
+        });
+
+        let diff_count = self
+            .history_details
+            .patch
+            .as_ref()
+            .map_or(0, |p| p.diff_blocks.len());
+        let diff_count_label = (diff_count > 0).then(|| {
+            if is_zh() {
+                format!("{diff_count} 处差异")
+            } else if diff_count == 1 {
+                "1 difference".to_owned()
+            } else {
+                format!("{diff_count} differences")
+            }
+        });
 
         div()
             .flex()
@@ -1331,6 +2350,51 @@ impl DesktopView {
                     .gap(px(6.))
                     .border_b_1()
                     .border_color(rgb(theme().border))
+                    .child(
+                        command_button(
+                            "expanded-prev-diff",
+                            "↑",
+                            false,
+                            diff_count > 0 && self.diff_side_by_side,
+                        )
+                        .h(px(23.))
+                        .px(px(6.))
+                        .tooltip(tooltip(tr("上一处差异", "Previous difference").to_owned()))
+                        .when(
+                            diff_count > 0 && self.diff_side_by_side,
+                            |btn| {
+                                btn.on_click(cx.listener(|view, _, _, cx| {
+                                    view.jump_commit_diff_block(-1, cx);
+                                }))
+                            },
+                        ),
+                    )
+                    .child(
+                        command_button(
+                            "expanded-next-diff",
+                            "↓",
+                            false,
+                            diff_count > 0 && self.diff_side_by_side,
+                        )
+                        .h(px(23.))
+                        .px(px(6.))
+                        .tooltip(tooltip(tr("下一处差异", "Next difference").to_owned()))
+                        .when(
+                            diff_count > 0 && self.diff_side_by_side,
+                            |btn| {
+                                btn.on_click(cx.listener(|view, _, _, cx| {
+                                    view.jump_commit_diff_block(1, cx);
+                                }))
+                            },
+                        ),
+                    )
+                    .child(
+                        div()
+                            .w(px(1.))
+                            .h(px(14.))
+                            .mx(px(2.))
+                            .bg(rgb(theme().border)),
+                    )
                     .child(
                         command_button("expanded-prev-file", "←", false, prev_path.is_some())
                             .h(px(23.))
@@ -1374,6 +2438,14 @@ impl DesktopView {
                             theme().link,
                         ))
                     })
+                    .when_some(multi_badge, |bar, badge| {
+                        bar.child(pill(
+                            badge,
+                            theme().brand_bg,
+                            theme().brand_border,
+                            theme().brand_text,
+                        ))
+                    })
                     .child(
                         div()
                             .id("expanded-diff-path")
@@ -1381,6 +2453,16 @@ impl DesktopView {
                             .flex_1()
                             .child(elide(path_label)),
                     )
+                    .when_some(diff_count_label, |bar, lbl| {
+                        bar.child(
+                            div()
+                                .flex_shrink_0()
+                                .px(px(6.))
+                                .text_size(px(11.5))
+                                .text_color(rgb(theme().muted))
+                                .child(lbl),
+                        )
+                    })
                     .child(self.diff_mode_toggle("expanded-commit-diff-mode", cx))
                     .child(
                         command_button(
@@ -1427,12 +2509,17 @@ impl DesktopView {
                         .on_click(cx.listener(|view, _, _, cx| view.close_diff(cx))),
                     ),
             )
-            .child(self.render_commit_patch_body(self.diff_side_by_side, "expanded-patch-lines"))
+            .child(self.render_commit_patch_body(
+                self.diff_side_by_side,
+                "expanded-patch-lines",
+                Some(path),
+            ))
     }
 
     fn patch(&self, path: &Path, cx: &mut Context<Self>) -> Div {
         let path_label = path.to_string_lossy().into_owned();
-        let patch = self.render_commit_patch_body(self.diff_side_by_side, "patch-lines");
+        let patch =
+            self.render_commit_patch_body(self.diff_side_by_side, "patch-lines", Some(path));
         div()
             .flex()
             .flex_col()
@@ -1844,7 +2931,7 @@ pub(super) struct HistoryDetails {
 #[derive(Default)]
 struct DetailSelection {
     worktree: Option<(WorktreeId, u64)>,
-    commit: Option<String>,
+    commits: Vec<String>,
     file: Option<PathBuf>,
     changes_loading: bool,
     diff_loading: bool,
@@ -1867,10 +2954,15 @@ impl HistoryDetails {
             .selected
             .and_then(|id| workspace.repo(id))
             .map(|row| (row.target.id, row.target.path_revision));
+        let commits = if !workspace.selected_commits.is_empty() {
+            workspace.selected_commits.clone()
+        } else {
+            workspace.selected_commit.iter().cloned().collect()
+        };
         self.update_details(
             DetailSelection {
                 worktree,
-                commit: workspace.selected_commit.clone(),
+                commits,
                 file: workspace.selected_file.clone(),
                 changes_loading: workspace.changes_loading,
                 diff_loading: workspace.diff_loading,
@@ -1887,7 +2979,7 @@ impl HistoryDetails {
         diff: Option<&str>,
     ) -> HistoryScrollReset {
         let worktree = self.selection.worktree != selection.worktree;
-        let commit = worktree || self.selection.commit != selection.commit;
+        let commit = worktree || self.selection.commits != selection.commits;
         let file = commit || self.selection.file != selection.file;
         if commit {
             self.changes = ChangeTree::default();
@@ -1998,10 +3090,160 @@ impl ChangeDirectory {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DiffBlockKind {
+    Modified,
+    Added,
+    Removed,
+}
+
+const DIFF_ROW_HEIGHT: f32 = 1.375;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct SplitRowMeta {
+    pub(super) block_kind: Option<DiffBlockKind>,
+    pub(super) block_offset: usize,
+    pub(super) block_len: usize,
+    pub(super) left_len: usize,
+    pub(super) right_len: usize,
+    pub(super) is_first: bool,
+    pub(super) is_last: bool,
+    pub(super) omitted_hint: Option<SharedString>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DiffBlockMark {
+    pub(super) start_row: usize,
+    pub(super) end_row: usize,
+    pub(super) kind: DiffBlockKind,
+}
+
+#[derive(Default)]
+struct SplitHScrollState {
+    offset_x: f32,
+    pane_width: f32,
+    max_content_px: f32,
+    /// `(origin_mouse_x, start_offset_x, track_width)` while dragging a horizontal scrollbar thumb.
+    drag: Option<(f32, f32, f32)>,
+}
+
+/// Shared synchronized horizontal scroll state for side-by-side Diff panes.
+#[derive(Clone, Default)]
+pub(super) struct SplitHScroll(Rc<RefCell<SplitHScrollState>>);
+
+impl SplitHScroll {
+    fn new(max_content_px: f32) -> Self {
+        Self(Rc::new(RefCell::new(SplitHScrollState {
+            offset_x: 0.0,
+            pane_width: 0.0,
+            max_content_px,
+            drag: None,
+        })))
+    }
+
+    pub(super) fn set_pane_width(&self, width: f32) {
+        let mut s = self.0.borrow_mut();
+        let next = width.max(40.0);
+        if (s.pane_width - next).abs() > 0.5 {
+            s.pane_width = next;
+            let max = (s.max_content_px - s.pane_width).max(0.0);
+            s.offset_x = s.offset_x.clamp(0.0, max);
+        }
+    }
+
+    pub(super) fn offset(&self) -> f32 {
+        let s = self.0.borrow();
+        let max = (s.max_content_px - s.pane_width.max(40.0)).max(0.0);
+        s.offset_x.clamp(0.0, max)
+    }
+
+    pub(super) fn max_scroll(&self) -> f32 {
+        let s = self.0.borrow();
+        if s.pane_width <= 0.0 {
+            return 0.0;
+        }
+        (s.max_content_px - s.pane_width).max(0.0)
+    }
+
+    pub(super) fn metrics(&self) -> (f32, f32, f32) {
+        let s = self.0.borrow();
+        let pane = s.pane_width.max(1.0);
+        let max = (s.max_content_px - pane).max(0.0);
+        (s.offset_x.clamp(0.0, max), max, s.max_content_px.max(pane))
+    }
+
+    pub(super) fn scroll_by(&self, delta_x: f32) -> bool {
+        let mut s = self.0.borrow_mut();
+        if s.pane_width <= 0.0 {
+            return false;
+        }
+        let max = (s.max_content_px - s.pane_width).max(0.0);
+        if max <= 0.5 {
+            return false;
+        }
+        let next = (s.offset_x + delta_x).clamp(0.0, max);
+        if (next - s.offset_x).abs() > 0.01 {
+            s.offset_x = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn begin_drag(&self, mouse_x: f32, track_left: f32, track_width: f32) -> bool {
+        let mut s = self.0.borrow_mut();
+        let pane = s.pane_width.max(1.0);
+        let max = (s.max_content_px - pane).max(0.0);
+        if max <= 0.5 || track_width <= 1.0 {
+            return false;
+        }
+        let content = s.max_content_px.max(pane);
+        let thumb_w = ((pane / content) * track_width).clamp(32.0, track_width);
+        let travel = (track_width - thumb_w).max(1.0);
+        let thumb_left = track_left + (s.offset_x / max) * travel;
+        let thumb_right = thumb_left + thumb_w;
+        // If clicked outside the thumb, jump the thumb center to the click position first.
+        if mouse_x < thumb_left || mouse_x > thumb_right {
+            let desired_left = (mouse_x - track_left - thumb_w * 0.5).clamp(0.0, travel);
+            s.offset_x = ((desired_left / travel) * max).clamp(0.0, max);
+        }
+        s.drag = Some((mouse_x, s.offset_x, travel));
+        true
+    }
+
+    pub(super) fn update_drag(&self, mouse_x: f32) -> bool {
+        let mut s = self.0.borrow_mut();
+        let Some((origin_x, start_offset, travel)) = s.drag else {
+            return false;
+        };
+        let pane = s.pane_width.max(1.0);
+        let max = (s.max_content_px - pane).max(0.0);
+        if max <= 0.5 || travel <= 0.5 {
+            return false;
+        }
+        let next = (start_offset + ((mouse_x - origin_x) / travel) * max).clamp(0.0, max);
+        if (next - s.offset_x).abs() > 0.01 {
+            s.offset_x = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn end_drag(&self) {
+        self.0.borrow_mut().drag = None;
+    }
+}
+
 pub(super) struct ParsedPatch {
     pub(super) lines: Vec<DiffLine>,
     pub(super) longest: Option<usize>,
     pub(super) split_rows: Vec<SplitDiffRow>,
+    pub(super) split_meta: Vec<SplitRowMeta>,
+    /// Indices into `split_rows` for read-only split view (omits redundant `@@ -1,... @@` top banner).
+    pub(super) visible_split_rows: Vec<usize>,
+    pub(super) diff_blocks: Vec<DiffBlockMark>,
+    pub(super) h_scroll: SplitHScroll,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2103,32 +3345,48 @@ impl SplitCell {
         s
     }
 
-    fn render(&self) -> Div {
+    fn render_code_pane(
+        &self,
+        block_kind: Option<DiffBlockKind>,
+        meta: Option<&SplitRowMeta>,
+        scroll_x: f32,
+    ) -> Div {
         let t = theme();
-        let (bg, fg, mark, mark_color, highlight_bg) = match self.kind {
-            SplitCellKind::Context => (t.panel, t.text, " ", t.subtle, t.panel),
-            SplitCellKind::Removed => (
-                t.diff_removed_bg,
-                t.diff_removed_fg,
-                "-",
-                t.diff_removed_mark,
-                t.diff_removed_word_bg,
-            ),
-            SplitCellKind::Added => (
-                t.diff_added_bg,
-                t.diff_added_fg,
-                "+",
-                t.diff_added_mark,
-                t.diff_added_word_bg,
-            ),
-            SplitCellKind::Empty => (t.diff_empty_bg, t.subtle, " ", t.subtle, t.diff_empty_bg),
+        let is_first = meta.is_some_and(|m| m.is_first);
+        let (bg, highlight_bg, empty_anchor_color) = match self.kind {
+            SplitCellKind::Context => (t.panel, t.panel, None),
+            SplitCellKind::Empty => {
+                let anchor = if is_first {
+                    match block_kind {
+                        Some(DiffBlockKind::Added) => Some(t.diff_added_border),
+                        Some(DiffBlockKind::Removed) => Some(t.diff_removed_border),
+                        Some(DiffBlockKind::Modified) => Some(t.diff_modified_border),
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                (t.diff_empty_bg, t.diff_empty_bg, anchor)
+            }
+            SplitCellKind::Removed => match block_kind {
+                Some(DiffBlockKind::Modified) => {
+                    (t.diff_modified_bg, t.diff_modified_word_bg, None)
+                }
+                _ => (t.diff_removed_bg, t.diff_removed_word_bg, None),
+            },
+            SplitCellKind::Added => match block_kind {
+                Some(DiffBlockKind::Modified) => {
+                    (t.diff_modified_bg, t.diff_modified_word_bg, None)
+                }
+                _ => (t.diff_added_bg, t.diff_added_word_bg, None),
+            },
         };
+        let fg = t.text;
         let mut code = div()
             .flex()
             .items_center()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
+            .flex_shrink_0()
+            .ml(px(-scroll_x))
             .whitespace_nowrap()
             .text_color(rgb(fg));
         if !self.syntax.is_empty() {
@@ -2158,36 +3416,157 @@ impl SplitCell {
             }
         }
         div()
-            .w_1_2()
-            .flex_shrink_0()
+            .flex_1()
             .min_w_0()
-            .h(rems(1.375))
+            .h_full()
+            .overflow_hidden()
+            .relative()
             .flex()
             .items_center()
-            .gap(px(4.))
-            .pr(px(8.))
+            .px(px(10.))
             .bg(rgb(bg))
-            .child(
-                div()
-                    .w(px(38.))
-                    .flex_shrink_0()
-                    .pr(px(3.))
-                    .text_align(TextAlign::Right)
-                    .text_color(rgb(theme().subtle))
-                    .child(
-                        self.line_no
-                            .map_or_else(String::new, |number| number.to_string()),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(10.))
-                    .flex_shrink_0()
-                    .text_color(rgb(mark_color))
-                    .child(mark),
-            )
+            .when_some(empty_anchor_color, |cell, col| {
+                cell.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(1.5))
+                        .bg(rgb(col)),
+                )
+            })
             .child(code)
     }
+
+    fn gutter_colors(&self, block_kind: Option<DiffBlockKind>) -> (u32, u32) {
+        let t = theme();
+        match self.kind {
+            SplitCellKind::Context | SplitCellKind::Empty => (t.diff_gutter_bg, t.subtle),
+            SplitCellKind::Removed => match block_kind {
+                Some(DiffBlockKind::Modified) => (t.diff_modified_gutter_bg, t.muted),
+                _ => (t.diff_removed_gutter_bg, t.muted),
+            },
+            SplitCellKind::Added => match block_kind {
+                Some(DiffBlockKind::Modified) => (t.diff_modified_gutter_bg, t.muted),
+                _ => (t.diff_added_gutter_bg, t.muted),
+            },
+        }
+    }
+}
+
+/// Smooth ease-in-out S-curve inverse: maps normalized vertical progress `u` in `[0, 1]`
+/// to horizontal progress `s` in `[0, 1]` so multi-row divider polygons connect seamlessly.
+fn s_curve_x(u: f32) -> f32 {
+    let clamped = (1.0 - 2.0 * u.clamp(0.0, 1.0)).clamp(-1.0, 1.0);
+    clamped.acos() / std::f32::consts::PI
+}
+
+fn center_connector_canvas(
+    left_kind: SplitCellKind,
+    right_kind: SplitCellKind,
+    meta: Option<&SplitRowMeta>,
+) -> impl IntoElement {
+    let block_kind = meta.and_then(|m| m.block_kind);
+    let offset = meta.map_or(0, |m| m.block_offset);
+    let left_len = meta.map_or(0, |m| m.left_len);
+    let right_len = meta.map_or(0, |m| m.right_len);
+    let is_first = meta.is_some_and(|m| m.is_first);
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            let t = theme();
+            let Some(kind) = block_kind else {
+                return;
+            };
+            let x0 = f32::from(bounds.left());
+            let x1 = f32::from(bounds.right());
+            let y0 = f32::from(bounds.top());
+            let y1 = f32::from(bounds.bottom());
+            let width = (x1 - x0).max(1.);
+            let height = (y1 - y0).max(1.);
+
+            let (fill_hex, border_hex) = match kind {
+                DiffBlockKind::Modified => (t.diff_modified_bg, t.diff_modified_border),
+                DiffBlockKind::Added => (t.diff_added_bg, t.diff_added_border),
+                DiffBlockKind::Removed => (t.diff_removed_bg, t.diff_removed_border),
+            };
+            let fill_color: Hsla = rgb(fill_hex).into();
+            let border_color: Hsla = rgb(border_hex).into();
+
+            match (
+                left_kind != SplitCellKind::Empty,
+                right_kind != SplitCellKind::Empty,
+            ) {
+                (true, true) => {
+                    window.paint_quad(fill(bounds, fill_color));
+                }
+                (false, true) => {
+                    // Unified curve from `(x0, left_len)` to `(x1, right_len)` with zero step seam,
+                    // handling both pure insertions (`left_len == 0`) and asymmetric modified blocks (`right_len > left_len`).
+                    let span = right_len.saturating_sub(left_len).max(1) as f32;
+                    let rel = offset.saturating_sub(left_len) as f32;
+                    let u0 = (rel / span).clamp(0.0, 1.0);
+                    let u1 = ((rel + 1.0) / span).clamp(0.0, 1.0);
+                    const STEPS: usize = 6;
+                    let mut poly = PathBuilder::fill();
+                    let first_x = x0 + width * s_curve_x(u0);
+                    poly.move_to(point(px(first_x), px(y0)));
+                    for step in 1..=STEPS {
+                        let frac = step as f32 / STEPS as f32;
+                        let u = u0 + (u1 - u0) * frac;
+                        let y = y0 + height * frac;
+                        let x = x0 + width * s_curve_x(u);
+                        poly.line_to(point(px(x), px(y)));
+                    }
+                    poly.line_to(point(px(x1), px(y1)));
+                    poly.line_to(point(px(x1), px(y0)));
+                    poly.close();
+                    if let Ok(path) = poly.build() {
+                        window.paint_path(path, fill_color);
+                    }
+                    if is_first && left_len == 0 {
+                        window.paint_quad(fill(
+                            Bounds::new(point(px(x0), px(y0)), size(px(width), px(1.5))),
+                            border_color,
+                        ));
+                    }
+                }
+                (true, false) => {
+                    // Mirrored seamless curve from `(x0, left_len)` to `(x1, right_len)`.
+                    let span = left_len.saturating_sub(right_len).max(1) as f32;
+                    let rel = offset.saturating_sub(right_len) as f32;
+                    let u0 = (rel / span).clamp(0.0, 1.0);
+                    let u1 = ((rel + 1.0) / span).clamp(0.0, 1.0);
+                    const STEPS: usize = 6;
+                    let mut poly = PathBuilder::fill();
+                    poly.move_to(point(px(x0), px(y0)));
+                    poly.line_to(point(px(x0), px(y1)));
+                    for step in (0..=STEPS).rev() {
+                        let frac = step as f32 / STEPS as f32;
+                        let u = u0 + (u1 - u0) * frac;
+                        let y = y0 + height * frac;
+                        let x = x1 - width * s_curve_x(u);
+                        poly.line_to(point(px(x), px(y)));
+                    }
+                    poly.close();
+                    if let Ok(path) = poly.build() {
+                        window.paint_path(path, fill_color);
+                    }
+                    if is_first && right_len == 0 {
+                        window.paint_quad(fill(
+                            Bounds::new(point(px(x0), px(y0)), size(px(width), px(1.5))),
+                            border_color,
+                        ));
+                    }
+                }
+                (false, false) => {}
+            }
+        },
+    )
+    .w(px(22.))
+    .h_full()
+    .flex_shrink_0()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2204,62 +3583,472 @@ pub(super) enum SplitDiffRow {
 }
 
 impl SplitDiffRow {
+    #[allow(dead_code)]
     pub(super) fn row(&self) -> Div {
+        self.render_modern(None, 0.0)
+    }
+
+    pub(super) fn render_modern(&self, meta: Option<&SplitRowMeta>, scroll_x: f32) -> Div {
+        // CRITICAL: Every item in GPUI's `uniform_list` MUST share the exact same fixed row height (`DIFF_ROW_HEIGHT`),
+        // because `uniform_list` measures item 0 to compute stride for all rows.
         let base = div()
             .flex()
             .items_center()
             .w_full()
             .min_w_0()
-            .h(rems(1.375))
+            .h(rems(DIFF_ROW_HEIGHT))
+            .overflow_hidden()
             .font_family(mono_font())
             .text_size(rems(0.78))
-            .line_height(rems(1.2))
+            .line_height(rems(1.22))
             .whitespace_nowrap();
         match self {
-            Self::Banner { text, tone, .. } => {
+            Self::Banner {
+                text,
+                tone,
+                hunk_order,
+            } => {
+                if hunk_order.is_some() {
+                    let hint = meta
+                        .and_then(|m| m.omitted_hint.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| text.clone());
+                    let display = if hint.is_empty() {
+                        SharedString::from(tr("· 文件起始", "· Start of file"))
+                    } else {
+                        hint
+                    };
+                    return div()
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .min_w_0()
+                        .h(rems(DIFF_ROW_HEIGHT))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .px(px(12.))
+                        .gap(px(10.))
+                        .bg(rgb(theme().diff_hunk_bg))
+                        .child(div().flex_1().h(px(1.)).bg(rgb(theme().border)))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(px(420.))
+                                .overflow_hidden()
+                                .px(px(8.))
+                                .rounded(px(999.))
+                                .bg(rgb(theme().card))
+                                .border_1()
+                                .border_color(rgb(theme().border))
+                                .text_size(px(10.5))
+                                .text_color(rgb(theme().muted))
+                                .child(elide(display)),
+                        )
+                        .child(div().flex_1().h(px(1.)).bg(rgb(theme().border)));
+                }
                 let (color, background) = tone.colors();
-                base.px(px(10.))
+                base.px(px(12.))
                     .bg(rgb(background))
                     .text_color(rgb(color))
                     .overflow_hidden()
                     .child(elide(text.clone()))
             }
-            Self::Pair { left, right } => base
-                .child(left.render())
-                .child(
-                    div()
-                        .w(px(1.))
-                        .h_full()
-                        .flex_shrink_0()
-                        .bg(rgb(theme().border)),
-                )
-                .child(right.render()),
+            Self::Pair { left, right } => {
+                let block_kind = meta.and_then(|m| m.block_kind);
+                let (left_g_bg, left_g_fg) = left.gutter_colors(block_kind);
+                let (right_g_bg, right_g_fg) = right.gutter_colors(block_kind);
+                let is_first = meta.is_some_and(|m| m.is_first);
+                let left_anchor = (left.kind == SplitCellKind::Empty && is_first)
+                    .then(|| block_border_color(block_kind))
+                    .flatten();
+                let right_anchor = (right.kind == SplitCellKind::Empty && is_first)
+                    .then(|| block_border_color(block_kind))
+                    .flatten();
+
+                base.child(left.render_code_pane(block_kind, meta, scroll_x))
+                    .child(
+                        div()
+                            .w(px(102.))
+                            .h_full()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .bg(rgb(theme().diff_gutter_bg))
+                            .child(
+                                div()
+                                    .w(px(40.))
+                                    .h_full()
+                                    .relative()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .pr(px(6.))
+                                    .bg(rgb(left_g_bg))
+                                    .text_size(rems(0.72))
+                                    .text_color(rgb(left_g_fg))
+                                    .when_some(left_anchor, |g, col| {
+                                        g.child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .left_0()
+                                                .right_0()
+                                                .h(px(1.5))
+                                                .bg(rgb(col)),
+                                        )
+                                    })
+                                    .child(
+                                        left.line_no.map_or_else(String::new, |n| n.to_string()),
+                                    ),
+                            )
+                            .child(center_connector_canvas(left.kind, right.kind, meta))
+                            .child(
+                                div()
+                                    .w(px(40.))
+                                    .h_full()
+                                    .relative()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .pr(px(6.))
+                                    .bg(rgb(right_g_bg))
+                                    .text_size(rems(0.72))
+                                    .text_color(rgb(right_g_fg))
+                                    .when_some(right_anchor, |g, col| {
+                                        g.child(
+                                            div()
+                                                .absolute()
+                                                .top_0()
+                                                .left_0()
+                                                .right_0()
+                                                .h(px(1.5))
+                                                .bg(rgb(col)),
+                                        )
+                                    })
+                                    .child(
+                                        right.line_no.map_or_else(String::new, |n| n.to_string()),
+                                    ),
+                            ),
+                    )
+                    .child(right.render_code_pane(block_kind, meta, scroll_x))
+            }
         }
     }
 }
 
-pub(super) fn split_column_header(left_label: &'static str, right_label: &'static str) -> Div {
+fn block_border_color(kind: Option<DiffBlockKind>) -> Option<u32> {
+    let t = theme();
+    match kind {
+        Some(DiffBlockKind::Modified) => Some(t.diff_modified_border),
+        Some(DiffBlockKind::Added) => Some(t.diff_added_border),
+        Some(DiffBlockKind::Removed) => Some(t.diff_removed_border),
+        None => None,
+    }
+}
+
+pub(super) fn split_column_header(
+    left_label: &str,
+    right_label: &str,
+    h_scroll: Option<&SplitHScroll>,
+) -> Div {
+    let measure = h_scroll.cloned();
     div()
-        .h(rems(1.5625))
+        .h(rems(1.625))
         .flex_shrink_0()
         .w_full()
+        .relative()
         .flex()
         .items_center()
-        .bg(rgb(theme().chrome))
+        .bg(rgb(theme().sidebar_bg))
         .border_b_1()
         .border_color(rgb(theme().border))
-        .text_size(rems(0.74))
+        .text_size(rems(0.73))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(theme().subtle))
-        .child(div().w_1_2().flex_shrink_0().px(px(10.)).child(left_label))
+        .text_color(rgb(theme().muted))
+        .when_some(measure, |bar, hs| {
+            bar.child(
+                canvas(
+                    move |bounds, window, _| {
+                        let pane_w =
+                            ((f32::from(bounds.size.width) - 102.0 - 12.0) * 0.5).max(80.0);
+                        let prev_max = hs.max_scroll();
+                        hs.set_pane_width(pane_w);
+                        if (prev_max > 0.5) != (hs.max_scroll() > 0.5) {
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+        })
         .child(
             div()
-                .w(px(1.))
+                .flex_1()
+                .min_w_0()
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(elide(left_label.to_owned()).font_family(mono_font())),
+        )
+        .child(
+            div()
+                .w(px(102.))
                 .h_full()
                 .flex_shrink_0()
-                .bg(rgb(theme().border)),
+                .bg(rgb(theme().sidebar_bg)),
         )
-        .child(div().w_1_2().flex_shrink_0().px(px(10.)).child(right_label))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(elide(right_label.to_owned()).font_family(mono_font())),
+        )
+        .child(
+            div()
+                .w(px(12.))
+                .h_full()
+                .flex_shrink_0()
+                .bg(rgb(theme().sidebar_bg)),
+        )
+}
+
+pub(super) fn split_horizontal_scrollbar(h_scroll: &SplitHScroll) -> Option<Div> {
+    let (offset_x, max_scroll, content_w) = h_scroll.metrics();
+    if max_scroll <= 0.5 {
+        return None;
+    }
+    let ratio = ((content_w - max_scroll) / content_w).clamp(0.08, 1.0);
+    let progress = (offset_x / max_scroll).clamp(0.0, 1.0);
+
+    let make_track = |id: &'static str, hs: SplitHScroll| {
+        let track_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>> =
+            Rc::new(std::cell::Cell::new(None));
+        let paint_bounds = track_bounds.clone();
+        div()
+            .id(id)
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .px(px(6.))
+            .flex()
+            .items_center()
+            .child(
+                canvas(
+                    move |bounds, _, _| {
+                        paint_bounds.set(Some(bounds));
+                    },
+                    move |bounds, _, window, _| {
+                        let track_w = f32::from(bounds.size.width).max(1.0);
+                        let thumb_w = (ratio * track_w).clamp(32.0, track_w);
+                        let travel = (track_w - thumb_w).max(0.0);
+                        let x = f32::from(bounds.left()) + progress * travel;
+                        let y = f32::from(bounds.top())
+                            + (f32::from(bounds.size.height) - 6.0).max(0.0) * 0.5;
+                        window.paint_quad(
+                            fill(
+                                Bounds::new(point(px(x), px(y)), size(px(thumb_w), px(6.0))),
+                                rgba(theme().scrollbar_thumb_rgba),
+                            )
+                            .corner_radii(gpui::Corners::all(px(3.0))),
+                        );
+                    },
+                )
+                .size_full(),
+            )
+            .on_mouse_down(MouseButton::Left, move |event, window, _| {
+                if let Some(bounds) = track_bounds.get()
+                    && hs.begin_drag(
+                        f32::from(event.position.x),
+                        f32::from(bounds.left()),
+                        f32::from(bounds.size.width),
+                    )
+                {
+                    window.refresh();
+                }
+            })
+    };
+
+    Some(
+        div()
+            .h(px(12.))
+            .flex_shrink_0()
+            .w_full()
+            .flex()
+            .items_center()
+            .bg(rgb(theme().panel))
+            .border_t_1()
+            .border_color(rgb(theme().border))
+            .child(make_track("split-hscroll-left", h_scroll.clone()))
+            .child(div().w(px(102.)).h_full().flex_shrink_0())
+            .child(make_track("split-hscroll-right", h_scroll.clone()))
+            .child(div().w(px(12.)).h_full().flex_shrink_0()),
+    )
+}
+
+pub(super) fn attach_split_hscroll_handlers(container: Div, h_scroll: SplitHScroll) -> Div {
+    let wheel_hs = h_scroll.clone();
+    let move_hs = h_scroll.clone();
+    let up_hs = h_scroll.clone();
+    let up_out_hs = h_scroll;
+    container
+        .relative()
+        .child(
+            // Register a Capture-phase ScrollWheel listener over the entire split diff container so
+            // `Shift + wheel` and horizontal trackpad swipes are consumed BEFORE `uniform_list` can
+            // vertically scroll the same event.
+            canvas(
+                |_, _, _| (),
+                move |bounds, _, window, _| {
+                    let wheel_hs = wheel_hs.clone();
+                    window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                        if phase != DispatchPhase::Capture || !bounds.contains(&event.position) {
+                            return;
+                        }
+                        let delta = event.delta.pixel_delta(px(22.));
+                        if event.modifiers.shift {
+                            let dx = if delta.x != px(0.) {
+                                f32::from(delta.x)
+                            } else {
+                                f32::from(delta.y)
+                            };
+                            if dx != 0.0 && wheel_hs.scroll_by(-dx) {
+                                window.refresh();
+                            }
+                            cx.stop_propagation();
+                        } else if delta.x != px(0.) && delta.x.abs() > delta.y.abs() {
+                            if wheel_hs.scroll_by(-f32::from(delta.x)) {
+                                window.refresh();
+                            }
+                            cx.stop_propagation();
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .on_mouse_move(move |event: &gpui::MouseMoveEvent, window, _| {
+            if move_hs.update_drag(f32::from(event.position.x)) {
+                window.refresh();
+            }
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, _| {
+            up_hs.end_drag();
+        })
+        .on_mouse_up_out(MouseButton::Left, move |_, _, _| {
+            up_out_hs.end_drag();
+        })
+}
+
+pub(super) fn diff_overview_ruler(
+    patch: &ParsedPatch,
+    scroll: gpui::UniformListScrollHandle,
+    use_visible_rows: bool,
+) -> impl IntoElement {
+    let total_rows = if use_visible_rows {
+        patch.visible_split_rows.len().max(1)
+    } else {
+        patch.split_rows.len().max(1)
+    };
+    let visible_blocks: Vec<DiffBlockMark> = if use_visible_rows {
+        patch
+            .diff_blocks
+            .iter()
+            .filter_map(|b| {
+                let start = patch
+                    .visible_split_rows
+                    .iter()
+                    .position(|&idx| idx == b.start_row)?;
+                let end = patch
+                    .visible_split_rows
+                    .iter()
+                    .position(|&idx| idx == b.end_row)
+                    .unwrap_or(start);
+                Some(DiffBlockMark {
+                    start_row: start,
+                    end_row: end,
+                    kind: b.kind,
+                })
+            })
+            .collect()
+    } else {
+        patch.diff_blocks.clone()
+    };
+    let click_blocks = visible_blocks.clone();
+    let click_scroll = scroll;
+    let last_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>> =
+        std::rc::Rc::new(std::cell::Cell::new(None));
+    let paint_bounds = last_bounds.clone();
+
+    div()
+        .id("diff-overview-ruler")
+        .w(px(12.))
+        .h_full()
+        .flex_shrink_0()
+        .bg(rgb(theme().panel))
+        .border_l_1()
+        .border_color(rgb(theme().border))
+        .child(
+            canvas(
+                move |bounds, _, _| {
+                    paint_bounds.set(Some(bounds));
+                },
+                move |bounds, _, window, _| {
+                    let t = theme();
+                    let h = f32::from(bounds.size.height).max(1.);
+                    let total = total_rows as f32;
+                    for block in &visible_blocks {
+                        let y_start = (block.start_row as f32 / total) * h;
+                        let y_end = ((block.end_row + 1) as f32 / total) * h;
+                        let bar_h = (y_end - y_start).max(3.5);
+                        let color = match block.kind {
+                            DiffBlockKind::Modified => t.diff_ruler_modified,
+                            DiffBlockKind::Added => t.diff_ruler_added,
+                            DiffBlockKind::Removed => t.diff_ruler_removed,
+                        };
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(bounds.left() + px(2.), bounds.top() + px(y_start)),
+                                size((bounds.size.width - px(4.)).max(px(4.)), px(bar_h)),
+                            ),
+                            rgb(color),
+                        ));
+                    }
+                },
+            )
+            .size_full(),
+        )
+        .on_mouse_down(MouseButton::Left, move |event, _, _| {
+            let Some(bounds) = last_bounds.get() else {
+                return;
+            };
+            let h = f32::from(bounds.size.height).max(1.);
+            let rel = ((f32::from(event.position.y - bounds.top())) / h).clamp(0., 1.);
+            let target_row = ((rel * total_rows as f32) as usize).min(total_rows.saturating_sub(1));
+            let snapped = click_blocks
+                .iter()
+                .min_by_key(|b| {
+                    if target_row >= b.start_row && target_row <= b.end_row {
+                        0
+                    } else if target_row < b.start_row {
+                        b.start_row - target_row
+                    } else {
+                        target_row - b.end_row
+                    }
+                })
+                .filter(|b| target_row.abs_diff(b.start_row) <= 4)
+                .map_or(target_row, |b| b.start_row);
+            click_scroll.scroll_to_item(snapped, ScrollStrategy::Center);
+        })
 }
 
 pub(super) fn render_patch_view(
@@ -2267,31 +4056,54 @@ pub(super) fn render_patch_view(
     patch: Rc<ParsedPatch>,
     side_by_side: bool,
     scroll: &gpui::UniformListScrollHandle,
-    left_label: &'static str,
-    right_label: &'static str,
+    left_label: &str,
+    right_label: &str,
 ) -> AnyElement {
     if side_by_side {
-        let count = patch.split_rows.len();
-        div()
+        let count = patch.visible_split_rows.len();
+        let ruler_patch = patch.clone();
+        let ruler_scroll = scroll.clone();
+        let h_scroll = patch.h_scroll.clone();
+        let list_h_scroll = h_scroll.clone();
+        let container = div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .child(split_column_header(left_label, right_label))
+            .bg(rgb(theme().panel))
+            .child(split_column_header(
+                left_label,
+                right_label,
+                Some(&h_scroll),
+            ))
             .child(
-                uniform_list(list_id, count, move |range, _, _| {
-                    range
-                        .filter_map(|index| patch.split_rows.get(index))
-                        .map(SplitDiffRow::row)
-                        .collect::<Vec<_>>()
-                })
-                .track_scroll(scroll)
-                .flex_1()
-                .min_h_0()
-                .min_w_0(),
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(
+                        uniform_list(list_id, count, move |range, _, _| {
+                            let scroll_x = list_h_scroll.offset();
+                            range
+                                .filter_map(|visible_idx| {
+                                    let raw_idx = *patch.visible_split_rows.get(visible_idx)?;
+                                    let row = patch.split_rows.get(raw_idx)?;
+                                    let meta = patch.split_meta.get(raw_idx);
+                                    Some(row.render_modern(meta, scroll_x))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .track_scroll(scroll)
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0(),
+                    )
+                    .child(diff_overview_ruler(&ruler_patch, ruler_scroll, true)),
             )
-            .into_any_element()
+            .children(split_horizontal_scrollbar(&h_scroll));
+        attach_split_hscroll_handlers(container, h_scroll).into_any_element()
     } else {
         let count = patch.lines.len();
         let longest = patch.longest;
@@ -2311,7 +4123,7 @@ pub(super) fn render_patch_view(
     }
 }
 
-fn mono_font() -> &'static str {
+pub(super) fn mono_font() -> &'static str {
     if cfg!(target_os = "macos") {
         "Menlo"
     } else if cfg!(target_os = "windows") {
@@ -2584,13 +4396,167 @@ impl ParsedPatch {
         );
 
         apply_diff_syntax_highlights(&mut lines, &line_meta, &mut split_rows, &split_row_paths);
+        let (split_meta, visible_split_rows, diff_blocks) = compute_split_diff_meta(&split_rows);
+        let max_cols = max_split_visual_cols(&split_rows);
+        let max_content_px = max_cols as f32 * 8.2 + 36.0;
 
         Self {
             lines,
             longest,
             split_rows,
+            split_meta,
+            visible_split_rows,
+            diff_blocks,
+            h_scroll: SplitHScroll::new(max_content_px),
         }
     }
+}
+
+fn visual_cols(text: &str) -> usize {
+    text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum()
+}
+
+fn max_split_visual_cols(split_rows: &[SplitDiffRow]) -> usize {
+    let mut max_cols = 0usize;
+    for row in split_rows {
+        if let SplitDiffRow::Pair { left, right } = row {
+            let l =
+                visual_cols(&left.prefix) + visual_cols(&left.changed) + visual_cols(&left.suffix);
+            let r = visual_cols(&right.prefix)
+                + visual_cols(&right.changed)
+                + visual_cols(&right.suffix);
+            max_cols = max_cols.max(l).max(r);
+        }
+    }
+    max_cols
+}
+
+fn compute_split_diff_meta(
+    split_rows: &[SplitDiffRow],
+) -> (Vec<SplitRowMeta>, Vec<usize>, Vec<DiffBlockMark>) {
+    let mut meta = vec![SplitRowMeta::default(); split_rows.len()];
+    let mut blocks = Vec::new();
+
+    // 1. Identify contiguous changed blocks and assign Modified / Added / Removed semantics.
+    let mut i = 0;
+    while i < split_rows.len() {
+        let is_changed = matches!(
+            &split_rows[i],
+            SplitDiffRow::Pair { left, right }
+                if left.kind != SplitCellKind::Context || right.kind != SplitCellKind::Context
+        );
+        if !is_changed {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut left_len: usize = 0;
+        let mut right_len: usize = 0;
+        while i < split_rows.len() {
+            if let SplitDiffRow::Pair { left, right } = &split_rows[i]
+                && (left.kind != SplitCellKind::Context || right.kind != SplitCellKind::Context)
+            {
+                if left.kind != SplitCellKind::Empty {
+                    left_len += 1;
+                }
+                if right.kind != SplitCellKind::Empty {
+                    right_len += 1;
+                }
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        let end = i - 1;
+        let kind = match (left_len > 0, right_len > 0) {
+            (true, true) => DiffBlockKind::Modified,
+            (false, true) => DiffBlockKind::Added,
+            _ => DiffBlockKind::Removed,
+        };
+        blocks.push(DiffBlockMark {
+            start_row: start,
+            end_row: end,
+            kind,
+        });
+        let len = end - start + 1;
+        for (offset, item) in meta[start..=end].iter_mut().enumerate() {
+            item.block_kind = Some(kind);
+            item.block_offset = offset;
+            item.block_len = len;
+            item.left_len = left_len;
+            item.right_len = right_len;
+            item.is_first = offset == 0;
+            item.is_last = offset + 1 == len;
+        }
+    }
+
+    // 2. Replace raw `@@ -old,len +new,len @@ ctx` headers with clean omitted-lines indicators.
+    let mut prev_new_end: Option<usize> = None;
+    for (idx, row) in split_rows.iter().enumerate() {
+        match row {
+            SplitDiffRow::Banner {
+                text,
+                hunk_order: Some(_),
+                ..
+            } => {
+                if let Some((_old_start, new_start, _old_len, _new_len)) = hunk_range(text) {
+                    let context = text
+                        .split_once("@@")
+                        .and_then(|(_, rest)| rest.split_once("@@"))
+                        .map(|(_, ctx)| ctx.trim())
+                        .filter(|s| !s.is_empty());
+                    let omitted = match prev_new_end {
+                        Some(prev) if new_start > prev + 1 => new_start - prev - 1,
+                        None if new_start > 1 => new_start - 1,
+                        _ => 0,
+                    };
+                    let label = if omitted == 0 && context.is_none() {
+                        String::new()
+                    } else if omitted > 0 {
+                        let base = if is_zh() {
+                            format!("⋮  省略 {omitted} 行未变更上下文")
+                        } else if omitted == 1 {
+                            "⋮  1 unchanged line omitted".to_owned()
+                        } else {
+                            format!("⋮  {omitted} unchanged lines omitted")
+                        };
+                        match context {
+                            Some(ctx) => format!("{base}  ·  {ctx}"),
+                            None => base,
+                        }
+                    } else {
+                        context.unwrap_or_default().to_owned()
+                    };
+                    meta[idx].omitted_hint = Some(label.into());
+                }
+            }
+            SplitDiffRow::Pair { right, .. } => {
+                if let Some(n) = right.line_no {
+                    prev_new_end = Some(n);
+                }
+            }
+            SplitDiffRow::Banner { .. } => {}
+        }
+    }
+
+    // 3. Build visible row indices for read-only split view: skip redundant empty top `@@ -1,... @@` banners
+    //    so row 0 is always a real full-height line (`uniform_list` measures row 0 for global row stride).
+    let visible_rows: Vec<usize> = (0..split_rows.len())
+        .filter(|&idx| {
+            !matches!(
+                (&split_rows[idx], meta[idx].omitted_hint.as_deref()),
+                (
+                    SplitDiffRow::Banner {
+                        hunk_order: Some(_),
+                        ..
+                    },
+                    Some("")
+                )
+            )
+        })
+        .collect();
+
+    (meta, visible_rows, blocks)
 }
 
 fn extract_diff_header_path(line: &str) -> Option<PathBuf> {
@@ -2955,7 +4921,16 @@ mod tests {
     fn selection(revision: u64, commit: &str, file: Option<&str>) -> DetailSelection {
         DetailSelection {
             worktree: Some((WorktreeId::new(1).unwrap(), revision)),
-            commit: Some(commit.into()),
+            commits: vec![commit.into()],
+            file: file.map(PathBuf::from),
+            ..Default::default()
+        }
+    }
+
+    fn multi_selection(revision: u64, commits: &[&str], file: Option<&str>) -> DetailSelection {
+        DetailSelection {
+            worktree: Some((WorktreeId::new(1).unwrap(), revision)),
+            commits: commits.iter().map(|c| (*c).into()).collect(),
             file: file.map(PathBuf::from),
             ..Default::default()
         }
@@ -3000,6 +4975,20 @@ mod tests {
         let reset = details.update_details(selection(2, "second", None), &[file("new.rs")], None);
         assert!(reset.worktree && reset.commit && reset.file);
         assert_eq!(details.changes.rows, [file_row(0, 0)]);
+
+        let reset = details.update_details(
+            multi_selection(2, &["second", "first"], None),
+            &[file("a.rs"), file("b.rs")],
+            None,
+        );
+        assert!(reset.commit && !reset.worktree);
+        assert_eq!(details.changes.rows.len(), 2);
+        let reset = details.update_details(
+            multi_selection(2, &["second", "first"], None),
+            &[file("a.rs"), file("b.rs")],
+            None,
+        );
+        assert!(!reset.commit && !reset.file);
     }
 
     #[test]
@@ -3089,5 +5078,35 @@ mod tests {
             }
             other => panic!("expected padded add pair, got {other:?}"),
         }
+        // Verify Rebased-style block metadata: paired modify + trailing add merges into one Modified block.
+        assert_eq!(patch.diff_blocks.len(), 1);
+        assert_eq!(patch.diff_blocks[0].kind, DiffBlockKind::Modified);
+        assert_eq!(patch.diff_blocks[0].start_row, 2);
+        assert_eq!(patch.diff_blocks[0].end_row, 3);
+        assert_eq!(patch.split_meta[2].left_len, 1);
+        assert_eq!(patch.split_meta[2].right_len, 2);
+        assert!(patch.split_meta[2].is_first && !patch.split_meta[2].is_last);
+        assert!(!patch.split_meta[3].is_first && patch.split_meta[3].is_last);
+        assert!(
+            patch.split_meta[0]
+                .omitted_hint
+                .as_deref()
+                .is_some_and(|s| s.contains('9'))
+        );
+
+        // Verify top `@@ -1,... @@` banner is stripped from `visible_split_rows` so row 0 is always a code line.
+        let top_patch = ParsedPatch::new(
+            "diff --git a/b.rs b/b.rs\n--- a/b.rs\n+++ b/b.rs\n@@ -1,1 +1,2 @@\n fn main() {}\n+let x = 1;\n",
+        );
+        assert_eq!(top_patch.split_meta[0].omitted_hint.as_deref(), Some(""));
+        assert_eq!(top_patch.visible_split_rows, vec![1, 2]);
+
+        // Verify synchronized horizontal scrolling clamps within [0, max_scroll].
+        patch.h_scroll.set_pane_width(120.0);
+        assert!(patch.h_scroll.max_scroll() > 0.0);
+        assert!(patch.h_scroll.scroll_by(80.0));
+        assert!((patch.h_scroll.offset() - 80.0).abs() < 0.5);
+        assert!(patch.h_scroll.scroll_by(9999.0));
+        assert!((patch.h_scroll.offset() - patch.h_scroll.max_scroll()).abs() < 0.5);
     }
 }

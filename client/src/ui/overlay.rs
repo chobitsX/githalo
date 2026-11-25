@@ -24,7 +24,9 @@ use super::admin::{
 use super::branches::{
     BranchMenuTarget, CheckoutAndRebaseDialog, CheckoutRemoteForm, DeleteRemoteBranchDialog,
 };
-use super::cherry_pick::{CherryPickAbortDialog, CherryPickDialog};
+use super::cherry_pick::{
+    BatchCherryPickDialog, BatchRevertDialog, CherryPickAbortDialog, CherryPickDialog,
+};
 use super::components::*;
 use super::daily::WorkingChangeMenuTarget;
 use super::file_viewer::{
@@ -69,6 +71,7 @@ pub(super) enum MenuKind {
     CommitHistory,
     CommitOptions,
     Commit(String),
+    Commits(Vec<String>),
     RepoAdmin,
     Add,
     Group(Option<GroupId>),
@@ -121,6 +124,8 @@ pub(super) enum Dialog {
     SaveStash(StashSaveForm),
     ReviewStash(StashReview),
     CherryPick(CherryPickDialog),
+    BatchCherryPick(BatchCherryPickDialog),
+    BatchRevert(BatchRevertDialog),
     AbortCherryPick(CherryPickAbortDialog),
     UndoCommit(UndoCommitDialog),
     Reset(ResetDialog),
@@ -416,6 +421,7 @@ impl DesktopView {
                                         MenuKind::CommitHistory => 360.,
                                         MenuKind::CommitOptions => 286.,
                                         MenuKind::Commit(_) => 272.,
+                                        MenuKind::Commits(_) => 292.,
                                         _ => 242.,
                                     }))
                                     .max_h(window.viewport_size().height - px(24.))
@@ -470,6 +476,7 @@ impl DesktopView {
             MenuKind::CommitHistory => self.commit_history_menu(cx),
             MenuKind::CommitOptions => self.commit_options_menu(cx),
             MenuKind::Commit(oid) => self.commit_menu_items(oid, cx),
+            MenuKind::Commits(oids) => self.multi_commit_menu_items(oids, cx),
             MenuKind::RepoAdmin => self.repo_admin_menu_items(cx),
             MenuKind::Worktrees => {
                 let nested_children: std::collections::BTreeSet<WorktreeId> = self
@@ -1430,6 +1437,18 @@ impl DesktopView {
                     .aria_label("确认 Cherry-pick")
                     .w(px(580.))
                     .child(self.cherry_pick_dialog(form, viewport_height, cx));
+            }
+            Dialog::BatchCherryPick(form) => {
+                container = container
+                    .aria_label(tr("批量 Cherry-pick", "Batch Cherry-pick"))
+                    .w(px(580.))
+                    .child(self.batch_cherry_pick_dialog(form, viewport_height, cx));
+            }
+            Dialog::BatchRevert(form) => {
+                container = container
+                    .aria_label(tr("批量 Revert", "Batch Revert"))
+                    .w(px(580.))
+                    .child(self.batch_revert_dialog(form, viewport_height, cx));
             }
             Dialog::AbortCherryPick(dialog) => {
                 container = container

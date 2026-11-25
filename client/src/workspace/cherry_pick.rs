@@ -21,6 +21,11 @@ pub enum CherryPickAction {
         preview_id: u64,
         options: CherryPickOptions,
     },
+    ExecuteBatch {
+        target: WorktreeTarget,
+        oids_oldest_first: Vec<String>,
+        append_source: bool,
+    },
     MarkResolved {
         status: Arc<CherryPickStatus>,
         path: PathBuf,
@@ -162,6 +167,61 @@ impl Workspace {
                             } else {
                                 format!(
                                     "Cherry-pick {} 已暂停，请检查状态后继续或中止",
+                                    short_oid(status.cherry_pick_head())
+                                )
+                            }
+                        }
+                    };
+                    Ok(Effect::Changed(message))
+                });
+            }
+            CherryPickAction::ExecuteBatch {
+                target,
+                oids_oldest_first,
+                append_source,
+            } => {
+                if self.current_target().as_ref() != Some(&target) {
+                    self.daily_error("工作树已变更，请重新核对 Cherry-pick 目标");
+                    return;
+                }
+                if self.writing(target.id) {
+                    self.daily_error("此工作树的 Git 操作仍在进行");
+                    return;
+                }
+                self.cancel_cherry_pick_preview();
+                let count = oids_oldest_first.len();
+                let target_clone = target.clone();
+                self.write(target, move || {
+                    let message = match cherry_pick::execute_batch(
+                        &target_clone,
+                        &oids_oldest_first,
+                        append_source,
+                    )? {
+                        CherryPickOutcome::Applied { new_head_oid } => format!(
+                            "已批量 Cherry-pick {count} 条提交，当前 HEAD {}",
+                            short_oid(&new_head_oid)
+                        ),
+                        CherryPickOutcome::Stopped { status, .. } => {
+                            if !status.conflicts().is_empty() {
+                                let names: Vec<_> = status
+                                    .conflicts()
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect();
+                                format!(
+                                    "批量 Cherry-pick 在 {} 遇到冲突（{} 个文件：{}），请解决冲突后继续或中止",
+                                    short_oid(status.cherry_pick_head()),
+                                    names.len(),
+                                    names.join("、")
+                                )
+                            } else if status.is_empty_commit() {
+                                format!(
+                                    "批量 Cherry-pick 在 {} 未产生新变更（空提交），可选择中止",
+                                    short_oid(status.cherry_pick_head())
+                                )
+                            } else {
+                                format!(
+                                    "批量 Cherry-pick 在 {} 已暂停，请检查状态后继续或中止",
                                     short_oid(status.cherry_pick_head())
                                 )
                             }

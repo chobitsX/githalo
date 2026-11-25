@@ -841,6 +841,13 @@ impl DesktopView {
                         format!("{m}L"),
                         tr("聚焦 Log 历史搜索框", "Search Commit Log"),
                     ),
+                    (
+                        format!("⇧ / {m} + Click · ⇧↑/↓"),
+                        tr(
+                            "Log 多选提交并查看聚合变更",
+                            "Multi-select Commits & Combined Diff",
+                        ),
+                    ),
                 ],
             ),
             (

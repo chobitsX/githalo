@@ -43,6 +43,10 @@ pub enum RepoOpAction {
         preview_id: u64,
         options: RevertOptions,
     },
+    ExecuteRevertBatch {
+        target: WorktreeTarget,
+        oids_newest_first: Vec<String>,
+    },
     MarkRevertResolved {
         status: Arc<RevertStatus>,
         path: PathBuf,
@@ -534,6 +538,53 @@ impl Workspace {
                             }
                         }
                     };
+                    Ok(Effect::Changed(message))
+                });
+            }
+            RepoOpAction::ExecuteRevertBatch {
+                target,
+                oids_newest_first,
+            } => {
+                if self.current_target().as_ref() != Some(&target) {
+                    self.daily_error("工作树已变更，请重新核对 Revert 目标");
+                    return;
+                }
+                if self.writing(target.id) {
+                    self.daily_error("此工作树的 Git 操作仍在进行");
+                    return;
+                }
+                self.cancel_repo_op_preview();
+                let count = oids_newest_first.len();
+                let target_clone = target.clone();
+                self.write(target, move || {
+                    let message =
+                        match history_ops::execute_revert_batch(&target_clone, &oids_newest_first)?
+                        {
+                            RevertOutcome::Reverted { new_head_oid } => format!(
+                                "已批量 Revert {count} 条提交，当前 HEAD {}",
+                                short_oid(&new_head_oid)
+                            ),
+                            RevertOutcome::Stopped { status, .. } => {
+                                if !status.conflicts().is_empty() {
+                                    let names: Vec<_> = status
+                                        .conflicts()
+                                        .iter()
+                                        .map(|p| p.display().to_string())
+                                        .collect();
+                                    format!(
+                                        "批量 Revert 在 {} 遇到冲突（{} 个文件：{}），请解决冲突后继续或中止",
+                                        short_oid(status.revert_head()),
+                                        names.len(),
+                                        names.join("、")
+                                    )
+                                } else {
+                                    format!(
+                                        "批量 Revert 在 {} 已暂停，请检查状态后继续或中止",
+                                        short_oid(status.revert_head())
+                                    )
+                                }
+                            }
+                        };
                     Ok(Effect::Changed(message))
                 });
             }

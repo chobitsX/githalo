@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -40,6 +40,13 @@ pub struct ChangedFile {
     pub path: PathBuf,
     pub status: String,
     pub previous_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommitChangesBundle {
+    pub files: Vec<ChangedFile>,
+    pub bodies: BTreeMap<String, String>,
+    pub contiguous: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -257,6 +264,79 @@ fn read_commit_refs(root: &Path) -> HashMap<String, Vec<CommitRef>> {
     map
 }
 
+/// List all local branches, remote-tracking branches, and tags that contain `oid`,
+/// sorted by priority: current HEAD branch -> local branches -> remote branches -> tags.
+pub fn containing_refs(root: &Path, oid: &str) -> Result<Vec<CommitRef>, String> {
+    if !is_oid(oid.as_bytes()) {
+        return Err("无效的提交 ID".into());
+    }
+    let head_sym = read_command(root)
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| {
+            String::from_utf8_lossy(out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout))
+                .into_owned()
+        });
+
+    let mut cmd = read_command(root);
+    cmd.args([
+        "for-each-ref",
+        &format!("--contains={oid}"),
+        "--format=%(refname)%00%(symref)%00",
+        "--",
+        "refs/heads",
+        "refs/remotes",
+        "refs/tags",
+    ]);
+    let data = run(&mut cmd)?;
+    let mut refs = Vec::new();
+    let mut remaining = data.as_slice();
+    while !remaining.is_empty() {
+        let Some((refname, tail)) = split_nul(remaining) else {
+            break;
+        };
+        let Some((symref, tail)) = split_nul(tail) else {
+            break;
+        };
+        remaining = tail
+            .strip_prefix(b"\n")
+            .or_else(|| tail.strip_prefix(b"\r\n"))
+            .unwrap_or(tail);
+        if !symref.is_empty() {
+            continue;
+        }
+        let refname_str = String::from_utf8_lossy(refname);
+        let entry = if let Some(name) = refname_str.strip_prefix("refs/heads/") {
+            let kind = if head_sym.as_deref() == Some(refname_str.as_ref()) {
+                CommitRefKind::Head
+            } else {
+                CommitRefKind::LocalBranch
+            };
+            CommitRef {
+                name: name.to_owned(),
+                kind,
+            }
+        } else if let Some(name) = refname_str.strip_prefix("refs/remotes/") {
+            CommitRef {
+                name: name.to_owned(),
+                kind: CommitRefKind::RemoteBranch,
+            }
+        } else if let Some(name) = refname_str.strip_prefix("refs/tags/") {
+            CommitRef {
+                name: name.to_owned(),
+                kind: CommitRefKind::Tag,
+            }
+        } else {
+            continue;
+        };
+        refs.push(entry);
+    }
+    refs.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+    Ok(refs)
+}
+
 fn split_nul(data: &[u8]) -> Option<(&[u8], &[u8])> {
     let pos = data.iter().position(|&b| b == 0)?;
     Some((&data[..pos], &data[pos + 1..]))
@@ -309,6 +389,287 @@ fn comparison(root: &Path, oid: &str) -> Result<Command, String> {
 
 pub fn changed_files(root: &Path, oid: &str) -> Result<Vec<ChangedFile>, String> {
     changed_files_from(&mut comparison(root, oid)?)
+}
+
+/// Resolve the first parent of `oid` (returns `Ok(None)` for a root commit, or errors on shallow missing parent).
+fn first_parent_oid(root: &Path, oid: &str) -> Result<Option<String>, String> {
+    if !is_oid(oid.as_bytes()) {
+        return Err("无效的提交 ID".into());
+    }
+    let object = run(read_command(root).args(["cat-file", "commit", oid]))?;
+    let parent = object
+        .split(|b| *b == b'\n')
+        .take_while(|line| !line.is_empty())
+        .find_map(|line| line.strip_prefix(b"parent "));
+    let Some(raw) = parent else {
+        return Ok(None);
+    };
+    let parent = std::str::from_utf8(raw).map_err(|_| "父提交 ID 无效")?;
+    if !is_oid(parent.as_bytes()) {
+        return Err("父提交 ID 无效".into());
+    }
+    let exists = read_command(root)
+        .args(["cat-file", "-e", parent])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !exists.status.success() {
+        return Err("本地缺少父提交，无法比较这次变更（浅克隆或对象缺失）".into());
+    }
+    Ok(Some(parent.to_owned()))
+}
+
+fn empty_tree_oid(root: &Path) -> Result<String, String> {
+    let mut cmd = read_command(root);
+    cmd.args(["hash-object", "-t", "tree", "--stdin"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+    }
+    let oid = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if !is_oid(oid.as_bytes()) {
+        return Err("无法计算空树对象 ID".into());
+    }
+    Ok(oid)
+}
+
+/// Check whether `oids` (ordered newest -> oldest) form a closed contiguous commit range
+/// `base..newest` whose exact commit set equals `oids`. Returns `Some(base_tree_or_commit)` when true.
+fn contiguous_range_base(root: &Path, oids: &[String]) -> Result<Option<String>, String> {
+    if oids.len() < 2 {
+        return Ok(None);
+    }
+    for oid in oids {
+        if !is_oid(oid.as_bytes()) {
+            return Err("无效的提交 ID".into());
+        }
+    }
+    let newest = &oids[0];
+    let oldest = oids.last().expect("at least two oids");
+    let parent = match first_parent_oid(root, oldest) {
+        Ok(parent) => parent,
+        Err(_) => return Ok(None),
+    };
+    let mut cmd = read_command(root);
+    cmd.args(["rev-list", "--no-commit-header"])
+        .arg(format!("--max-count={}", oids.len() + 1));
+    if let Some(base) = parent.as_deref() {
+        cmd.arg(format!("{base}..{newest}"));
+    } else {
+        cmd.arg(newest);
+    }
+    let Ok(data) = run(&mut cmd) else {
+        return Ok(None);
+    };
+    let listed: Vec<&str> = std::str::from_utf8(&data)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if listed.len() != oids.len() {
+        return Ok(None);
+    }
+    let expected: HashSet<&str> = oids.iter().map(String::as_str).collect();
+    if listed.iter().all(|oid| expected.contains(oid)) {
+        match parent {
+            Some(base) => Ok(Some(base)),
+            None => Ok(Some(empty_tree_oid(root)?)),
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Read non-empty commit message bodies for the selected commits (capped at 40 for fast response).
+pub fn commit_bodies(root: &Path, oids: &[String]) -> BTreeMap<String, String> {
+    let mut bodies = BTreeMap::new();
+    let sample: Vec<&str> = oids
+        .iter()
+        .take(40)
+        .map(String::as_str)
+        .filter(|oid| is_oid(oid.as_bytes()))
+        .collect();
+    if sample.is_empty() {
+        return bodies;
+    }
+    let mut cmd = read_command(root);
+    cmd.args([
+        "show",
+        "-s",
+        "--no-show-signature",
+        "--no-color",
+        "-z",
+        "--format=%H%x00%b",
+    ]);
+    for oid in &sample {
+        cmd.arg(oid);
+    }
+    cmd.arg("--");
+    let Ok(data) = run(&mut cmd) else {
+        return bodies;
+    };
+    let mut iter = fields(&data);
+    while let Some(oid_bytes) = iter.next() {
+        let Some(body_bytes) = iter.next() else {
+            break;
+        };
+        let oid = String::from_utf8_lossy(oid_bytes).trim().to_owned();
+        let body = String::from_utf8_lossy(body_bytes).trim().to_owned();
+        if !oid.is_empty() && !body.is_empty() {
+            bodies.insert(oid, body);
+        }
+    }
+    bodies
+}
+
+/// Merge changed file lists across multiple non-contiguous commits (applied oldest -> newest).
+fn merge_changed_files(per_commit: Vec<Vec<ChangedFile>>) -> Vec<ChangedFile> {
+    let mut by_path: BTreeMap<PathBuf, ChangedFile> = BTreeMap::new();
+    for files in per_commit {
+        for file in files {
+            if let Some(prev) = &file.previous_path
+                && let Some(existing) = by_path.remove(prev)
+            {
+                let status = if existing.status.starts_with('A') {
+                    "A".to_owned()
+                } else {
+                    file.status.clone()
+                };
+                let previous_path = if existing.status.starts_with('A') {
+                    None
+                } else {
+                    existing.previous_path.or(file.previous_path.clone())
+                };
+                by_path.insert(
+                    file.path.clone(),
+                    ChangedFile {
+                        path: file.path,
+                        status,
+                        previous_path,
+                    },
+                );
+                continue;
+            }
+            if let Some(existing) = by_path.get_mut(&file.path) {
+                match (
+                    existing.status.as_bytes().first(),
+                    file.status.as_bytes().first(),
+                ) {
+                    (Some(b'A'), Some(b'D')) => {
+                        existing.status = "M".to_owned();
+                    }
+                    (Some(b'A'), _) => {}
+                    (Some(b'D'), Some(b'A')) => {
+                        existing.status = "M".to_owned();
+                    }
+                    _ => {
+                        existing.status = file.status;
+                    }
+                }
+            } else {
+                by_path.insert(file.path.clone(), file);
+            }
+        }
+    }
+    by_path.into_values().collect()
+}
+
+/// Load aggregated changed files and commit message bodies for one or more selected commits
+/// (`oids` ordered newest -> oldest).
+pub fn changed_files_for_commits(
+    root: &Path,
+    oids: &[String],
+) -> Result<CommitChangesBundle, String> {
+    if oids.is_empty() {
+        return Ok(CommitChangesBundle::default());
+    }
+    let bodies = commit_bodies(root, oids);
+    if oids.len() == 1 {
+        let files = changed_files(root, &oids[0])?;
+        return Ok(CommitChangesBundle {
+            files,
+            bodies,
+            contiguous: true,
+        });
+    }
+    if let Some(base) = contiguous_range_base(root, oids)? {
+        let mut cmd = diff_tree(root);
+        cmd.args([&base, &oids[0]]);
+        let files = changed_files_from(&mut cmd)?;
+        return Ok(CommitChangesBundle {
+            files,
+            bodies,
+            contiguous: true,
+        });
+    }
+    let mut per_commit = Vec::with_capacity(oids.len());
+    for oid in oids.iter().rev() {
+        per_commit.push(changed_files(root, oid)?);
+    }
+    Ok(CommitChangesBundle {
+        files: merge_changed_files(per_commit),
+        bodies,
+        contiguous: false,
+    })
+}
+
+/// Load unified diff for `file` across one or more selected commits (`oids` ordered newest -> oldest).
+pub fn file_diff_for_commits(
+    root: &Path,
+    oids: &[String],
+    file: &ChangedFile,
+) -> Result<String, String> {
+    if oids.is_empty() {
+        return Ok(String::new());
+    }
+    if oids.len() == 1 {
+        return file_diff(root, &oids[0], file);
+    }
+    if let Some(base) = contiguous_range_base(root, oids)? {
+        let mut cmd = diff_tree(root);
+        cmd.args([&base, &oids[0]]);
+        return file_diff_from(&mut cmd, file);
+    }
+    let mut sections: Vec<(String, String)> = Vec::new();
+    for oid in oids.iter().rev() {
+        let commit_files = changed_files(root, oid)?;
+        let matching = commit_files.into_iter().find(|entry| {
+            entry.path == file.path
+                || file
+                    .previous_path
+                    .as_ref()
+                    .is_some_and(|prev| &entry.path == prev)
+                || entry
+                    .previous_path
+                    .as_ref()
+                    .is_some_and(|prev| prev == &file.path)
+        });
+        if let Some(matched) = matching {
+            let patch = file_diff(root, oid, &matched)?;
+            if !patch.trim().is_empty() {
+                sections.push((oid.clone(), patch));
+            }
+        }
+    }
+    if sections.is_empty() {
+        return Ok(String::new());
+    }
+    if sections.len() == 1 {
+        return Ok(sections.remove(0).1);
+    }
+    let mut combined = String::new();
+    for (idx, (oid, patch)) in sections.into_iter().enumerate() {
+        if idx > 0 {
+            combined.push('\n');
+        }
+        let short = oid.get(..8).unwrap_or(&oid);
+        combined.push_str(&format!("commit {short}\n"));
+        combined.push_str(&patch);
+    }
+    Ok(combined)
 }
 
 pub(crate) fn changed_files_from(cmd: &mut Command) -> Result<Vec<ChangedFile>, String> {
