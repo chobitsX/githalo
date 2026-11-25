@@ -64,7 +64,7 @@ impl DesktopView {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .bg(rgb(PANEL))
+            .bg(rgb(theme().panel))
             .overflow_hidden()
             .child(
                 div()
@@ -74,14 +74,18 @@ impl DesktopView {
                     .h(rems(2.1875))
                     .px(px(8.))
                     .flex_shrink_0()
-                    .bg(rgb(SIDEBAR_BG))
+                    .bg(rgb(theme().sidebar_bg))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(
                         workspace_tab("log-tab", log_tab_title.clone(), log_active)
                             .child(icon(
                                 Icon::Branch,
-                                if log_active { BRAND_TEXT } else { MUTED },
+                                if log_active {
+                                    theme().brand_text
+                                } else {
+                                    theme().muted
+                                },
                             ))
                             .child(elide(log_tab_title).max_w(px(240.)))
                             .when(!log_active, |tab| {
@@ -138,13 +142,21 @@ impl DesktopView {
                                         .rounded(px(5.))
                                         .border_1()
                                         .border_color(rgb(if is_active {
-                                            BORDER_STRONG
+                                            theme().border_strong
                                         } else {
-                                            SIDEBAR_BG
+                                            theme().sidebar_bg
                                         }))
-                                        .bg(rgb(if is_active { PANEL } else { SIDEBAR_BG }))
+                                        .bg(rgb(if is_active {
+                                            theme().panel
+                                        } else {
+                                            theme().sidebar_bg
+                                        }))
                                         .hover(move |tab| {
-                                            tab.bg(rgb(if is_active { PANEL } else { HOVER }))
+                                            tab.bg(rgb(if is_active {
+                                                theme().panel
+                                            } else {
+                                                theme().hover
+                                            }))
                                         })
                                         .child(file_type_icon(&open.path))
                                         .child(
@@ -154,11 +166,11 @@ impl DesktopView {
                                                     t.font_weight(FontWeight::MEDIUM)
                                                 })
                                                 .text_color(rgb(if dirty {
-                                                    WARNING
+                                                    theme().warning
                                                 } else if is_active {
-                                                    TEXT
+                                                    theme().text
                                                 } else {
-                                                    MUTED
+                                                    theme().muted
                                                 })),
                                         )
                                         .child(
@@ -172,8 +184,11 @@ impl DesktopView {
                                                 .items_center()
                                                 .justify_center()
                                                 .text_size(px(11.))
-                                                .text_color(rgb(SUBTLE))
-                                                .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                                .text_color(rgb(theme().subtle))
+                                                .hover(|s| {
+                                                    s.bg(rgb(theme().hover))
+                                                        .text_color(rgb(theme().text))
+                                                })
                                                 .child("×")
                                                 .on_click(cx.listener(move |view, _, _, cx| {
                                                     cx.stop_propagation();
@@ -209,7 +224,11 @@ impl DesktopView {
                             )
                             .child(icon(
                                 Icon::File,
-                                if commit_diff { BRAND_TEXT } else { MUTED },
+                                if commit_diff {
+                                    theme().brand_text
+                                } else {
+                                    theme().muted
+                                },
                             ))
                             .child(elide(tab_label).max_w(px(180.)))
                             .when(!commit_diff, |tab| {
@@ -247,7 +266,11 @@ impl DesktopView {
                             )
                             .child(icon(
                                 Icon::File,
-                                if working_diff { BRAND_TEXT } else { MUTED },
+                                if working_diff {
+                                    theme().brand_text
+                                } else {
+                                    theme().muted
+                                },
                             ))
                             .child(tr("工作区 Diff", "Working Diff"))
                             .when(!working_diff, |tab| {
@@ -273,7 +296,11 @@ impl DesktopView {
                             workspace_tab("stash-diff-tab", "Stash Diff", stash_diff)
                                 .child(icon(
                                     Icon::File,
-                                    if stash_diff { BRAND_TEXT } else { MUTED },
+                                    if stash_diff {
+                                        theme().brand_text
+                                    } else {
+                                        theme().muted
+                                    },
                                 ))
                                 .child("Stash Diff")
                                 .when(!stash_diff, |tab| {
@@ -297,7 +324,11 @@ impl DesktopView {
                             workspace_tab("shelf-diff-tab", "Shelf Diff", shelf_diff)
                                 .child(icon(
                                     Icon::File,
-                                    if shelf_diff { BRAND_TEXT } else { MUTED },
+                                    if shelf_diff {
+                                        theme().brand_text
+                                    } else {
+                                        theme().muted
+                                    },
                                 ))
                                 .child("Shelf Diff")
                                 .when(!shelf_diff, |tab| {
@@ -342,9 +373,22 @@ impl DesktopView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .when(bcol, |b| b.bg(rgb(SELECT_SOFT)))
-                                .hover(move |s| s.bg(rgb(if bcol { SELECT_SOFT } else { HOVER })))
-                                .child(icon(Icon::PanelLeft, if bcol { BRAND_TEXT } else { MUTED }))
+                                .when(bcol, |b| b.bg(rgb(theme().select_soft)))
+                                .hover(move |s| {
+                                    s.bg(rgb(if bcol {
+                                        theme().select_soft
+                                    } else {
+                                        theme().hover
+                                    }))
+                                })
+                                .child(icon(
+                                    Icon::PanelLeft,
+                                    if bcol {
+                                        theme().brand_text
+                                    } else {
+                                        theme().muted
+                                    },
+                                ))
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.toggle_branches_panel(cx);
                                     view.refresh_app_menus(cx);
@@ -374,13 +418,21 @@ impl DesktopView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .when(details_shown, |b| b.bg(rgb(SELECT_SOFT)))
+                                .when(details_shown, |b| b.bg(rgb(theme().select_soft)))
                                 .hover(move |s| {
-                                    s.bg(rgb(if details_shown { SELECT_SOFT } else { HOVER }))
+                                    s.bg(rgb(if details_shown {
+                                        theme().select_soft
+                                    } else {
+                                        theme().hover
+                                    }))
                                 })
                                 .child(icon(
                                     Icon::PanelRight,
-                                    if details_shown { BRAND_TEXT } else { MUTED },
+                                    if details_shown {
+                                        theme().brand_text
+                                    } else {
+                                        theme().muted
+                                    },
                                 ))
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.show_commit_details = !view.show_commit_details;
@@ -464,7 +516,7 @@ impl DesktopView {
             .flex_shrink_0()
             .items_center()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .child(
                 div()
                     .flex_1()
@@ -476,10 +528,10 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .rounded(px(6.))
-                    .bg(rgb(CARD))
+                    .bg(rgb(theme().card))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .child(icon(Icon::Search, SUBTLE))
+                    .border_color(rgb(theme().border))
+                    .child(icon(Icon::Search, theme().subtle))
                     .child(div().flex_1().min_w_0().child(self.search.clone()))
                     .when(filtered, |box_div| {
                         box_div.child(
@@ -504,12 +556,12 @@ impl DesktopView {
                         .px(px(6.))
                         .py(px(2.))
                         .rounded(px(4.))
-                        .bg(rgb(CARD))
+                        .bg(rgb(theme().card))
                         .border_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(theme().border))
                         .font_family(mono_font())
                         .text_size(px(10.))
-                        .text_color(rgb(SUBTLE))
+                        .text_color(rgb(theme().subtle))
                         .tooltip(tooltip(
                             tr(
                                 "支持过滤语法：author:姓名  branch:分支  after:2026-01-01  before:2026-12-31",
@@ -532,15 +584,15 @@ impl DesktopView {
                         .pl(px(8.))
                         .pr(px(4.))
                         .rounded(px(5.))
-                        .bg(rgb(BRAND_BG))
+                        .bg(rgb(theme().brand_bg))
                         .border_1()
-                        .border_color(rgb(BRAND_BORDER))
+                        .border_color(rgb(theme().brand_border))
                         .text_size(px(11.5))
-                        .child(div().text_color(rgb(SUBTLE)).child(tr("分支:", "Branch:")))
+                        .child(div().text_color(rgb(theme().subtle)).child(tr("分支:", "Branch:")))
                         .child(
                             elide(display.clone())
                                 .max_w(px(150.))
-                                .text_color(rgb(BRAND_TEXT))
+                                .text_color(rgb(theme().brand_text))
                                 .font_weight(FontWeight::MEDIUM),
                         )
                         .child(
@@ -558,8 +610,8 @@ impl DesktopView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_color(rgb(MUTED))
-                                .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                                .text_color(rgb(theme().muted))
+                                .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
                                 .child("×")
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.dispatch(Action::SetBranchFilter(None), cx);
@@ -585,7 +637,7 @@ impl DesktopView {
                 )
             })
             .when(width >= px(340.), |row| {
-                row.child(div().text_size(rems(0.73)).text_color(rgb(SUBTLE)).child(
+                row.child(div().text_size(rems(0.73)).text_color(rgb(theme().subtle)).child(
                     if is_zh() {
                         format!("{count} 条提交")
                     } else {
@@ -607,9 +659,9 @@ impl DesktopView {
                 .flex_shrink_0()
                 .items_center()
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(theme().border))
                 .text_size(rems(0.6875))
-                .text_color(rgb(SUBTLE))
+                .text_color(rgb(theme().subtle))
                 .child(
                     div()
                         .w(px(graph_width))
@@ -688,9 +740,17 @@ impl DesktopView {
                                 .aria_selected(selected)
                                 .tab_index(0)
                                 .relative()
-                                .when(selected, |row| row.bg(rgb(ACTIVE)).child(selection_bar()))
-                                .hover(move |s| s.bg(rgb(if selected { ACTIVE } else { HOVER })))
-                                .focus_visible(|s| s.bg(rgb(ACTIVE)))
+                                .when(selected, |row| {
+                                    row.bg(rgb(theme().active)).child(selection_bar())
+                                })
+                                .hover(move |s| {
+                                    s.bg(rgb(if selected {
+                                        theme().active
+                                    } else {
+                                        theme().hover
+                                    }))
+                                })
+                                .focus_visible(|s| s.bg(rgb(theme().active)))
                                 .child(graph::cell(graph_row, graph_width, natural_width))
                                 .child(commit_columns(commit, width, today_days))
                                 .on_click(window.listener_for(&entity, move |view, _, _, cx| {
@@ -749,7 +809,7 @@ impl DesktopView {
                 .flex()
                 .flex_col()
                 .border_l_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(theme().border))
                 .child(pane_heading(tr("提交详情", "Commit Details"), None))
                 .child(empty(tr(
                     "选择提交后查看详情与变更文件",
@@ -773,7 +833,7 @@ impl DesktopView {
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .child(self.commit_summary(commit, patch_open, cx))
             .child(
                 div()
@@ -784,18 +844,18 @@ impl DesktopView {
                     .flex_shrink_0()
                     .items_center()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(
                         div()
                             .text_size(rems(0.74))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme().muted))
                             .child(tr("变更文件", "Changed Files")),
                     )
                     .children(file_count_label.map(|lbl| {
                         div()
                             .text_size(rems(0.7))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child(lbl)
                     }))
                     .child(div().flex_1())
@@ -804,7 +864,7 @@ impl DesktopView {
                             div()
                                 .flex_shrink_0()
                                 .text_size(px(10.5))
-                                .text_color(rgb(SUBTLE))
+                                .text_color(rgb(theme().subtle))
                                 .child(tr("单击预览 · 双击展开", "Click preview · Dbl-click")),
                         )
                     }),
@@ -895,15 +955,15 @@ impl DesktopView {
             .aria_level(depth + 1)
             .aria_expanded(expanded)
             .tab_index(0)
-            .hover(|style| style.bg(rgb(HOVER)))
-            .focus_visible(|s| s.bg(rgb(HOVER)))
+            .hover(|style| style.bg(rgb(theme().hover)))
+            .focus_visible(|s| s.bg(rgb(theme().hover)))
             .child(icon(
                 if expanded {
                     Icon::ChevronDown
                 } else {
                     Icon::ChevronRight
                 },
-                SUBTLE,
+                theme().subtle,
             ))
             .child(folder_type_icon(&name, expanded))
             .child(elide(name))
@@ -931,10 +991,10 @@ impl DesktopView {
             None => file_name(&path),
         };
         let (status_fg, status_bg) = match file.status.as_bytes().first() {
-            Some(b'A') => (SUCCESS, SUCCESS_BG),
-            Some(b'D') => (ERROR, DANGER_BG),
-            Some(b'R' | b'C') => (WARNING, WARN_BG),
-            _ => (LINK, ACCENT_BG),
+            Some(b'A') => (theme().success, theme().success_bg),
+            Some(b'D') => (theme().error, theme().danger_bg),
+            Some(b'R' | b'C') => (theme().warning, theme().warn_bg),
+            _ => (theme().link, theme().accent_bg),
         };
         let location = file.previous_path.as_ref().map_or_else(
             || path.display().to_string(),
@@ -953,12 +1013,20 @@ impl DesktopView {
             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
                 view.set_hovered_hint(hovered.then(|| hover_loc.clone()), cx);
             }))
-            .when(selected, |row| row.bg(rgb(ACTIVE)).child(selection_bar()))
-            .hover(move |s| s.bg(rgb(if selected { ACTIVE } else { HOVER })))
-            .focus_visible(|s| s.bg(rgb(ACTIVE)))
-            .child(optional_icon(None, SUBTLE))
+            .when(selected, |row| {
+                row.bg(rgb(theme().active)).child(selection_bar())
+            })
+            .hover(move |s| {
+                s.bg(rgb(if selected {
+                    theme().active
+                } else {
+                    theme().hover
+                }))
+            })
+            .focus_visible(|s| s.bg(rgb(theme().active)))
+            .child(optional_icon(None, theme().subtle))
             .child(file_type_icon(&path))
-            .child(elide(name).flex_1().text_color(rgb(TEXT)))
+            .child(elide(name).flex_1().text_color(rgb(theme().text)))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1023,8 +1091,8 @@ impl DesktopView {
             .when(compact, |d| d.max_h(px(138.)).overflow_y_scroll())
             .when(!compact, |d| d.max_h(px(236.)).overflow_y_scroll())
             .border_b_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(SIDEBAR_BG))
+            .border_color(rgb(theme().border))
+            .bg(rgb(theme().sidebar_bg))
             .px(px(13.))
             .py(px(if compact { 9. } else { 12. }))
             .flex()
@@ -1045,7 +1113,7 @@ impl DesktopView {
                     .text_size(rems(0.85))
                     .line_height(rems(1.25))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(theme().text))
                     .child(subject(commit).to_owned()),
             )
             .child(
@@ -1059,13 +1127,13 @@ impl DesktopView {
                     .child(
                         elide(commit.author.clone())
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(TEXT)),
+                            .text_color(rgb(theme().text)),
                     )
                     .child(
                         elide(date_display)
                             .flex_1()
                             .text_size(rems(0.72))
-                            .text_color(rgb(SUBTLE)),
+                            .text_color(rgb(theme().subtle)),
                     ),
             )
             .child(
@@ -1075,7 +1143,7 @@ impl DesktopView {
                     .items_center()
                     .gap(px(8.))
                     .text_size(rems(0.72))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child(
                         div()
                             .flex()
@@ -1095,15 +1163,15 @@ impl DesktopView {
                                     .px(px(5.))
                                     .py(px(1.))
                                     .rounded(px(4.))
-                                    .bg(rgb(ACCENT_BG))
+                                    .bg(rgb(theme().accent_bg))
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
                                     .font_family(mono_font())
-                                    .text_color(rgb(LINK))
-                                    .hover(|s| s.bg(rgb(HOVER)))
+                                    .text_color(rgb(theme().link))
+                                    .hover(|s| s.bg(rgb(theme().hover)))
                                     .child(short_oid)
-                                    .child(icon(Icon::Copy, SUBTLE))
+                                    .child(icon(Icon::Copy, theme().subtle))
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             oid.clone(),
@@ -1125,7 +1193,7 @@ impl DesktopView {
                                 .child(
                                     div()
                                         .font_family(mono_font())
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(theme().muted))
                                         .child(parents),
                                 ),
                         )
@@ -1186,8 +1254,8 @@ impl DesktopView {
                             )
                             .size(px(25.))
                             .border_1()
-                            .border_color(rgb(BORDER_STRONG))
-                            .bg(rgb(CARD))
+                            .border_color(rgb(theme().border_strong))
+                            .bg(rgb(theme().card))
                             .on_click(cx.listener(
                                 move |view, event: &gpui::ClickEvent, window, cx| {
                                     view.open_menu(
@@ -1262,7 +1330,7 @@ impl DesktopView {
                     .px(px(9.))
                     .gap(px(6.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(
                         command_button("expanded-prev-file", "←", false, prev_path.is_some())
                             .h(px(23.))
@@ -1281,7 +1349,7 @@ impl DesktopView {
                             div()
                                 .flex_shrink_0()
                                 .text_size(px(11.))
-                                .text_color(rgb(SUBTLE))
+                                .text_color(rgb(theme().subtle))
                                 .child(text),
                         )
                     })
@@ -1299,7 +1367,12 @@ impl DesktopView {
                             }),
                     )
                     .when_some(status_badge, |bar, status| {
-                        bar.child(pill(status, ACCENT_BG, ACCENT_BORDER, LINK))
+                        bar.child(pill(
+                            status,
+                            theme().accent_bg,
+                            theme().accent_border,
+                            theme().link,
+                        ))
                     })
                     .child(
                         div()
@@ -1367,7 +1440,7 @@ impl DesktopView {
             .min_h_0()
             .min_w_0()
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .child(
                 div()
                     .h(px(32.))
@@ -1377,8 +1450,13 @@ impl DesktopView {
                     .px(px(7.))
                     .gap(px(5.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(div().flex_shrink_0().text_color(rgb(SUBTLE)).child("Diff"))
+                    .border_color(rgb(theme().border))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(rgb(theme().subtle))
+                            .child("Diff"),
+                    )
                     .child(
                         div()
                             .id("diff-path")
@@ -1463,11 +1541,11 @@ fn pane_heading(title: &'static str, subtitle: Option<String>) -> Div {
         .flex_shrink_0()
         .items_center()
         .border_b_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(theme().border))
         .child(div().font_weight(FontWeight::MEDIUM).child(title))
         .children(subtitle.map(|subtitle| {
             div()
-                .text_color(rgb(SUBTLE))
+                .text_color(rgb(theme().subtle))
                 .text_size(rems(0.74))
                 .child(subtitle)
         }))
@@ -1508,7 +1586,12 @@ fn commit_columns(commit: &Commit, width: Pixels, today_days: Option<i64>) -> im
                 .when(!commit.refs.is_empty(), |row| {
                     row.children(commit.refs.iter().take(max_refs).map(ref_pill))
                         .when(extra_refs > 0, |row| {
-                            row.child(pill(format!("+{extra_refs}"), CARD, BORDER_STRONG, MUTED))
+                            row.child(pill(
+                                format!("+{extra_refs}"),
+                                theme().card,
+                                theme().border_strong,
+                                theme().muted,
+                            ))
                         })
                 })
                 .child(subj_view),
@@ -1527,7 +1610,7 @@ fn commit_columns(commit: &Commit, width: Pixels, today_days: Option<i64>) -> im
                         elide(commit.author.clone())
                             .flex_1()
                             .text_size(rems(0.76))
-                            .text_color(rgb(MUTED)),
+                            .text_color(rgb(theme().muted)),
                     ),
             )
         })
@@ -1538,7 +1621,7 @@ fn commit_columns(commit: &Commit, width: Pixels, today_days: Option<i64>) -> im
                     .flex_shrink_0()
                     .text_align(TextAlign::Right)
                     .text_size(rems(0.74))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child(rel),
             )
         })
@@ -1561,14 +1644,14 @@ fn render_styled_subject(raw: &str) -> Div {
                 (
                     0..p_len,
                     HighlightStyle {
-                        color: Some(rgb(MUTED).into()),
+                        color: Some(rgb(theme().muted).into()),
                         ..Default::default()
                     },
                 ),
                 (
                     p_len..full.len(),
                     HighlightStyle {
-                        color: Some(rgb(TEXT).into()),
+                        color: Some(rgb(theme().text).into()),
                         ..Default::default()
                     },
                 ),
@@ -1584,14 +1667,12 @@ fn render_styled_subject(raw: &str) -> Div {
 }
 
 fn author_avatar(author: &str, size_px: f32) -> Div {
-    const PALETTE: [u32; 8] = [
-        0x8ed6c6, 0x9abaff, 0xc9abff, 0xedc87e, 0x98dba6, 0xf2ab9b, 0x8cd0eb, 0xe0a5c8,
-    ];
+    let t = theme();
     let mut hash: usize = 5381;
     for b in author.bytes() {
         hash = hash.wrapping_mul(33).wrapping_add(b as usize);
     }
-    let bg = PALETTE[hash % PALETTE.len()];
+    let bg = t.avatar_palette[hash % t.avatar_palette.len()];
     let initials = extract_initials(author);
     div()
         .size(px(size_px))
@@ -1603,7 +1684,7 @@ fn author_avatar(author: &str, size_px: f32) -> Div {
         .justify_center()
         .text_size(px((size_px * 0.52).max(9.)))
         .font_weight(FontWeight::BOLD)
-        .text_color(rgb(0x0f1316))
+        .text_color(rgb(t.avatar_fg))
         .child(initials)
 }
 
@@ -1683,29 +1764,34 @@ fn ref_pill(reference: &CommitRef) -> Div {
     match reference.kind {
         CommitRefKind::Head => pill(
             format!("● {}", reference.name),
-            BRAND_BG,
-            BRAND_BORDER,
-            BRAND_TEXT,
+            theme().brand_bg,
+            theme().brand_border,
+            theme().brand_text,
         )
         .font_weight(FontWeight::MEDIUM)
         .max_w(px(140.))
         .truncate(),
-        CommitRefKind::LocalBranch => pill(reference.name.clone(), ACCENT_BG, ACCENT_BORDER, LINK)
-            .max_w(px(130.))
-            .truncate(),
+        CommitRefKind::LocalBranch => pill(
+            reference.name.clone(),
+            theme().accent_bg,
+            theme().accent_border,
+            theme().link,
+        )
+        .max_w(px(130.))
+        .truncate(),
         CommitRefKind::RemoteBranch => pill(
             reference.name.clone(),
-            REMOTE_BG,
-            REMOTE_BORDER,
-            REMOTE_TEXT,
+            theme().remote_bg,
+            theme().remote_border,
+            theme().remote_text,
         )
         .max_w(px(145.))
         .truncate(),
         CommitRefKind::Tag => pill(
             format!("⚑ {}", reference.name),
-            WARN_BG,
-            WARN_BORDER,
-            WARNING,
+            theme().warn_bg,
+            theme().warn_border,
+            theme().warning,
         )
         .max_w(px(110.))
         .truncate(),
@@ -1771,6 +1857,11 @@ pub(super) struct HistoryScrollReset {
 }
 
 impl HistoryDetails {
+    pub(super) fn invalidate_patch(&mut self) {
+        self.patch = None;
+        self.selection.file = None;
+    }
+
     pub(super) fn update(&mut self, workspace: &Workspace) -> HistoryScrollReset {
         let worktree = workspace
             .selected
@@ -1913,12 +2004,35 @@ pub(super) struct ParsedPatch {
     pub(super) split_rows: Vec<SplitDiffRow>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DiffLineTone {
+    Hunk,
+    Removed,
+    Added,
+    Context,
+    Subtle,
+    Meta,
+}
+
+impl DiffLineTone {
+    fn colors(self) -> (u32, u32) {
+        let t = theme();
+        match self {
+            Self::Hunk => (t.link, t.diff_hunk_bg),
+            Self::Removed => (t.diff_removed_fg, t.diff_removed_bg),
+            Self::Added => (t.diff_added_fg, t.diff_added_bg),
+            Self::Context => (t.text, t.panel),
+            Self::Subtle => (t.subtle, t.panel),
+            Self::Meta => (t.muted, t.panel),
+        }
+    }
+}
+
 pub(super) struct DiffLine {
     old: Option<usize>,
     new: Option<usize>,
     pub(super) text: SharedString,
-    color: u32,
-    background: u32,
+    tone: DiffLineTone,
     syntax: Vec<SyntaxSpan>,
 }
 
@@ -1990,11 +2104,24 @@ impl SplitCell {
     }
 
     fn render(&self) -> Div {
+        let t = theme();
         let (bg, fg, mark, mark_color, highlight_bg) = match self.kind {
-            SplitCellKind::Context => (PANEL, TEXT, " ", SUBTLE, PANEL),
-            SplitCellKind::Removed => (0x352527, 0xf0aca9, "-", 0xe87b77, 0x5d292e),
-            SplitCellKind::Added => (0x213128, 0xabd5a5, "+", 0x6ec97a, 0x1e5735),
-            SplitCellKind::Empty => (0x181a1e, SUBTLE, " ", SUBTLE, 0x181a1e),
+            SplitCellKind::Context => (t.panel, t.text, " ", t.subtle, t.panel),
+            SplitCellKind::Removed => (
+                t.diff_removed_bg,
+                t.diff_removed_fg,
+                "-",
+                t.diff_removed_mark,
+                t.diff_removed_word_bg,
+            ),
+            SplitCellKind::Added => (
+                t.diff_added_bg,
+                t.diff_added_fg,
+                "+",
+                t.diff_added_mark,
+                t.diff_added_word_bg,
+            ),
+            SplitCellKind::Empty => (t.diff_empty_bg, t.subtle, " ", t.subtle, t.diff_empty_bg),
         };
         let mut code = div()
             .flex()
@@ -2046,7 +2173,7 @@ impl SplitCell {
                     .flex_shrink_0()
                     .pr(px(3.))
                     .text_align(TextAlign::Right)
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child(
                         self.line_no
                             .map_or_else(String::new, |number| number.to_string()),
@@ -2067,8 +2194,7 @@ impl SplitCell {
 pub(super) enum SplitDiffRow {
     Banner {
         text: SharedString,
-        color: u32,
-        background: u32,
+        tone: DiffLineTone,
         hunk_order: Option<usize>,
     },
     Pair {
@@ -2090,20 +2216,23 @@ impl SplitDiffRow {
             .line_height(rems(1.2))
             .whitespace_nowrap();
         match self {
-            Self::Banner {
-                text,
-                color,
-                background,
-                ..
-            } => base
-                .px(px(10.))
-                .bg(rgb(*background))
-                .text_color(rgb(*color))
-                .overflow_hidden()
-                .child(elide(text.clone())),
+            Self::Banner { text, tone, .. } => {
+                let (color, background) = tone.colors();
+                base.px(px(10.))
+                    .bg(rgb(background))
+                    .text_color(rgb(color))
+                    .overflow_hidden()
+                    .child(elide(text.clone()))
+            }
             Self::Pair { left, right } => base
                 .child(left.render())
-                .child(div().w(px(1.)).h_full().flex_shrink_0().bg(rgb(BORDER)))
+                .child(
+                    div()
+                        .w(px(1.))
+                        .h_full()
+                        .flex_shrink_0()
+                        .bg(rgb(theme().border)),
+                )
                 .child(right.render()),
         }
     }
@@ -2116,14 +2245,20 @@ pub(super) fn split_column_header(left_label: &'static str, right_label: &'stati
         .w_full()
         .flex()
         .items_center()
-        .bg(rgb(CHROME))
+        .bg(rgb(theme().chrome))
         .border_b_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(theme().border))
         .text_size(rems(0.74))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(SUBTLE))
+        .text_color(rgb(theme().subtle))
         .child(div().w_1_2().flex_shrink_0().px(px(10.)).child(left_label))
-        .child(div().w(px(1.)).h_full().flex_shrink_0().bg(rgb(BORDER)))
+        .child(
+            div()
+                .w(px(1.))
+                .h_full()
+                .flex_shrink_0()
+                .bg(rgb(theme().border)),
+        )
         .child(div().w_1_2().flex_shrink_0().px(px(10.)).child(right_label))
 }
 
@@ -2188,12 +2323,13 @@ fn mono_font() -> &'static str {
 
 impl DiffLine {
     pub(super) fn row(&self) -> Div {
+        let (color, background) = self.tone.colors();
         let number = |value: Option<usize>| {
             div()
                 .w(px(41.))
                 .flex_shrink_0()
                 .text_align(TextAlign::Right)
-                .text_color(rgb(SUBTLE))
+                .text_color(rgb(theme().subtle))
                 .child(value.map_or_else(String::new, |number| number.to_string()))
         };
         div()
@@ -2203,7 +2339,7 @@ impl DiffLine {
             .h(rems(1.375))
             .gap(px(4.))
             .pr(px(12.))
-            .bg(rgb(self.background))
+            .bg(rgb(background))
             .font_family(mono_font())
             .text_size(rems(0.78))
             .line_height(rems(1.2))
@@ -2214,7 +2350,7 @@ impl DiffLine {
                 div()
                     .flex_shrink_0()
                     .pl(px(6.))
-                    .text_color(rgb(self.color))
+                    .text_color(rgb(color))
                     .child(if self.syntax.is_empty() {
                         self.text.clone().into_any_element()
                     } else {
@@ -2222,8 +2358,8 @@ impl DiffLine {
                             &self.text,
                             &self.syntax,
                             None,
-                            self.background,
-                            self.color,
+                            background,
+                            color,
                         );
                         StyledText::new(self.text.clone())
                             .with_highlights(highlights)
@@ -2315,7 +2451,7 @@ impl ParsedPatch {
                 let mut new = None;
                 let mut is_code_line = false;
                 let text = line.replace('\t', "    ");
-                let (color, background) = if line.starts_with("@@ ") {
+                let tone = if line.starts_with("@@ ") {
                     flush_block(
                         &mut pending_removed,
                         &mut pending_added,
@@ -2328,12 +2464,11 @@ impl ParsedPatch {
                     hunk_order += 1;
                     split_rows.push(SplitDiffRow::Banner {
                         text: text.clone().into(),
-                        color: LINK,
-                        background: 0x202b3c,
+                        tone: DiffLineTone::Hunk,
                         hunk_order: Some(order),
                     });
                     split_row_paths.push(current_path.clone());
-                    (LINK, 0x202b3c)
+                    DiffLineTone::Hunk
                 } else if let Some((old_number, new_number, old_left, new_left)) = hunk.as_mut() {
                     let prefix = line.as_bytes().first().copied();
                     if *old_left > 0 && matches!(prefix, Some(b'-' | b' ')) {
@@ -2363,12 +2498,12 @@ impl ParsedPatch {
                                 );
                             }
                             pending_removed.push((old, stripped));
-                            (0xf0aca9, 0x352527)
+                            DiffLineTone::Removed
                         }
                         (false, true) => {
                             is_code_line = true;
                             pending_added.push((new, stripped));
-                            (0xabd5a5, 0x213128)
+                            DiffLineTone::Added
                         }
                         _ => {
                             flush_block(
@@ -2381,8 +2516,7 @@ impl ParsedPatch {
                             if line.starts_with('\\') {
                                 split_rows.push(SplitDiffRow::Banner {
                                     text: text.clone().into(),
-                                    color: SUBTLE,
-                                    background: PANEL,
+                                    tone: DiffLineTone::Subtle,
                                     hunk_order: None,
                                 });
                                 split_row_paths.push(current_path.clone());
@@ -2398,7 +2532,7 @@ impl ParsedPatch {
                                 });
                                 split_row_paths.push(current_path.clone());
                             }
-                            (TEXT, PANEL)
+                            DiffLineTone::Context
                         }
                     }
                 } else {
@@ -2419,13 +2553,12 @@ impl ParsedPatch {
                     {
                         split_rows.push(SplitDiffRow::Banner {
                             text: text.clone().into(),
-                            color: MUTED,
-                            background: PANEL,
+                            tone: DiffLineTone::Meta,
                             hunk_order: None,
                         });
                         split_row_paths.push(current_path.clone());
                     }
-                    (MUTED, PANEL)
+                    DiffLineTone::Meta
                 };
                 let columns = text.chars().count();
                 if columns >= max_columns {
@@ -2436,8 +2569,7 @@ impl ParsedPatch {
                 DiffLine {
                     old,
                     new,
-                    color,
-                    background,
+                    tone,
                     text: text.into(),
                     syntax: Vec::new(),
                 }
@@ -2946,8 +3078,8 @@ mod tests {
                     &right.full_code(),
                     &right.syntax,
                     None,
-                    0x1e5735,
-                    0xabd5a5,
+                    theme().diff_added_word_bg,
+                    theme().diff_added_fg,
                 );
                 assert!(!merged.is_empty());
                 for (range, _) in &merged {

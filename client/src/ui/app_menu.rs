@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use githalo::i18n::{LanguagePreference, tr};
+use githalo::theme::ThemePreference;
 use githalo::workspace::{Action, DailyAction, Panel};
 use gpui::{
     App, ClipboardItem, Context, Div, Focusable, FontWeight, KeyBinding, Menu, MenuItem, OsAction,
@@ -59,6 +60,9 @@ actions!(
         ShowPanelShelf,
         SetDiffSideBySide,
         SetDiffUnified,
+        SetThemeSystem,
+        SetThemeLight,
+        SetThemeDark,
         SetLangSystem,
         SetLangZh,
         SetLangEn,
@@ -98,6 +102,7 @@ pub(super) struct AppMenuState {
     pub(super) show_branches_panel: bool,
     pub(super) show_commit_details: bool,
     pub(super) diff_side_by_side: bool,
+    pub(super) theme_pref: ThemePreference,
     pub(super) language_pref: LanguagePreference,
     pub(super) ui_scale: u16,
     pub(super) panel: Panel,
@@ -110,6 +115,7 @@ impl Default for AppMenuState {
             show_branches_panel: false,
             show_commit_details: true,
             diff_side_by_side: true,
+            theme_pref: ThemePreference::System,
             language_pref: LanguagePreference::System,
             ui_scale: 100,
             panel: Panel::Repositories,
@@ -274,6 +280,16 @@ pub(super) fn set_menus(cx: &mut App, state: AppMenuState) {
                     .checked(!state.diff_side_by_side),
             ]),
         ),
+        MenuItem::submenu(
+            Menu::new(tr("外观主题", "Appearance")).items([
+                MenuItem::action(tr("跟随系统", "Follow System"), SetThemeSystem)
+                    .checked(state.theme_pref == ThemePreference::System),
+                MenuItem::action(tr("浅色主题", "Light"), SetThemeLight)
+                    .checked(state.theme_pref == ThemePreference::Light),
+                MenuItem::action(tr("深色主题", "Dark"), SetThemeDark)
+                    .checked(state.theme_pref == ThemePreference::Dark),
+            ]),
+        ),
         MenuItem::submenu(Menu::new(tr("界面缩放", "Interface Scale")).items([
             MenuItem::action(tr("放大", "Zoom In"), ZoomIn),
             MenuItem::action(tr("缩小", "Zoom Out"), ZoomOut),
@@ -359,6 +375,7 @@ impl DesktopView {
             show_branches_panel: self.show_branches_panel,
             show_commit_details: self.show_commit_details,
             diff_side_by_side: self.diff_side_by_side,
+            theme_pref: self.theme_pref,
             language_pref: self.language_pref,
             ui_scale: self.ui_scale,
             panel: self.workspace.panel,
@@ -553,6 +570,15 @@ impl DesktopView {
             view.set_diff_side_by_side(false, cx);
             view.refresh_app_menus(cx);
         }))
+        .on_action(cx.listener(|view, _: &SetThemeSystem, window, cx| {
+            view.set_theme(ThemePreference::System, window, cx);
+        }))
+        .on_action(cx.listener(|view, _: &SetThemeLight, window, cx| {
+            view.set_theme(ThemePreference::Light, window, cx);
+        }))
+        .on_action(cx.listener(|view, _: &SetThemeDark, window, cx| {
+            view.set_theme(ThemePreference::Dark, window, cx);
+        }))
         .on_action(cx.listener(|view, _: &SetLangSystem, _, cx| {
             view.set_language(LanguagePreference::System, cx);
         }))
@@ -679,12 +705,12 @@ impl DesktopView {
                     .items_center()
                     .gap(px(10.))
                     .child(dialog_heading("GitHalo"))
-                    .child(pill(format!("v{version}"), ACCENT_BG, ACCENT_BORDER, LINK)),
+                    .child(pill(format!("v{version}"), theme().accent_bg, theme().accent_border, theme().link)),
             )
             .child(
                 div()
                     .text_size(px(12.5))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme().muted))
                     .line_height(px(18.))
                     .child(tr(
                         "基于 Rust + GPUI 构建的开源原生高性能桌面 Git 客户端，集多仓分组同步看板、完整 Git 工作流、专业代码编辑器与语法高亮 Diff 于一体。",
@@ -695,14 +721,14 @@ impl DesktopView {
                 div()
                     .rounded(px(6.))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL))
+                    .border_color(rgb(theme().border))
+                    .bg(rgb(theme().panel))
                     .p(px(10.))
                     .flex()
                     .flex_col()
                     .gap(px(4.))
                     .text_size(px(11.5))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child(format!(
                         "{}: Rust 2024 + GPUI + syntect",
                         tr("核心技术栈", "Engine")
@@ -864,15 +890,15 @@ impl DesktopView {
                                 div()
                                     .text_size(px(11.5))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(LINK))
+                                    .text_color(rgb(theme().link))
                                     .child(title),
                             )
                             .child(
                                 div()
                                     .rounded(px(6.))
                                     .border_1()
-                                    .border_color(rgb(BORDER))
-                                    .bg(rgb(PANEL))
+                                    .border_color(rgb(theme().border))
+                                    .bg(rgb(theme().panel))
                                     .p(px(6.))
                                     .flex()
                                     .flex_col()
@@ -888,7 +914,7 @@ impl DesktopView {
                                             .child(
                                                 div()
                                                     .text_size(px(12.))
-                                                    .text_color(rgb(TEXT))
+                                                    .text_color(rgb(theme().text))
                                                     .child(desc),
                                             )
                                             .child(
@@ -897,12 +923,12 @@ impl DesktopView {
                                                     .px(px(6.))
                                                     .py(px(1.))
                                                     .rounded(px(4.))
-                                                    .bg(rgb(CARD))
+                                                    .bg(rgb(theme().card))
                                                     .border_1()
-                                                    .border_color(rgb(BORDER))
+                                                    .border_color(rgb(theme().border))
                                                     .font_family("Menlo")
                                                     .text_size(px(11.))
-                                                    .text_color(rgb(MUTED))
+                                                    .text_color(rgb(theme().muted))
                                                     .child(keys),
                                             )
                                     })),

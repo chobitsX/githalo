@@ -496,7 +496,7 @@ impl DesktopView {
                     .rounded(px(3.))
                     .px(px(4.))
                     .py(px(3.))
-                    .focus_visible(|row| row.bg(rgb(HOVER)))
+                    .focus_visible(|row| row.bg(rgb(theme().hover)))
                     .child(check_indicator(form.checkout))
                     .child("创建后切换")
                     .on_click(cx.listener(|view, _, _, cx| {
@@ -509,7 +509,7 @@ impl DesktopView {
             .children(
                 form.error
                     .clone()
-                    .map(|error| div().text_color(rgb(ERROR)).child(error)),
+                    .map(|error| div().text_color(rgb(theme().error)).child(error)),
             )
             .child(self.review_buttons(
                 "create-branch",
@@ -612,7 +612,7 @@ impl DesktopView {
         let branch_chips = match remote_branches {
             _ if loading => div()
                 .text_size(px(11.5))
-                .text_color(rgb(SUBTLE))
+                .text_color(rgb(theme().subtle))
                 .child("正在读取远端跟踪分支…")
                 .into_any_element(),
             Some(list) if !list.is_empty() => {
@@ -623,8 +623,8 @@ impl DesktopView {
                     .overflow_y_scroll()
                     .rounded(px(6.))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL))
+                    .border_color(rgb(theme().border))
+                    .bg(rgb(theme().panel))
                     .p(px(4.))
                     .flex()
                     .flex_col()
@@ -639,7 +639,7 @@ impl DesktopView {
                             .px(px(8.))
                             .py(px(5.))
                             .rounded(px(4.))
-                            .hover(|s| s.bg(rgb(ACTIVE)))
+                            .hover(|s| s.bg(rgb(theme().active)))
                             .text_size(px(12.))
                             .child(name.clone())
                             .on_click(cx.listener(move |_, _, _, cx| {
@@ -651,7 +651,7 @@ impl DesktopView {
             }
             _ => div()
                 .text_size(px(11.5))
-                .text_color(rgb(SUBTLE))
+                .text_color(rgb(theme().subtle))
                 .child("尚未发现远端跟踪分支（可先执行 Fetch 或手动输入 remote/branch）")
                 .into_any_element(),
         };
@@ -680,7 +680,7 @@ impl DesktopView {
                     .child(
                         div()
                             .text_size(px(11.5))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme().muted))
                             .child("目标上游分支（点击下方候选快速填入或手动输入）"),
                     )
                     .child(form.input.clone())
@@ -689,7 +689,7 @@ impl DesktopView {
             .children(
                 form.error
                     .clone()
-                    .map(|error| div().text_color(rgb(ERROR)).child(error)),
+                    .map(|error| div().text_color(rgb(theme().error)).child(error)),
             )
             .child(
                 div()
@@ -926,7 +926,7 @@ impl DesktopView {
                                 .rounded(px(4.))
                                 .px(px(6.))
                                 .py(px(4.))
-                                .hover(|s| s.bg(rgb(HOVER)))
+                                .hover(|s| s.bg(rgb(theme().hover)))
                                 .child(check_indicator(push_after))
                                 .child("提交完成后立即打开 Push 预览（Commit & Push）")
                                 .on_click(cx.listener(|view, _, _, cx| {
@@ -964,10 +964,10 @@ impl DesktopView {
                                         ListHorizontalSizingBehavior::Unconstrained,
                                     )
                                     .h((viewport_height * 0.35).clamp(px(100.), px(270.)))
-                                    .bg(rgb(PANEL))
+                                    .bg(rgb(theme().panel))
                                     .rounded(px(4.))
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(theme().border))
                                 }),
                         )
                 }
@@ -975,13 +975,13 @@ impl DesktopView {
             },
             None => {
                 let (message, color) = if !current {
-                    ("选中的仓库已变更，请重新选择操作", ERROR)
+                    ("选中的仓库已变更，请重新选择操作", theme().error)
                 } else if daily.preparing {
-                    ("正在读取操作预览…", SUBTLE)
+                    ("正在读取操作预览…", theme().subtle)
                 } else if let Some(error) = &daily.error {
-                    (error.as_str(), ERROR)
+                    (error.as_str(), theme().error)
                 } else {
-                    ("预览已更新，请重新选择操作", SUBTLE)
+                    ("预览已更新，请重新选择操作", theme().subtle)
                 };
                 div().text_color(rgb(color)).child(message.to_owned())
             }
@@ -1119,7 +1119,7 @@ impl DesktopView {
                             div()
                                 .text_size(px(12.))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(theme().muted))
                                 .child(tr("更新策略（Pull Strategy）", "Pull Strategy")),
                         )
                         .child(div().flex().gap(px(6.)).children(
@@ -1136,19 +1136,33 @@ impl DesktopView {
                                     .rounded(px(5.))
                                     .border_1()
                                     .border_color(rgb(if selected {
-                                        ACCENT_BORDER
+                                        theme().accent_border
                                     } else {
-                                        BORDER
+                                        theme().border
                                     }))
-                                    .bg(rgb(if selected { ACCENT_BG } else { CARD }))
-                                    .text_color(rgb(if selected { LINK } else { TEXT }))
+                                    .bg(rgb(if selected {
+                                        theme().accent_bg
+                                    } else {
+                                        theme().card
+                                    }))
+                                    .text_color(rgb(if selected {
+                                        theme().link
+                                    } else {
+                                        theme().text
+                                    }))
                                     .text_size(px(12.))
                                     .font_weight(if selected {
                                         FontWeight::MEDIUM
                                     } else {
                                         FontWeight::NORMAL
                                     })
-                                    .hover(|s| s.bg(rgb(if selected { ACCENT_BG } else { HOVER })))
+                                    .hover(|s| {
+                                        s.bg(rgb(if selected {
+                                            theme().accent_bg
+                                        } else {
+                                            theme().hover
+                                        }))
+                                    })
                                     .child(item.label())
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         if let Some(Overlay::Dialog(Dialog::GitReview {
@@ -1165,7 +1179,7 @@ impl DesktopView {
                         .child(
                             div()
                                 .text_size(px(11.5))
-                                .text_color(rgb(SUBTLE))
+                                .text_color(rgb(theme().subtle))
                                 .child(current.description()),
                         ),
                 );
@@ -1182,22 +1196,22 @@ impl DesktopView {
                             .py(px(7.))
                             .rounded(px(6.))
                             .border_1()
-                            .border_color(rgb(ACCENT_BORDER))
-                            .bg(rgb(ACCENT_BG))
+                            .border_color(rgb(theme().accent_border))
+                            .bg(rgb(theme().accent_bg))
                             .flex()
                             .items_center()
                             .gap(px(8.))
                             .child(pill(
                                 format!("上界 {}", oid.get(..8).unwrap_or(oid)),
-                                CARD,
-                                ACCENT_BORDER,
-                                LINK,
+                                theme().card,
+                                theme().accent_border,
+                                theme().link,
                             ))
                             .child(
                                 elide(format!("仅推送至提交：{subject}"))
                                     .flex_1()
                                     .text_size(px(12.))
-                                    .text_color(rgb(TEXT)),
+                                    .text_color(rgb(theme().text)),
                             ),
                     );
                 }
@@ -1216,7 +1230,7 @@ impl DesktopView {
                             .rounded(px(4.))
                             .px(px(6.))
                             .py(px(4.))
-                            .hover(|s| s.bg(rgb(HOVER)))
+                            .hover(|s| s.bg(rgb(theme().hover)))
                             .child(check_indicator(force))
                             .child(tr(
                                 "安全强制推送（--force-with-lease）",
@@ -1240,10 +1254,10 @@ impl DesktopView {
                                 .py(px(7.))
                                 .rounded(px(6.))
                                 .border_1()
-                                .border_color(rgb(DANGER_BORDER))
-                                .bg(rgb(DANGER_BG))
+                                .border_color(rgb(theme().danger_border))
+                                .bg(rgb(theme().danger_bg))
                                 .text_size(px(11.5))
-                                .text_color(rgb(ERROR))
+                                .text_color(rgb(theme().error))
                                 .child(tr(
                                     "风险提示：将使用 --force-with-lease 覆盖远端分支历史（适用于 Amend 或 Rebase 后）。若远端存在未拉取的新提交，Git 会自动拒绝推送以防覆盖他人改动。",
                                     "Warning: --force-with-lease rewrites remote history (useful after Amend/Rebase). Git will still reject the push if the remote has new unfetched commits.",
@@ -1292,12 +1306,12 @@ fn menu_label(label: impl Into<SharedString>, subtitle: Option<String>) -> AnyEl
         .justify_center()
         .px(px(8.))
         .py(px(3.))
-        .text_color(rgb(MUTED))
+        .text_color(rgb(theme().muted))
         .child(elide(label))
         .children(subtitle.map(|subtitle| {
             div()
                 .text_size(px(11.))
-                .text_color(rgb(SUBTLE))
+                .text_color(rgb(theme().subtle))
                 .child(subtitle)
         }))
         .into_any_element()
@@ -1320,7 +1334,7 @@ pub(super) fn review_detail(
             div()
                 .w(px(64.))
                 .flex_shrink_0()
-                .text_color(rgb(MUTED))
+                .text_color(rgb(theme().muted))
                 .font_weight(FontWeight::MEDIUM)
                 .child(label),
         )

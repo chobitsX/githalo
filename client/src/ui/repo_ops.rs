@@ -368,19 +368,19 @@ impl DesktopView {
 
         let (accent, badge_bg, badge_border, badge_fg, badge_label, subtitle) = if has_conflicts {
             (
-                ERROR,
-                DANGER_BG,
-                DANGER_BORDER,
-                ERROR,
+                theme().error,
+                theme().danger_bg,
+                theme().danger_border,
+                theme().error,
                 format!("合并冲突 · {} 个文件", conflicts.len()),
                 "解决磁盘冲突后点击「标记已解决」或在终端 git add，再完成合并提交",
             )
         } else {
             (
-                SUCCESS,
-                SUCCESS_BG,
-                SUCCESS_BORDER,
-                SUCCESS,
+                theme().success,
+                theme().success_bg,
+                theme().success_border,
+                theme().success,
                 "合并就绪".to_owned(),
                 "所有冲突已解决并暂存，可以完成合并提交",
             )
@@ -400,7 +400,7 @@ impl DesktopView {
                 .rounded(px(7.))
                 .border_1()
                 .border_color(rgb(badge_border))
-                .bg(rgb(CARD))
+                .bg(rgb(theme().card))
                 .overflow_hidden()
                 .shadow_sm()
                 .flex()
@@ -435,10 +435,15 @@ impl DesktopView {
                                         .child(
                                             div()
                                                 .flex_shrink_0()
-                                                .text_color(rgb(SUBTLE))
+                                                .text_color(rgb(theme().subtle))
                                                 .child("→"),
                                         )
-                                        .child(pill(target_branch, ACCENT_BG, ACCENT_BORDER, LINK)),
+                                        .child(pill(
+                                            target_branch,
+                                            theme().accent_bg,
+                                            theme().accent_border,
+                                            theme().link,
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -525,7 +530,7 @@ impl DesktopView {
                         .child(
                             div()
                                 .text_size(px(11.5))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(theme().muted))
                                 .child(subtitle),
                         )
                         .when(has_conflicts, |body| {
@@ -559,28 +564,28 @@ impl DesktopView {
 
         let (accent, badge_bg, badge_border, badge_fg, badge_label, subtitle) = if has_conflicts {
             (
-                ERROR,
-                DANGER_BG,
-                DANGER_BORDER,
-                ERROR,
+                theme().error,
+                theme().danger_bg,
+                theme().danger_border,
+                theme().error,
                 format!("Revert 冲突 · {} 个文件", conflicts.len()),
                 "解决磁盘冲突后点击「标记已解决」或在终端 git add，再继续 Revert",
             )
         } else if empty_commit {
             (
-                WARNING,
-                WARN_BG,
-                WARN_BORDER,
-                WARNING,
+                theme().warning,
+                theme().warn_bg,
+                theme().warn_border,
+                theme().warning,
                 "Revert 空提交".to_owned(),
                 "当前暂存区相对 HEAD 没有剩余变更，可直接中止",
             )
         } else {
             (
-                SUCCESS,
-                SUCCESS_BG,
-                SUCCESS_BORDER,
-                SUCCESS,
+                theme().success,
+                theme().success_bg,
+                theme().success_border,
+                theme().success,
                 "Revert 就绪".to_owned(),
                 "冲突已解决并暂存，可以继续完成反向提交",
             )
@@ -601,7 +606,7 @@ impl DesktopView {
                 .rounded(px(7.))
                 .border_1()
                 .border_color(rgb(badge_border))
-                .bg(rgb(CARD))
+                .bg(rgb(theme().card))
                 .overflow_hidden()
                 .shadow_sm()
                 .flex()
@@ -632,7 +637,7 @@ impl DesktopView {
                                         .child(
                                             div()
                                                 .flex_shrink_0()
-                                                .text_color(rgb(LINK))
+                                                .text_color(rgb(theme().link))
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .child(short_rev),
                                         )
@@ -643,10 +648,15 @@ impl DesktopView {
                                         .child(
                                             div()
                                                 .flex_shrink_0()
-                                                .text_color(rgb(SUBTLE))
+                                                .text_color(rgb(theme().subtle))
                                                 .child("→"),
                                         )
-                                        .child(pill(target_branch, ACCENT_BG, ACCENT_BORDER, LINK)),
+                                        .child(pill(
+                                            target_branch,
+                                            theme().accent_bg,
+                                            theme().accent_border,
+                                            theme().link,
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -731,7 +741,7 @@ impl DesktopView {
                         .child(
                             div()
                                 .text_size(px(11.5))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(theme().muted))
                                 .child(subtitle),
                         )
                         .when(has_conflicts, |body| {
@@ -781,15 +791,15 @@ impl DesktopView {
                     .px(px(8.))
                     .py(px(4.))
                     .rounded(px(5.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(theme().panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .child(icon(Icon::File, ERROR))
+                    .border_color(rgb(theme().border))
+                    .child(icon(Icon::File, theme().error))
                     .child(
                         elide(display)
                             .id((prefix, index))
                             .flex_1()
-                            .text_color(rgb(TEXT)),
+                            .text_color(rgb(theme().text)),
                     )
                     .child(
                         command_button((prefix, 2000 + index), "三方解冲突…", true, writable)
@@ -821,7 +831,7 @@ impl DesktopView {
                 list.child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(SUBTLE))
+                        .text_color(rgb(theme().subtle))
                         .child(format!("另有 {extra} 个冲突文件，可在 Commit 页查看")),
                 )
             })
@@ -836,12 +846,16 @@ impl DesktopView {
         let abort_status = status.clone();
         let (border, fg, summary) = if conflicts > 0 {
             (
-                DANGER_BORDER,
-                ERROR,
+                theme().danger_border,
+                theme().error,
                 format!("合并冲突 · 剩 {conflicts} 个文件"),
             )
         } else {
-            (SUCCESS_BORDER, SUCCESS, "合并就绪 · 可完成提交".to_owned())
+            (
+                theme().success_border,
+                theme().success,
+                "合并就绪 · 可完成提交".to_owned(),
+            )
         };
         Some(
             div()
@@ -851,7 +865,7 @@ impl DesktopView {
                 .rounded(px(6.))
                 .border_1()
                 .border_color(rgb(border))
-                .bg(rgb(CARD))
+                .bg(rgb(theme().card))
                 .flex()
                 .flex_col()
                 .gap(px(6.))
@@ -865,7 +879,7 @@ impl DesktopView {
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(theme().muted))
                         .child(status.merge_message().to_owned()),
                 )
                 .child(
@@ -921,16 +935,20 @@ impl DesktopView {
         let abort_status = status.clone();
         let (border, fg, summary) = if conflicts > 0 {
             (
-                DANGER_BORDER,
-                ERROR,
+                theme().danger_border,
+                theme().error,
                 format!("Revert 冲突 · 剩 {conflicts} 个文件"),
             )
         } else if status.is_empty_commit() {
-            (WARN_BORDER, WARNING, "Revert 空提交 · 可中止".to_owned())
+            (
+                theme().warn_border,
+                theme().warning,
+                "Revert 空提交 · 可中止".to_owned(),
+            )
         } else {
             (
-                SUCCESS_BORDER,
-                SUCCESS,
+                theme().success_border,
+                theme().success,
                 "Revert 就绪 · 可继续提交".to_owned(),
             )
         };
@@ -942,7 +960,7 @@ impl DesktopView {
                 .rounded(px(6.))
                 .border_1()
                 .border_color(rgb(border))
-                .bg(rgb(CARD))
+                .bg(rgb(theme().card))
                 .flex()
                 .flex_col()
                 .gap(px(6.))
@@ -956,7 +974,7 @@ impl DesktopView {
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(theme().muted))
                         .child(format!(
                             "{}  {}",
                             short_oid(status.revert_head()),
@@ -1028,7 +1046,7 @@ impl DesktopView {
             ))
             .child(
                 div()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme().muted))
                     .child("将执行 Soft Reset 回到父提交，原提交的全部改动会保留在暂存区中，便于重新编辑后提交。"),
             )
             .child(
@@ -1102,19 +1120,19 @@ impl DesktopView {
                                 div()
                                     .w(px(64.))
                                     .flex_shrink_0()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(theme().muted))
                                     .font_weight(FontWeight::MEDIUM)
                                     .child("当前分支"),
                             )
-                            .child(pill(target_branch, ACCENT_BG, ACCENT_BORDER, LINK)),
+                            .child(pill(target_branch, theme().accent_bg, theme().accent_border, theme().link)),
                     )
                     .child(
                         div()
                             .p(px(10.))
                             .rounded(px(6.))
-                            .bg(rgb(PANEL))
+                            .bg(rgb(theme().panel))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(theme().border))
                             .flex()
                             .flex_col()
                             .gap(px(4.))
@@ -1125,7 +1143,7 @@ impl DesktopView {
                                     .gap(px(6.))
                                     .child(
                                         div()
-                                            .text_color(rgb(LINK))
+                                            .text_color(rgb(theme().link))
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(short_oid(&commit.oid).to_owned()),
                                     )
@@ -1138,7 +1156,7 @@ impl DesktopView {
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .text_color(rgb(SUBTLE))
+                                    .text_color(rgb(theme().subtle))
                                     .child(format!("{}  ·  {}", commit.author, commit.date)),
                             ),
                     )
@@ -1150,7 +1168,7 @@ impl DesktopView {
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(theme().muted))
                                     .child("选择 Reset 模式："),
                             )
                             .children(modes.into_iter().enumerate().map(|(i, item)| {
@@ -1166,17 +1184,17 @@ impl DesktopView {
                                     .rounded(px(5.))
                                     .border_1()
                                     .border_color(rgb(if selected {
-                                        if is_hard { DANGER_BORDER } else { ACTIVE_BORDER }
+                                        if is_hard { theme().danger_border } else { theme().active_border }
                                     } else {
-                                        BORDER
+                                        theme().border
                                     }))
                                     .bg(rgb(if selected {
-                                        if is_hard { DANGER_BG } else { ACCENT_BG }
+                                        if is_hard { theme().danger_bg } else { theme().accent_bg }
                                     } else {
-                                        PANEL
+                                        theme().panel
                                     }))
-                                    .hover(|s| s.bg(rgb(HOVER)))
-                                    .text_color(rgb(if is_hard && selected { ERROR } else { TEXT }))
+                                    .hover(|s| s.bg(rgb(theme().hover)))
+                                    .text_color(rgb(if is_hard && selected { theme().error } else { theme().text }))
                                     .child(item.label())
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         if let Some(Overlay::Dialog(Dialog::Reset(form))) =
@@ -1203,15 +1221,15 @@ impl DesktopView {
                                 .py(px(7.))
                                 .rounded(px(6.))
                                 .border_1()
-                                .border_color(rgb(DANGER_BORDER))
-                                .bg(rgb(DANGER_BG))
+                                .border_color(rgb(theme().danger_border))
+                                .bg(rgb(theme().danger_bg))
                                 .text_size(px(11.5))
-                                .text_color(rgb(ERROR))
+                                .text_color(rgb(theme().error))
                                 .child(warning),
                         )
                     })
             }
-            None => div().text_color(rgb(SUBTLE)).child(
+            None => div().text_color(rgb(theme().subtle)).child(
                 if state.preparing {
                     "正在读取 Reset 预览…"
                 } else {
@@ -1305,19 +1323,24 @@ impl DesktopView {
                                 div()
                                     .w(px(64.))
                                     .flex_shrink_0()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(theme().muted))
                                     .font_weight(FontWeight::MEDIUM)
                                     .child("写入分支"),
                             )
-                            .child(pill(target_branch, ACCENT_BG, ACCENT_BORDER, LINK)),
+                            .child(pill(
+                                target_branch,
+                                theme().accent_bg,
+                                theme().accent_border,
+                                theme().link,
+                            )),
                     )
                     .child(
                         div()
                             .p(px(10.))
                             .rounded(px(6.))
-                            .bg(rgb(PANEL))
+                            .bg(rgb(theme().panel))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(theme().border))
                             .flex()
                             .flex_col()
                             .gap(px(4.))
@@ -1328,7 +1351,7 @@ impl DesktopView {
                                     .gap(px(6.))
                                     .child(
                                         div()
-                                            .text_color(rgb(LINK))
+                                            .text_color(rgb(theme().link))
                                             .font_weight(FontWeight::MEDIUM)
                                             .child(short_oid(&commit.oid).to_owned()),
                                     )
@@ -1341,7 +1364,7 @@ impl DesktopView {
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .text_color(rgb(SUBTLE))
+                                    .text_color(rgb(theme().subtle))
                                     .child(format!("{}  ·  {}", commit.author, commit.date)),
                             ),
                     )
@@ -1352,15 +1375,15 @@ impl DesktopView {
                                 .p(px(9.))
                                 .rounded(px(6.))
                                 .border_1()
-                                .border_color(rgb(BORDER))
-                                .bg(rgb(CARD))
+                                .border_color(rgb(theme().border))
+                                .bg(rgb(theme().card))
                                 .flex()
                                 .flex_col()
                                 .gap(px(6.))
                                 .child(
                                     div()
                                         .text_size(px(11.5))
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(theme().muted))
                                         .child("合并提交 · 选择主线父提交（-m）："),
                                 )
                                 .child(div().flex().flex_wrap().gap(px(6.)).children(
@@ -1391,14 +1414,14 @@ impl DesktopView {
                     .child(
                         div()
                             .text_size(px(11.5))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme().muted))
                             .child(format!(
                                 "将创建一条新的反向提交，抵消此提交中 {} 个文件的变更。",
                                 preview.files().len()
                             )),
                     )
             }
-            None => div().text_color(rgb(SUBTLE)).child(
+            None => div().text_color(rgb(theme().subtle)).child(
                 if state.preparing {
                     "正在读取 Revert 预览…"
                 } else {
@@ -1486,9 +1509,15 @@ impl DesktopView {
             Some(preview) => {
                 let target_branch = branch_label(preview.branch_ref(), preview.head_oid());
                 let (rel_bg, rel_border, rel_fg) = match preview.relation() {
-                    MergeRelation::AlreadyUpToDate => (CHROME, BORDER, SUBTLE),
-                    MergeRelation::FastForward => (SUCCESS_BG, SUCCESS_BORDER, SUCCESS),
-                    MergeRelation::ThreeWay => (ACCENT_BG, ACCENT_BORDER, LINK),
+                    MergeRelation::AlreadyUpToDate => {
+                        (theme().chrome, theme().border, theme().subtle)
+                    }
+                    MergeRelation::FastForward => {
+                        (theme().success_bg, theme().success_border, theme().success)
+                    }
+                    MergeRelation::ThreeWay => {
+                        (theme().accent_bg, theme().accent_border, theme().link)
+                    }
                 };
                 let modes = [
                     MergeMode::Default,
@@ -1507,12 +1536,17 @@ impl DesktopView {
                             .gap(px(6.))
                             .child(pill(
                                 preview.source_display().to_owned(),
-                                SUCCESS_BG,
-                                SUCCESS_BORDER,
-                                SUCCESS,
+                                theme().success_bg,
+                                theme().success_border,
+                                theme().success,
                             ))
-                            .child(div().text_color(rgb(SUBTLE)).child("合并到 →"))
-                            .child(pill(target_branch, ACCENT_BG, ACCENT_BORDER, LINK)),
+                            .child(div().text_color(rgb(theme().subtle)).child("合并到 →"))
+                            .child(pill(
+                                target_branch,
+                                theme().accent_bg,
+                                theme().accent_border,
+                                theme().link,
+                            )),
                     )
                     .child(div().flex().items_center().gap(px(8.)).child(pill(
                         preview.relation().label(),
@@ -1536,7 +1570,7 @@ impl DesktopView {
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(theme().muted))
                                     .child("合并策略："),
                             )
                             .children(modes.into_iter().enumerate().map(|(i, item)| {
@@ -1551,12 +1585,16 @@ impl DesktopView {
                                     .rounded(px(5.))
                                     .border_1()
                                     .border_color(rgb(if selected {
-                                        ACTIVE_BORDER
+                                        theme().active_border
                                     } else {
-                                        BORDER
+                                        theme().border
                                     }))
-                                    .bg(rgb(if selected { ACCENT_BG } else { PANEL }))
-                                    .hover(|s| s.bg(rgb(HOVER)))
+                                    .bg(rgb(if selected {
+                                        theme().accent_bg
+                                    } else {
+                                        theme().panel
+                                    }))
+                                    .hover(|s| s.bg(rgb(theme().hover)))
                                     .child(item.label())
                                     .on_click(cx.listener(move |view, _, _, cx| {
                                         if let Some(Overlay::Dialog(Dialog::Merge(form))) =
@@ -1569,7 +1607,7 @@ impl DesktopView {
                             })),
                     )
             }
-            None => div().text_color(rgb(SUBTLE)).child(
+            None => div().text_color(rgb(theme().subtle)).child(
                 if state.preparing {
                     "正在读取合并预览…"
                 } else {
@@ -1651,7 +1689,7 @@ impl DesktopView {
             ))
             .child(
                 div()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme().muted))
                     .child("中止将清除 MERGE_HEAD，并恢复合并开始前的索引和工作区状态。"),
             )
             .child(
@@ -1708,7 +1746,7 @@ impl DesktopView {
             ))
             .child(
                 div()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme().muted))
                     .child("中止将清除 REVERT_HEAD，并恢复 Revert 开始前的索引和工作区状态。"),
             )
             .child(
@@ -1756,7 +1794,7 @@ impl DesktopView {
             .children(
                 form.error
                     .clone()
-                    .map(|error| div().text_color(rgb(ERROR)).child(error)),
+                    .map(|error| div().text_color(rgb(theme().error)).child(error)),
             )
             .child(self.review_buttons(
                 "confirm-create-tag",
@@ -1846,7 +1884,7 @@ impl DesktopView {
             .children(
                 form.error
                     .clone()
-                    .map(|error| div().text_color(rgb(ERROR)).child(error)),
+                    .map(|error| div().text_color(rgb(theme().error)).child(error)),
             )
             .child(self.review_buttons(
                 "confirm-branch-at",
@@ -1907,7 +1945,7 @@ impl DesktopView {
             .children(
                 form.error
                     .clone()
-                    .map(|error| div().text_color(rgb(ERROR)).child(error)),
+                    .map(|error| div().text_color(rgb(theme().error)).child(error)),
             )
             .child(self.review_buttons(
                 "confirm-rename-branch",
@@ -1959,7 +1997,7 @@ impl DesktopView {
             .child(dialog_heading(format!("删除分支 “{}”", form.name)))
             .child(
                 div()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme().muted))
                     .child("默认执行安全删除（-d），若该分支包含未合并提交会被 Git 阻止。"),
             )
             .child(
@@ -1975,11 +2013,11 @@ impl DesktopView {
                     .rounded(px(4.))
                     .px(px(4.))
                     .py(px(3.))
-                    .hover(|row| row.bg(rgb(HOVER)))
+                    .hover(|row| row.bg(rgb(theme().hover)))
                     .child(check_indicator(force))
                     .child(
                         div()
-                            .text_color(rgb(if force { ERROR } else { TEXT }))
+                            .text_color(rgb(if force { theme().error } else { theme().text }))
                             .child("强制删除（-D，丢弃未合并提交引用）"),
                     )
                     .on_click(cx.listener(|view, _, _, cx| {
@@ -2178,24 +2216,24 @@ impl DesktopView {
                             .child(conflict_pane(
                                 "conflict-pane-base",
                                 "共同基准（Base）",
-                                SUBTLE,
-                                BORDER,
+                                theme().subtle,
+                                theme().border,
                                 c.base.as_ref(),
                                 pane_h,
                             ))
                             .child(conflict_pane(
                                 "conflict-pane-yours",
                                 &c.yours_label,
-                                SUCCESS,
-                                SUCCESS_BORDER,
+                                theme().success,
+                                theme().success_border,
                                 c.yours.as_ref(),
                                 pane_h,
                             ))
                             .child(conflict_pane(
                                 "conflict-pane-theirs",
                                 &c.theirs_label,
-                                REMOTE_TEXT,
-                                REMOTE_BORDER,
+                                theme().remote_text,
+                                theme().remote_border,
                                 c.theirs.as_ref(),
                                 pane_h,
                             )),
@@ -2209,8 +2247,8 @@ impl DesktopView {
                                 .p(px(8.))
                                 .rounded(px(6.))
                                 .border_1()
-                                .border_color(rgb(ACCENT_BORDER))
-                                .bg(rgb(CARD))
+                                .border_color(rgb(theme().accent_border))
+                                .bg(rgb(theme().card))
                                 .child(
                                     div()
                                         .flex()
@@ -2220,7 +2258,7 @@ impl DesktopView {
                                             div()
                                                 .text_size(px(12.))
                                                 .font_weight(FontWeight::MEDIUM)
-                                                .text_color(rgb(LINK))
+                                                .text_color(rgb(theme().link))
                                                 .child("手动合并结果编辑器"),
                                         )
                                         .child(div().flex_1())
@@ -2442,7 +2480,7 @@ impl DesktopView {
                     .flex_col()
                     .gap(px(12.))
                     .child(
-                        div().text_color(rgb(SUBTLE)).child(
+                        div().text_color(rgb(theme().subtle)).child(
                             if state.conflict_loading {
                                 "正在读取 Base / Yours / Theirs 三方内容…"
                             } else {
@@ -2470,11 +2508,16 @@ impl DesktopView {
                     .items_center()
                     .gap(px(8.))
                     .child(dialog_heading("三方冲突解决"))
-                    .child(pill(op_label, DANGER_BG, DANGER_BORDER, ERROR))
+                    .child(pill(
+                        op_label,
+                        theme().danger_bg,
+                        theme().danger_border,
+                        theme().error,
+                    ))
                     .child(
                         elide(dialog.path.display().to_string())
                             .flex_1()
-                            .text_color(rgb(MUTED)),
+                            .text_color(rgb(theme().muted)),
                     ),
             )
             .child(content)
@@ -2517,10 +2560,10 @@ impl DesktopView {
                     .py(px(7.))
                     .rounded(px(6.))
                     .border_1()
-                    .border_color(rgb(DANGER_BORDER))
-                    .bg(rgb(DANGER_BG))
+                    .border_color(rgb(theme().danger_border))
+                    .bg(rgb(theme().danger_bg))
                     .text_size(px(11.5))
-                    .text_color(rgb(ERROR))
+                    .text_color(rgb(theme().error))
                     .child(desc),
             )
             .child(
@@ -2579,20 +2622,20 @@ impl DesktopView {
                         div()
                             .w(px(64.))
                             .flex_shrink_0()
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme().muted))
                             .font_weight(FontWeight::MEDIUM)
                             .child("目标分支"),
                     )
-                    .child(pill(branch, ACCENT_BG, ACCENT_BORDER, LINK))
+                    .child(pill(branch, theme().accent_bg, theme().accent_border, theme().link))
                     .child(
                         div()
                             .text_size(px(11.5))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child(format!("原 HEAD {}", short_oid(&dialog.head_oid))),
                     ),
             )
             .child(review_detail("提交说明", dialog.message.clone()))
-            .child(div().text_size(px(11.5)).text_color(rgb(MUTED)).child(
+            .child(div().text_size(px(11.5)).text_color(rgb(theme().muted)).child(
                 "Amend 会用当前已暂存内容与新提交说明替换最近一次提交（会改写本地提交 ID）。",
             ))
             .child(
@@ -2644,7 +2687,11 @@ fn conflict_pane(
             .text_size(px(11.5))
             .line_height(px(16.5))
             .font_family("Menlo")
-            .text_color(rgb(if side.binary { SUBTLE } else { TEXT }))
+            .text_color(rgb(if side.binary {
+                theme().subtle
+            } else {
+                theme().text
+            }))
             .child(side.content.clone())
             .into_any_element(),
         None => div()
@@ -2654,7 +2701,7 @@ fn conflict_pane(
             .justify_center()
             .p(px(12.))
             .text_size(px(11.5))
-            .text_color(rgb(SUBTLE))
+            .text_color(rgb(theme().subtle))
             .child("此侧无内容（文件未存在或已删除）")
             .into_any_element(),
     };
@@ -2664,7 +2711,7 @@ fn conflict_pane(
         .rounded(px(6.))
         .border_1()
         .border_color(rgb(border))
-        .bg(rgb(PANEL))
+        .bg(rgb(theme().panel))
         .overflow_hidden()
         .flex()
         .flex_col()
@@ -2673,8 +2720,8 @@ fn conflict_pane(
                 .px(px(8.))
                 .py(px(5.))
                 .border_b_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(CARD))
+                .border_color(rgb(theme().border))
+                .bg(rgb(theme().card))
                 .text_size(px(11.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(title_color))

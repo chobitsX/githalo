@@ -1,42 +1,126 @@
 use std::path::Path;
 
+use githalo::theme as app_theme;
 use gpui::{IntoElement, prelude::*, rems, rgb, svg};
 
-use super::components::MUTED;
+use super::components::theme;
+
+#[derive(Clone, Copy)]
+struct IconColors {
+    rust: u32,
+    ts: u32,
+    js: u32,
+    py: u32,
+    go: u32,
+    java: u32,
+    kotlin: u32,
+    c: u32,
+    swift: u32,
+    csharp: u32,
+    shell: u32,
+    sql: u32,
+    html: u32,
+    css: u32,
+    vue: u32,
+    md: u32,
+    json: u32,
+    yaml: u32,
+    config: u32,
+    csv: u32,
+    pdf: u32,
+    doc: u32,
+    license: u32,
+    git: u32,
+    docker: u32,
+    lock: u32,
+    image: u32,
+    archive: u32,
+    binary: u32,
+    folder: u32,
+    folder_open: u32,
+    folder_special: u32,
+}
 
 // Brand-harmonized dark theme file icon palette
-const COL_RUST: u32 = 0xe38b59;
-const COL_TS: u32 = 0x4ea1f3;
-const COL_JS: u32 = 0xf1d465;
-const COL_PY: u32 = 0x5ba8e8;
-const COL_GO: u32 = 0x5ccfe6;
-const COL_JAVA: u32 = 0xe69457;
-const COL_KOTLIN: u32 = 0xb388ff;
-const COL_C: u32 = 0x6f9ef5;
-const COL_SWIFT: u32 = 0xf27c54;
-const COL_CSHARP: u32 = 0x7bc98d;
-const COL_SHELL: u32 = 0x86c98e;
-const COL_SQL: u32 = 0x56c7b8;
-const COL_HTML: u32 = 0xe57356;
-const COL_CSS: u32 = 0x66a3ff;
-const COL_VUE: u32 = 0x5dc983;
-const COL_MD: u32 = 0x6bb4ff;
-const COL_JSON: u32 = 0xe5b473;
-const COL_YAML: u32 = 0xd97bb8;
-const COL_CONFIG: u32 = 0xb794f4;
-const COL_CSV: u32 = 0x6bc48e;
-const COL_PDF: u32 = 0xeb7878;
-const COL_DOC: u32 = 0x76a8f4;
-const COL_LICENSE: u32 = 0xdcb86a;
-const COL_GIT: u32 = 0xf06543;
-const COL_DOCKER: u32 = 0x4aa8eb;
-const COL_LOCK: u32 = 0xc4a265;
-const COL_IMAGE: u32 = 0xd089e8;
-const COL_ARCHIVE: u32 = 0xd4a056;
-const COL_BINARY: u32 = 0x8e96a6;
-const COL_FOLDER: u32 = 0x8a97ab;
-const COL_FOLDER_OPEN: u32 = 0x9bb0cf;
-const COL_FOLDER_SPECIAL: u32 = 0x6f9ad8;
+const DARK_ICONS: IconColors = IconColors {
+    rust: 0xe38b59,
+    ts: 0x4ea1f3,
+    js: 0xf1d465,
+    py: 0x5ba8e8,
+    go: 0x5ccfe6,
+    java: 0xe69457,
+    kotlin: 0xb388ff,
+    c: 0x6f9ef5,
+    swift: 0xf27c54,
+    csharp: 0x7bc98d,
+    shell: 0x86c98e,
+    sql: 0x56c7b8,
+    html: 0xe57356,
+    css: 0x66a3ff,
+    vue: 0x5dc983,
+    md: 0x6bb4ff,
+    json: 0xe5b473,
+    yaml: 0xd97bb8,
+    config: 0xb794f4,
+    csv: 0x6bc48e,
+    pdf: 0xeb7878,
+    doc: 0x76a8f4,
+    license: 0xdcb86a,
+    git: 0xf06543,
+    docker: 0x4aa8eb,
+    lock: 0xc4a265,
+    image: 0xd089e8,
+    archive: 0xd4a056,
+    binary: 0x8e96a6,
+    folder: 0x8a97ab,
+    folder_open: 0x9bb0cf,
+    folder_special: 0x6f9ad8,
+};
+
+// High-contrast crisp light theme file icon palette
+const LIGHT_ICONS: IconColors = IconColors {
+    rust: 0xc25524,
+    ts: 0x1e6fc4,
+    js: 0xb88408,
+    py: 0x246eb3,
+    go: 0x0b88a3,
+    java: 0xc45e1a,
+    kotlin: 0x7444cf,
+    c: 0x2f63c7,
+    swift: 0xd14c24,
+    csharp: 0x268241,
+    shell: 0x268247,
+    sql: 0x0d8879,
+    html: 0xc9492a,
+    css: 0x2466cf,
+    vue: 0x1a874f,
+    md: 0x2068c2,
+    json: 0xb57514,
+    yaml: 0xb03a86,
+    config: 0x764bc7,
+    csv: 0x1f8249,
+    pdf: 0xc9363d,
+    doc: 0x2968c4,
+    license: 0xa67814,
+    git: 0xcf4120,
+    docker: 0x1678ba,
+    lock: 0x996d1e,
+    image: 0x9a42bd,
+    archive: 0xa86b18,
+    binary: 0x5c6678,
+    folder: 0x64748b,
+    folder_open: 0x475569,
+    folder_special: 0x2e64b0,
+};
+
+#[inline]
+fn icon_colors() -> &'static IconColors {
+    if app_theme::is_light() {
+        &LIGHT_ICONS
+    } else {
+        &DARK_ICONS
+    }
+}
 
 // Crisp 16x16 monochrome SVG paths rendered via GPUI's native resvg/usvg pipeline + brand tint.
 const SVG_FILE_DEFAULT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2h5.2L12.5 5.3V14H4z"/><path d="M9.2 2v3.3h3.3"/></svg>"##;
@@ -76,6 +160,7 @@ pub(super) struct FileIconSpec {
 }
 
 pub(super) fn file_icon_spec(path: &Path) -> FileIconSpec {
+    let c = icon_colors();
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -87,44 +172,44 @@ pub(super) fn file_icon_spec(path: &Path) -> FileIconSpec {
         "cargo.toml" => {
             return FileIconSpec {
                 svg: SVG_RUST,
-                color: COL_RUST,
+                color: c.rust,
             };
         }
         "cargo.lock" | "package-lock.json" | "yarn.lock" | "pnpm-lock.yaml" | "poetry.lock"
         | "gemfile.lock" | "composer.lock" => {
             return FileIconSpec {
                 svg: SVG_LOCK,
-                color: COL_LOCK,
+                color: c.lock,
             };
         }
         ".gitignore" | ".gitattributes" | ".gitmodules" | ".gitkeep" | ".ignore" => {
             return FileIconSpec {
                 svg: SVG_GIT,
-                color: COL_GIT,
+                color: c.git,
             };
         }
         "dockerfile" | ".dockerignore" => {
             return FileIconSpec {
                 svg: SVG_DOCKER,
-                color: COL_DOCKER,
+                color: c.docker,
             };
         }
         "license" | "license.md" | "license.txt" | "notice" | "notice.txt" | "copying" => {
             return FileIconSpec {
                 svg: SVG_SHIELD,
-                color: COL_LICENSE,
+                color: c.license,
             };
         }
         "makefile" | "cmakelists.txt" | "justfile" => {
             return FileIconSpec {
                 svg: SVG_TERMINAL,
-                color: COL_SHELL,
+                color: c.shell,
             };
         }
         ".env" | ".editorconfig" | ".prettierrc" | ".eslintrc" | ".ds_store" => {
             return FileIconSpec {
                 svg: SVG_SETTINGS_SLIDERS,
-                color: COL_CONFIG,
+                color: c.config,
             };
         }
         _ => {}
@@ -133,13 +218,13 @@ pub(super) fn file_icon_spec(path: &Path) -> FileIconSpec {
     if name.starts_with("docker-compose") || name.starts_with("compose.") {
         return FileIconSpec {
             svg: SVG_DOCKER,
-            color: COL_DOCKER,
+            color: c.docker,
         };
     }
     if name.starts_with(".env.") {
         return FileIconSpec {
             svg: SVG_SETTINGS_SLIDERS,
-            color: COL_CONFIG,
+            color: c.config,
         };
     }
 
@@ -152,113 +237,113 @@ pub(super) fn file_icon_spec(path: &Path) -> FileIconSpec {
     match ext.as_str() {
         "rs" => FileIconSpec {
             svg: SVG_RUST,
-            color: COL_RUST,
+            color: c.rust,
         },
         "ts" | "tsx" | "mts" | "cts" => FileIconSpec {
             svg: SVG_TS,
-            color: COL_TS,
+            color: c.ts,
         },
         "js" | "jsx" | "mjs" | "cjs" => FileIconSpec {
             svg: SVG_JS,
-            color: COL_JS,
+            color: c.js,
         },
         "py" | "pyi" | "ipynb" => FileIconSpec {
             svg: SVG_PYTHON,
-            color: COL_PY,
+            color: c.py,
         },
         "go" => FileIconSpec {
             svg: SVG_GO,
-            color: COL_GO,
+            color: c.go,
         },
         "java" | "jar" => FileIconSpec {
             svg: SVG_JAVA,
-            color: COL_JAVA,
+            color: c.java,
         },
         "kt" | "kts" | "gradle" => FileIconSpec {
             svg: SVG_KOTLIN,
-            color: COL_KOTLIN,
+            color: c.kotlin,
         },
         "swift" => FileIconSpec {
             svg: SVG_SWIFT,
-            color: COL_SWIFT,
+            color: c.swift,
         },
         "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "m" | "mm" => FileIconSpec {
             svg: SVG_CODE_BRACKETS,
-            color: COL_C,
+            color: c.c,
         },
         "cs" => FileIconSpec {
             svg: SVG_HASH_CSS,
-            color: COL_CSHARP,
+            color: c.csharp,
         },
         "vue" | "svelte" => FileIconSpec {
             svg: SVG_VUE,
-            color: COL_VUE,
+            color: c.vue,
         },
         "html" | "htm" | "xml" | "plist" | "xhtml" => FileIconSpec {
             svg: SVG_CODE_BRACKETS,
-            color: COL_HTML,
+            color: c.html,
         },
         "css" | "scss" | "sass" | "less" => FileIconSpec {
             svg: SVG_HASH_CSS,
-            color: COL_CSS,
+            color: c.css,
         },
         "md" | "markdown" | "mdx" => FileIconSpec {
             svg: SVG_MARKDOWN,
-            color: COL_MD,
+            color: c.md,
         },
         "json" | "jsonc" | "jsonl" | "geojson" => FileIconSpec {
             svg: SVG_BRACES,
-            color: COL_JSON,
+            color: c.json,
         },
         "yml" | "yaml" => FileIconSpec {
             svg: SVG_YAML_LIST,
-            color: COL_YAML,
+            color: c.yaml,
         },
         "toml" | "ini" | "conf" | "cfg" | "properties" => FileIconSpec {
             svg: SVG_SETTINGS_SLIDERS,
-            color: COL_CONFIG,
+            color: c.config,
         },
         "sh" | "bash" | "zsh" | "fish" | "bat" | "ps1" | "cmd" => FileIconSpec {
             svg: SVG_TERMINAL,
-            color: COL_SHELL,
+            color: c.shell,
         },
         "sql" | "sqlite" | "sqlite3" | "db" => FileIconSpec {
             svg: SVG_DATABASE,
-            color: COL_SQL,
+            color: c.sql,
         },
         "csv" | "tsv" | "xls" | "xlsx" => FileIconSpec {
             svg: SVG_TABLE,
-            color: COL_CSV,
+            color: c.csv,
         },
         "pdf" => FileIconSpec {
             svg: SVG_DOC_LINES,
-            color: COL_PDF,
+            color: c.pdf,
         },
         "doc" | "docx" | "txt" | "rtf" | "log" => FileIconSpec {
             svg: SVG_DOC_LINES,
-            color: COL_DOC,
+            color: c.doc,
         },
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "icns" | "svg" => FileIconSpec {
             svg: SVG_IMAGE,
-            color: COL_IMAGE,
+            color: c.image,
         },
         "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" | "dmg" | "pkg" | "bundle" => {
             FileIconSpec {
                 svg: SVG_ARCHIVE,
-                color: COL_ARCHIVE,
+                color: c.archive,
             }
         }
         "lock" => FileIconSpec {
             svg: SVG_LOCK,
-            color: COL_LOCK,
+            color: c.lock,
         },
         "wasm" | "bin" | "exe" | "dll" | "so" | "dylib" | "o" | "a" => FileIconSpec {
             svg: SVG_BINARY,
-            color: COL_BINARY,
+            color: c.binary,
         },
         _ => FileIconSpec {
             svg: SVG_FILE_DEFAULT,
-            color: MUTED,
+            color: theme().muted,
         },
     }
 }
@@ -273,17 +358,18 @@ pub(super) fn file_type_icon(path: &Path) -> impl IntoElement {
 }
 
 pub(super) fn folder_type_icon(name: &str, expanded: bool) -> impl IntoElement {
+    let c = icon_colors();
     let lower = name.to_ascii_lowercase();
     let special = matches!(
         lower.as_str(),
         ".github" | ".git" | "src" | "docs" | "tests" | "test" | "client" | "server"
     );
     let color = if special {
-        COL_FOLDER_SPECIAL
+        c.folder_special
     } else if expanded {
-        COL_FOLDER_OPEN
+        c.folder_open
     } else {
-        COL_FOLDER
+        c.folder
     };
     svg()
         .data(if expanded {
@@ -302,20 +388,21 @@ mod tests {
 
     #[test]
     fn maps_common_file_types_to_distinct_specs() {
-        assert_eq!(file_icon_spec(Path::new("src/main.rs")).color, COL_RUST);
-        assert_eq!(file_icon_spec(Path::new("Cargo.toml")).color, COL_RUST);
-        assert_eq!(file_icon_spec(Path::new("Cargo.lock")).color, COL_LOCK);
-        assert_eq!(file_icon_spec(Path::new("AGENTS.md")).color, COL_MD);
-        assert_eq!(file_icon_spec(Path::new("index.html")).color, COL_HTML);
-        assert_eq!(file_icon_spec(Path::new(".gitignore")).color, COL_GIT);
-        assert_eq!(file_icon_spec(Path::new("LICENSE")).color, COL_LICENSE);
-        assert_eq!(file_icon_spec(Path::new("package.json")).color, COL_JSON);
-        assert_eq!(file_icon_spec(Path::new("ci.yml")).color, COL_YAML);
-        assert_eq!(file_icon_spec(Path::new("logo.png")).color, COL_IMAGE);
-        assert_eq!(file_icon_spec(Path::new("Dockerfile")).color, COL_DOCKER);
+        let c = icon_colors();
+        assert_eq!(file_icon_spec(Path::new("src/main.rs")).color, c.rust);
+        assert_eq!(file_icon_spec(Path::new("Cargo.toml")).color, c.rust);
+        assert_eq!(file_icon_spec(Path::new("Cargo.lock")).color, c.lock);
+        assert_eq!(file_icon_spec(Path::new("AGENTS.md")).color, c.md);
+        assert_eq!(file_icon_spec(Path::new("index.html")).color, c.html);
+        assert_eq!(file_icon_spec(Path::new(".gitignore")).color, c.git);
+        assert_eq!(file_icon_spec(Path::new("LICENSE")).color, c.license);
+        assert_eq!(file_icon_spec(Path::new("package.json")).color, c.json);
+        assert_eq!(file_icon_spec(Path::new("ci.yml")).color, c.yaml);
+        assert_eq!(file_icon_spec(Path::new("logo.png")).color, c.image);
+        assert_eq!(file_icon_spec(Path::new("Dockerfile")).color, c.docker);
         assert_eq!(
             file_icon_spec(Path::new("docker-compose.yml")).color,
-            COL_DOCKER
+            c.docker
         );
     }
 }

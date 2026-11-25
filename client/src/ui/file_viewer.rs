@@ -93,6 +93,12 @@ impl FileViewerUi {
         }
     }
 
+    pub(super) fn rehighlight_all(&self, cx: &mut Context<DesktopView>) {
+        for editor in self.editors.values() {
+            editor.update(cx, |ed, cx| ed.rehighlight(cx));
+        }
+    }
+
     pub(super) fn refresh_placeholders(&self, cx: &mut Context<DesktopView>) {
         self.tree_filter.update(cx, |field, cx| {
             field.set_placeholder(tr("筛选文件名…", "Filter files…"), cx);
@@ -644,9 +650,9 @@ impl DesktopView {
             .flex()
             .flex_shrink_0()
             .items_center()
-            .bg(rgb(SIDEBAR_BG))
+            .bg(rgb(theme().sidebar_bg))
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .child(file_type_icon(&path))
             .child(
                 elide(breadcrumbs)
@@ -654,32 +660,36 @@ impl DesktopView {
                     .min_w_0()
                     .text_size(px(12.))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(TEXT)),
+                    .text_color(rgb(theme().text)),
             )
             .when_some(git_status, |bar, status| {
                 let (bg, border, fg) = match status {
-                    FileGitStatus::Modified => (ACCENT_BG, ACCENT_BORDER, LINK),
-                    FileGitStatus::Added | FileGitStatus::Untracked => {
-                        (SUCCESS_BG, SUCCESS_BORDER, SUCCESS)
+                    FileGitStatus::Modified => {
+                        (theme().accent_bg, theme().accent_border, theme().link)
                     }
-                    FileGitStatus::Conflicted => (DANGER_BG, DANGER_BORDER, ERROR),
+                    FileGitStatus::Added | FileGitStatus::Untracked => {
+                        (theme().success_bg, theme().success_border, theme().success)
+                    }
+                    FileGitStatus::Conflicted => {
+                        (theme().danger_bg, theme().danger_border, theme().error)
+                    }
                 };
                 bar.child(pill(status.badge(), bg, border, fg))
             })
             .when(is_read_only, |bar| {
                 bar.child(pill(
                     tr("只读预览（超大文件）", "Read-only (Large)"),
-                    CARD,
-                    BORDER,
-                    SUBTLE,
+                    theme().card,
+                    theme().border,
+                    theme().subtle,
                 ))
             })
             .when(is_dirty, |bar| {
                 bar.child(pill(
                     tr("● 未保存", "● Modified"),
-                    WARN_BG,
-                    WARN_BORDER,
-                    WARNING,
+                    theme().warn_bg,
+                    theme().warn_border,
+                    theme().warning,
                 ))
                 .child(
                     command_button("save-project-file", save_label, true, true)
@@ -698,7 +708,9 @@ impl DesktopView {
                         tr("查找与替换 (⌘F)", "Find & Replace (⌘F)"),
                     )
                     .size(px(24.))
-                    .when(self.file_viewer_ui.find_bar_open, |b| b.bg(rgb(ACTIVE)))
+                    .when(self.file_viewer_ui.find_bar_open, |b| {
+                        b.bg(rgb(theme().active))
+                    })
                     .on_click(cx.listener(|view, _, window, cx| {
                         if view.file_viewer_ui.find_bar_open {
                             view.dismiss_editor_bars(window, cx);
@@ -793,9 +805,9 @@ impl DesktopView {
                 .flex()
                 .flex_col()
                 .flex_shrink_0()
-                .bg(rgb(0x1b1d22))
+                .bg(rgb(theme().editor_chrome_bg))
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(theme().border))
                 .child(
                     div()
                         .flex()
@@ -830,10 +842,10 @@ impl DesktopView {
                                 .flex()
                                 .items_center()
                                 .rounded(px(4.))
-                                .bg(rgb(PANEL))
+                                .bg(rgb(theme().panel))
                                 .border_1()
-                                .border_color(rgb(BORDER))
-                                .child(icon(Icon::Search, SUBTLE))
+                                .border_color(rgb(theme().border))
+                                .child(icon(Icon::Search, theme().subtle))
                                 .child(
                                     div()
                                         .flex_1()
@@ -858,7 +870,7 @@ impl DesktopView {
                                 div()
                                     .min_w(px(42.))
                                     .text_size(px(11.))
-                                    .text_color(rgb(if total == 0 { WARNING } else { MUTED }))
+                                    .text_color(rgb(if total == 0 { theme().warning } else { theme().muted }))
                                     .child(count_label),
                             )
                         })
@@ -910,9 +922,9 @@ impl DesktopView {
                                     .flex()
                                     .items_center()
                                     .rounded(px(4.))
-                                    .bg(rgb(PANEL))
+                                    .bg(rgb(theme().panel))
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(theme().border))
                                     .child(
                                         div()
                                             .flex_1()
@@ -986,16 +998,16 @@ impl DesktopView {
                     .flex()
                     .flex_shrink_0()
                     .items_center()
-                    .bg(rgb(0x1b1d22))
+                    .bg(rgb(theme().editor_chrome_bg))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .on_action(cx.listener(|view, _: &Confirm, window, cx| {
                         view.submit_editor_goto_line(window, cx);
                     }))
                     .child(
                         div()
                             .text_size(px(11.5))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme().muted))
                             .child(if is_zh() {
                                 format!("跳转到行（1 - {max_lines}）：")
                             } else {
@@ -1010,9 +1022,9 @@ impl DesktopView {
                             .flex()
                             .items_center()
                             .rounded(px(4.))
-                            .bg(rgb(PANEL))
+                            .bg(rgb(theme().panel))
                             .border_1()
-                            .border_color(rgb(LINK))
+                            .border_color(rgb(theme().link))
                             .child(
                                 div()
                                     .flex_1()
@@ -1042,48 +1054,50 @@ impl DesktopView {
                     )
             });
 
-        let body: AnyElement =
-            if open.loading && open.content.is_none() {
-                empty(tr("正在读取文件内容…", "Loading file contents…")).into_any_element()
-            } else if let Some(err) = &open.error {
-                empty(err.clone()).into_any_element()
-            } else if let Some(editor) = editor.clone() {
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(editor)
-                    .into_any_element()
-            } else {
-                match &open.content {
-                    Some(ProjectFileContent::Binary { total_bytes }) => {
-                        let abs_open_btn = abs_open.clone();
-                        let abs_reveal_btn = abs_path.clone();
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .justify_center()
-                            .gap(px(12.))
-                            .p(px(24.))
-                            .child(file_type_icon(&path))
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(TEXT))
-                                    .child(
-                                        path.file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or("Binary file")
-                                            .to_owned(),
-                                    ),
-                            )
-                            .child(div().text_size(px(12.)).text_color(rgb(SUBTLE)).child(
-                                if is_zh() {
+        let body: AnyElement = if open.loading && open.content.is_none() {
+            empty(tr("正在读取文件内容…", "Loading file contents…")).into_any_element()
+        } else if let Some(err) = &open.error {
+            empty(err.clone()).into_any_element()
+        } else if let Some(editor) = editor.clone() {
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(editor)
+                .into_any_element()
+        } else {
+            match &open.content {
+                Some(ProjectFileContent::Binary { total_bytes }) => {
+                    let abs_open_btn = abs_open.clone();
+                    let abs_reveal_btn = abs_path.clone();
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(12.))
+                        .p(px(24.))
+                        .child(file_type_icon(&path))
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(theme().text))
+                                .child(
+                                    path.file_name()
+                                        .and_then(|n| n.to_str())
+                                        .unwrap_or("Binary file")
+                                        .to_owned(),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(theme().subtle))
+                                .child(if is_zh() {
                                     format!(
                                         "二进制文件（{}），不支持直接作为文本编辑",
                                         format_bytes(*total_bytes)
@@ -1093,53 +1107,52 @@ impl DesktopView {
                                         "Binary file ({}) — text editing unavailable",
                                         format_bytes(*total_bytes)
                                     )
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(8.))
-                                    .when_some(abs_open_btn, |row, full| {
-                                        row.child(
-                                            text_button(
-                                                "open-binary-default",
-                                                tr("用默认应用打开", "Open with Default App"),
-                                                true,
-                                            )
-                                            .on_click(
-                                                cx.listener(move |view, _, _, cx| {
-                                                    if let Err(err) = open_with_default_app(&full) {
-                                                        view.notice = Some(err);
-                                                        cx.notify();
-                                                    }
-                                                }),
-                                            ),
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.))
+                                .when_some(abs_open_btn, |row, full| {
+                                    row.child(
+                                        text_button(
+                                            "open-binary-default",
+                                            tr("用默认应用打开", "Open with Default App"),
+                                            true,
                                         )
-                                    })
-                                    .when_some(abs_reveal_btn, |row, full| {
-                                        row.child(
-                                            text_button(
-                                                "reveal-binary-finder",
-                                                tr("在文件管理器中显示", "Reveal in File Manager"),
-                                                false,
-                                            )
-                                            .on_click(
-                                                cx.listener(move |view, _, _, cx| {
-                                                    if let Err(err) = reveal_in_file_manager(&full)
-                                                    {
-                                                        view.notice = Some(err);
-                                                        cx.notify();
-                                                    }
-                                                }),
-                                            ),
+                                        .on_click(
+                                            cx.listener(move |view, _, _, cx| {
+                                                if let Err(err) = open_with_default_app(&full) {
+                                                    view.notice = Some(err);
+                                                    cx.notify();
+                                                }
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when_some(abs_reveal_btn, |row, full| {
+                                    row.child(
+                                        text_button(
+                                            "reveal-binary-finder",
+                                            tr("在文件管理器中显示", "Reveal in File Manager"),
+                                            false,
                                         )
-                                    }),
-                            )
-                            .into_any_element()
-                    }
-                    _ => empty(tr("正在初始化编辑器…", "Initializing editor…")).into_any_element(),
+                                        .on_click(
+                                            cx.listener(move |view, _, _, cx| {
+                                                if let Err(err) = reveal_in_file_manager(&full) {
+                                                    view.notice = Some(err);
+                                                    cx.notify();
+                                                }
+                                            }),
+                                        ),
+                                    )
+                                }),
+                        )
+                        .into_any_element()
                 }
-            };
+                _ => empty(tr("正在初始化编辑器…", "Initializing editor…")).into_any_element(),
+            }
+        };
 
         // Rebased-inspired bottom editor status bar
         let status_bar: Option<Div> = editor.map(|ed_entity| {
@@ -1163,11 +1176,11 @@ impl DesktopView {
                 .flex()
                 .flex_shrink_0()
                 .items_center()
-                .bg(rgb(0x1b1d22))
+                .bg(rgb(theme().editor_chrome_bg))
                 .border_t_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(theme().border))
                 .text_size(px(11.))
-                .text_color(rgb(SUBTLE))
+                .text_color(rgb(theme().subtle))
                 .child(elide(rel_display).flex_1().min_w_0())
                 .when(bm_count > 0, |bar| {
                     bar.child(
@@ -1175,8 +1188,8 @@ impl DesktopView {
                             .id("editor-status-bookmarks")
                             .px(px(5.))
                             .rounded(px(3.))
-                            .text_color(rgb(0xe5b473))
-                            .hover(|s| s.bg(rgb(HOVER)))
+                            .text_color(rgb(theme().editor_bookmark_color))
+                            .hover(|s| s.bg(rgb(theme().hover)))
                             .child(format!("★ {bm_count}"))
                             .on_click(cx.listener(|view, _, window, cx| {
                                 if let Some(ed) = view.active_editor() {
@@ -1186,16 +1199,13 @@ impl DesktopView {
                     )
                 })
                 .when(sel_len > 0, |bar| {
-                    bar.child(
-                        div()
-                            .flex_shrink_0()
-                            .text_color(rgb(MUTED))
-                            .child(if is_zh() {
-                                format!("已选 {sel_len} 字符")
-                            } else {
-                                format!("{sel_len} selected")
-                            }),
-                    )
+                    bar.child(div().flex_shrink_0().text_color(rgb(theme().muted)).child(
+                        if is_zh() {
+                            format!("已选 {sel_len} 字符")
+                        } else {
+                            format!("{sel_len} selected")
+                        },
+                    ))
                 })
                 .child(
                     div()
@@ -1203,8 +1213,8 @@ impl DesktopView {
                         .flex_shrink_0()
                         .px(px(5.))
                         .rounded(px(3.))
-                        .text_color(rgb(MUTED))
-                        .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                        .text_color(rgb(theme().muted))
+                        .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
                         .child(format!("Ln {ln}, Col {col}"))
                         .on_click(cx.listener(|view, _, window, cx| {
                             view.open_editor_goto_bar(window, cx);
@@ -1219,8 +1229,12 @@ impl DesktopView {
                         .flex_shrink_0()
                         .px(px(5.))
                         .rounded(px(3.))
-                        .text_color(rgb(if wrap_on { LINK } else { SUBTLE }))
-                        .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                        .text_color(rgb(if wrap_on {
+                            theme().link
+                        } else {
+                            theme().subtle
+                        }))
+                        .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
                         .child(if wrap_on {
                             tr("软换行: 开", "Wrap: On")
                         } else {
@@ -1239,7 +1253,7 @@ impl DesktopView {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(theme().muted))
                         .child(lang_label),
                 )
                 .when_some(total_bytes, |bar, bytes| {
@@ -1545,8 +1559,8 @@ impl DesktopView {
                     .overflow_y_scroll()
                     .rounded(px(5.))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL))
+                    .border_color(rgb(theme().border))
+                    .bg(rgb(theme().panel))
                     .py(px(4.))
                     .font_family("Menlo")
                     .text_size(px(11.5))
@@ -1555,8 +1569,8 @@ impl DesktopView {
                             .id(("hunk-old", i))
                             .px(px(8.))
                             .py(px(1.))
-                            .bg(rgb(0x311d20))
-                            .text_color(rgb(0xf2a1a8))
+                            .bg(rgb(theme().diff_removed_bg))
+                            .text_color(rgb(theme().diff_removed_fg))
                             .whitespace_nowrap()
                             .child(format!("- {line}"))
                     }))
@@ -1565,8 +1579,8 @@ impl DesktopView {
                             .id(("hunk-new", i))
                             .px(px(8.))
                             .py(px(1.))
-                            .bg(rgb(0x1b2e21))
-                            .text_color(rgb(0x9ee0a8))
+                            .bg(rgb(theme().diff_added_bg))
+                            .text_color(rgb(theme().diff_added_fg))
                             .whitespace_nowrap()
                             .child(format!("+ {line}"))
                     })),
@@ -2041,7 +2055,7 @@ impl DesktopView {
             .children(
                 form.error
                     .clone()
-                    .map(|error| div().text_color(rgb(ERROR)).child(error)),
+                    .map(|error| div().text_color(rgb(theme().error)).child(error)),
             )
             .child(self.review_buttons(
                 "confirm-project-entry",
@@ -2120,7 +2134,7 @@ impl DesktopView {
             .child(
                 div()
                     .text_size(px(11.5))
-                    .text_color(rgb(WARNING))
+                    .text_color(rgb(theme().warning))
                     .child(if dialog.is_dir {
                         tr(
                             "将从磁盘永久删除该文件夹及其内部所有文件，请谨慎确认。",

@@ -275,9 +275,17 @@ impl DesktopView {
                 .py(px(8.))
                 .rounded(px(6.))
                 .border_1()
-                .border_color(rgb(if active { 0x4db8a8 } else { BORDER }))
-                .bg(rgb(if active { 0x172d32 } else { CARD }))
-                .hover(|s| s.border_color(rgb(if active { 0x69e8ce } else { MUTED })))
+                .border_color(rgb(if active {
+                    theme().brand_border
+                } else {
+                    theme().border
+                }))
+                .bg(rgb(if active {
+                    theme().brand_bg
+                } else {
+                    theme().card
+                }))
+                .hover(|s| s.border_color(rgb(if active { theme().brand } else { theme().muted })))
                 .child(
                     div()
                         .flex()
@@ -289,14 +297,18 @@ impl DesktopView {
                                 .h(px(10.))
                                 .rounded(px(5.))
                                 .border_1()
-                                .border_color(rgb(if active { 0x69e8ce } else { SUBTLE }))
-                                .bg(rgb(if active { 0x69e8ce } else { PANEL })),
+                                .border_color(rgb(if active {
+                                    theme().brand
+                                } else {
+                                    theme().subtle
+                                }))
+                                .bg(rgb(if active { theme().brand } else { theme().panel })),
                         )
                         .child(
                             elide(title)
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_size(px(12.))
-                                .text_color(rgb(TEXT)),
+                                .text_color(rgb(theme().text)),
                         ),
                 )
                 .child(
@@ -304,7 +316,7 @@ impl DesktopView {
                         .pl(px(16.))
                         .text_size(px(11.))
                         .line_height(px(15.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(theme().muted))
                         .child(desc),
                 )
                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -367,8 +379,8 @@ impl DesktopView {
             .flex_col()
             .rounded(px(6.))
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
+            .border_color(rgb(theme().border))
+            .bg(rgb(theme().panel))
             .overflow_hidden()
             .child(
                 div()
@@ -377,14 +389,14 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .bg(rgb(CARD))
+                    .bg(rgb(theme().card))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(
                         div()
                             .text_size(px(11.5))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme().muted))
                             .child(selection_summary),
                     )
                     .child(
@@ -451,7 +463,7 @@ impl DesktopView {
                             .px(px(8.))
                             .py(px(4.))
                             .rounded(px(4.))
-                            .hover(|s| s.bg(rgb(HOVER)))
+                            .hover(|s| s.bg(rgb(theme().hover)))
                             .child(
                                 div()
                                     .w(px(14.))
@@ -459,17 +471,32 @@ impl DesktopView {
                                     .flex_shrink_0()
                                     .rounded(px(3.))
                                     .border_1()
-                                    .border_color(rgb(if checked { 0x4db8a8 } else { BORDER }))
-                                    .bg(rgb(if checked { 0x1e4c46 } else { CHROME }))
+                                    .border_color(rgb(if checked {
+                                        theme().brand_border
+                                    } else {
+                                        theme().border
+                                    }))
+                                    .bg(rgb(if checked {
+                                        theme().primary_bg
+                                    } else {
+                                        theme().chrome
+                                    }))
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .text_size(px(10.))
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xa7f5df))
+                                    .text_color(rgb(theme().primary_text))
                                     .child(if checked { "✓" } else { "" }),
                             )
-                            .child(icon(Icon::Folder, if checked { 0x69e8ce } else { SUBTLE }))
+                            .child(icon(
+                                Icon::Folder,
+                                if checked {
+                                    theme().brand
+                                } else {
+                                    theme().subtle
+                                },
+                            ))
                             .child(
                                 div()
                                     .flex()
@@ -481,13 +508,17 @@ impl DesktopView {
                                         elide(repo.name.clone())
                                             .flex_shrink_0()
                                             .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(if checked { TEXT } else { SUBTLE })),
+                                            .text_color(rgb(if checked {
+                                                theme().text
+                                            } else {
+                                                theme().subtle
+                                            })),
                                     )
                                     .child(
                                         elide(repo.relative_path.clone())
                                             .flex_1()
                                             .text_size(px(11.))
-                                            .text_color(rgb(SUBTLE)),
+                                            .text_color(rgb(theme().subtle)),
                                     ),
                             )
                             .on_click(cx.listener(move |view, _, _, cx| {
@@ -533,7 +564,11 @@ impl DesktopView {
                     .flex_col()
                     .gap(px(3.))
                     .child(dialog_heading(heading))
-                    .child(elide(subtitle).text_size(px(11.5)).text_color(rgb(SUBTLE))),
+                    .child(
+                        elide(subtitle)
+                            .text_size(px(11.5))
+                            .text_color(rgb(theme().subtle)),
+                    ),
             )
             .child(cards_row)
             .when(form.placement == NestedPlacementChoice::NewGroup, |col| {
@@ -545,7 +580,7 @@ impl DesktopView {
                         .child(
                             div()
                                 .text_size(px(11.5))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(theme().muted))
                                 .child(tr("新分组名称", "New group name")),
                         )
                         .child(form.group_name.clone()),
@@ -553,16 +588,17 @@ impl DesktopView {
             })
             .child(list_card)
             .when(form.truncated, |col| {
-                col.child(div().text_size(px(11.)).text_color(rgb(WARNING)).child(tr(
+                col.child(div().text_size(px(11.)).text_color(rgb(theme().warning)).child(tr(
                     "目录层级较深或目录较多，已按安全上限截断扫描结果。",
                     "Scan reached the directory safety limit; deeper directories were skipped.",
                 )))
             })
-            .children(
-                form.error
-                    .clone()
-                    .map(|err| div().text_size(px(11.5)).text_color(rgb(ERROR)).child(err)),
-            )
+            .children(form.error.clone().map(|err| {
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgb(theme().error))
+                    .child(err)
+            }))
             .child(
                 div()
                     .flex()
@@ -577,7 +613,7 @@ impl DesktopView {
                                 tr("不再提示这些子仓库", "Ignore These"),
                                 false,
                             )
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .on_click(cx.listener(
                                 move |view, _, window, cx| {
                                     view.close_overlay(window, cx);

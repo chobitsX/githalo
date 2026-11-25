@@ -11,6 +11,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::branch_ops::PullStrategy;
+use crate::theme::ThemePreference;
 
 /// Active display locale.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,6 +198,7 @@ impl BranchClickMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppPreferences {
     pub language: LanguagePreference,
+    pub theme: ThemePreference,
     pub ui_scale: u16,
     pub pull_strategy: PullStrategy,
     pub show_commit_details: bool,
@@ -235,6 +237,7 @@ impl Default for AppPreferences {
         favorite_branches.insert("refs/remotes/origin/master".to_owned());
         Self {
             language: LanguagePreference::System,
+            theme: ThemePreference::System,
             ui_scale: 100,
             pull_strategy: PullStrategy::FastForwardOnly,
             show_commit_details: true,
@@ -281,6 +284,7 @@ impl AppPreferences {
                 |v: &str| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0");
             match key.trim() {
                 "language" => prefs.language = LanguagePreference::from_key(value),
+                "theme" => prefs.theme = ThemePreference::from_key(value),
                 "ui_scale" => {
                     if let Ok(parsed) = value.trim().parse::<u16>() {
                         prefs.ui_scale = normalize_ui_scale(parsed);
@@ -346,8 +350,9 @@ impl AppPreferences {
             .collect::<Vec<_>>()
             .join(",");
         let content = format!(
-            "language={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nshow_branches_drawer={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\n",
+            "language={}\ntheme={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nshow_branches_drawer={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\n",
             self.language.as_key(),
+            self.theme.as_key(),
             normalize_ui_scale(self.ui_scale),
             pull_key,
             self.show_commit_details,
@@ -411,6 +416,7 @@ mod tests {
         favorites.insert("refs/heads/release/v1".to_owned());
         let saved = AppPreferences {
             language: LanguagePreference::EnUs,
+            theme: ThemePreference::Light,
             ui_scale: 110,
             pull_strategy: PullStrategy::Rebase,
             show_commit_details: false,

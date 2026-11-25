@@ -34,11 +34,11 @@ impl Render for DragRepoBadge {
             .px(px(10.))
             .py(px(5.))
             .rounded(px(6.))
-            .bg(rgb(BRAND_BG))
+            .bg(rgb(theme().brand_bg))
             .border_1()
-            .border_color(rgb(BRAND))
+            .border_color(rgb(theme().brand))
             .text_size(px(12.))
-            .text_color(rgb(TEXT))
+            .text_color(rgb(theme().text))
             .child(self.0.clone())
     }
 }
@@ -228,38 +228,39 @@ impl DesktopView {
             }
         });
 
+        let t = theme();
         let repos_badge_style = TabBadgeStyle {
-            bg: BRAND_BG,
-            active_bg: 0x1e3c38,
-            fg: BRAND_TEXT,
-            dot: BRAND,
+            bg: t.brand_bg,
+            active_bg: t.badge_repos_active_bg,
+            fg: t.brand_text,
+            dot: t.brand,
         };
         let commit_badge_style = if counts.commit_conflicts {
             TabBadgeStyle {
-                bg: DANGER_BG,
-                active_bg: 0x4c232b,
-                fg: ERROR,
-                dot: ERROR,
+                bg: t.danger_bg,
+                active_bg: t.badge_conflict_active_bg,
+                fg: t.error,
+                dot: t.error,
             }
         } else {
             TabBadgeStyle {
-                bg: ACCENT_BG,
-                active_bg: 0x243652,
-                fg: LINK,
-                dot: LINK,
+                bg: t.accent_bg,
+                active_bg: t.badge_commit_active_bg,
+                fg: t.link,
+                dot: t.link,
             }
         };
         let stash_badge_style = TabBadgeStyle {
-            bg: WARN_BG,
-            active_bg: 0x3e311d,
-            fg: WARNING,
-            dot: WARNING,
+            bg: t.warn_bg,
+            active_bg: t.badge_stash_active_bg,
+            fg: t.warning,
+            dot: t.warning,
         };
         let shelf_badge_style = TabBadgeStyle {
-            bg: REMOTE_BG,
-            active_bg: 0x32294c,
-            fg: REMOTE_TEXT,
-            dot: REMOTE_TEXT,
+            bg: t.remote_bg,
+            active_bg: t.badge_shelf_active_bg,
+            fg: t.remote_text,
+            dot: t.remote_text,
         };
 
         let seg_tab = |id: &'static str,
@@ -285,14 +286,22 @@ impl DesktopView {
                 .items_center()
                 .justify_center()
                 .gap(px(3.5))
-                .bg(rgb(if active { SELECT_SOFT } else { CHROME }))
-                .text_color(rgb(if active { TEXT } else { MUTED }))
+                .bg(rgb(if active {
+                    theme().select_soft
+                } else {
+                    theme().chrome
+                }))
+                .text_color(rgb(if active { theme().text } else { theme().muted }))
                 .when(active, |t| t.font_weight(FontWeight::MEDIUM))
                 .hover(move |s| {
-                    s.bg(rgb(if active { SELECT_SOFT } else { HOVER }))
-                        .text_color(rgb(TEXT))
+                    s.bg(rgb(if active {
+                        theme().select_soft
+                    } else {
+                        theme().hover
+                    }))
+                    .text_color(rgb(theme().text))
                 })
-                .focus_visible(|s| s.border_1().border_color(rgb(BRAND)))
+                .focus_visible(|s| s.border_1().border_color(rgb(theme().brand)))
                 .when_some(tip, |tab, text| {
                     tab.on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
                         view.set_hovered_hint(hovered.then(|| text.clone()), cx);
@@ -318,7 +327,7 @@ impl DesktopView {
             .h_full()
             .w(width)
             .min_h_0()
-            .bg(rgb(SIDEBAR_BG))
+            .bg(rgb(theme().sidebar_bg))
             .overflow_hidden()
             .when(panel != Panel::ProjectFiles, |side| {
                 side.child(
@@ -329,7 +338,7 @@ impl DesktopView {
                         .flex_shrink_0()
                         .items_center()
                         .border_b_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(theme().border))
                         .when(compact, |tabs| tabs.text_size(rems(0.74)))
                         .child(
                             div()
@@ -337,9 +346,9 @@ impl DesktopView {
                                 .p(px(2.))
                                 .gap(px(2.))
                                 .rounded(px(7.))
-                                .bg(rgb(CHROME))
+                                .bg(rgb(theme().chrome))
                                 .border_1()
-                                .border_color(rgb(BORDER))
+                                .border_color(rgb(theme().border))
                                 .flex()
                                 .items_center()
                                 .child(seg_tab(
@@ -406,9 +415,14 @@ impl DesktopView {
                 format!("{diverged_repos} to sync")
             };
             Some(
-                pill(label, BRAND_BG, BRAND_BORDER, BRAND_TEXT)
-                    .text_size(rems(0.68))
-                    .into_any_element(),
+                pill(
+                    label,
+                    theme().brand_bg,
+                    theme().brand_border,
+                    theme().brand_text,
+                )
+                .text_size(rems(0.68))
+                .into_any_element(),
             )
         } else {
             let label = if is_zh() {
@@ -422,7 +436,7 @@ impl DesktopView {
                 div()
                     .pr(px(4.))
                     .text_size(rems(0.72))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child(label)
                     .into_any_element(),
             )
@@ -436,7 +450,7 @@ impl DesktopView {
             .flex_shrink_0()
             .items_center()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .gap(px(3.))
             .child(
                 icon_button(
@@ -516,20 +530,26 @@ impl DesktopView {
             .border_color(transparent_black())
             .overflow_y_scroll()
             .drag_over::<ExternalPaths>(|style, _, _, _| {
-                style.bg(rgb(BRAND_BG)).border_color(rgb(BRAND))
+                style
+                    .bg(rgb(theme().brand_bg))
+                    .border_color(rgb(theme().brand))
             })
             .on_drop::<ExternalPaths>(cx.listener(|view, paths: &ExternalPaths, _, cx| {
                 view.drop_external_paths(paths, None, cx);
             }))
             .children(groups.map(|group| self.group(group, visible_group, cx)))
             .when(!self.workspace.ready, |list| {
-                list.child(div().py(px(14.)).px(px(7.)).text_color(rgb(SUBTLE)).child(
-                    if self.workspace.message.is_some() {
-                        tr("无法读取仓库列表", "Failed to load repositories")
-                    } else {
-                        tr("正在读取仓库列表…", "Loading repositories…")
-                    },
-                ))
+                list.child(
+                    div()
+                        .py(px(14.))
+                        .px(px(7.))
+                        .text_color(rgb(theme().subtle))
+                        .child(if self.workspace.message.is_some() {
+                            tr("无法读取仓库列表", "Failed to load repositories")
+                        } else {
+                            tr("正在读取仓库列表…", "Loading repositories…")
+                        }),
+                )
             })
             .when(
                 self.workspace.ready && self.workspace.repos.is_empty(),
@@ -542,7 +562,7 @@ impl DesktopView {
                             .gap(px(8.))
                             .py(px(14.))
                             .px(px(7.))
-                            .child(div().text_color(rgb(SUBTLE)).child(tr(
+                            .child(div().text_color(rgb(theme().subtle)).child(tr(
                                 "还没有添加仓库，可点击下方按钮或直接拖入本地文件夹",
                                 "No repositories yet — click below or drag folders here",
                             )))
@@ -640,20 +660,20 @@ impl DesktopView {
             .pr(px(if group.members.is_empty() { 26. } else { 50. }))
             .gap(px(5.))
             .rounded(px(5.))
-            .hover(|s| s.bg(rgb(HOVER)))
-            .focus_visible(|s| s.bg(rgb(HOVER)))
-            .child(icon(disclosure, SUBTLE))
+            .hover(|s| s.bg(rgb(theme().hover)))
+            .focus_visible(|s| s.bg(rgb(theme().hover)))
+            .child(icon(disclosure, theme().subtle))
             .child(
                 elide(group_title.clone())
                     .text_size(rems(0.75))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(MUTED)),
+                    .text_color(rgb(theme().muted)),
             )
             .child(
                 div()
                     .flex_shrink_0()
                     .text_size(rems(0.7))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child(group.members.len().to_string()),
             )
             .when(changed > 0, |row| {
@@ -662,7 +682,15 @@ impl DesktopView {
                 } else {
                     format!("{changed}")
                 };
-                row.child(pill(badge, BRAND_BG, BRAND_BORDER, BRAND_TEXT).text_size(rems(0.64)))
+                row.child(
+                    pill(
+                        badge,
+                        theme().brand_bg,
+                        theme().brand_border,
+                        theme().brand_text,
+                    )
+                    .text_size(rems(0.64)),
+                )
             })
             .on_click(cx.listener(move |view, event: &gpui::ClickEvent, _, cx| {
                 if event.click_count() == 1 {
@@ -729,10 +757,14 @@ impl DesktopView {
             .pb(px(4.))
             .mb(px(2.))
             .drag_over::<ExternalPaths>(|style, _, _, _| {
-                style.bg(rgb(BRAND_BG)).border_color(rgb(BRAND))
+                style
+                    .bg(rgb(theme().brand_bg))
+                    .border_color(rgb(theme().brand))
             })
             .drag_over::<DraggedRepo>(|style, _, _, _| {
-                style.bg(rgb(BRAND_BG)).border_color(rgb(BRAND))
+                style
+                    .bg(rgb(theme().brand_bg))
+                    .border_color(rgb(theme().brand))
             })
             .on_drop::<ExternalPaths>(cx.listener(move |view, paths: &ExternalPaths, _, cx| {
                 view.drop_external_paths(paths, id, cx);
@@ -839,11 +871,11 @@ impl DesktopView {
                     .px(px(8.))
                     .py(px(4.))
                     .rounded(px(5.))
-                    .bg(rgb(CARD))
+                    .bg(rgb(theme().card))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .text_size(px(11.))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child(tr("正在扫描子仓库…", "Scanning nested repositories…")),
             );
         } else if let Some(found) = discovered.filter(|d| !d.is_empty()) {
@@ -874,9 +906,9 @@ impl DesktopView {
                     .px(px(8.))
                     .py(px(4.))
                     .rounded(px(6.))
-                    .bg(rgb(BRAND_BG))
+                    .bg(rgb(theme().brand_bg))
                     .border_1()
-                    .border_color(rgb(BRAND_BORDER))
+                    .border_color(rgb(theme().brand_border))
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -889,14 +921,14 @@ impl DesktopView {
                             .size(px(5.5))
                             .flex_shrink_0()
                             .rounded(px(3.))
-                            .bg(rgb(BRAND)),
+                            .bg(rgb(theme().brand)),
                     )
                     .child(
                         elide(banner_label)
                             .flex_1()
                             .text_size(px(11.))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(BRAND_TEXT)),
+                            .text_color(rgb(theme().brand_text)),
                     )
                     .child(
                         div()
@@ -907,15 +939,15 @@ impl DesktopView {
                             .px(px(7.))
                             .h(px(19.))
                             .rounded(px(4.))
-                            .bg(rgb(PRIMARY_BG))
+                            .bg(rgb(theme().primary_bg))
                             .border_1()
-                            .border_color(rgb(PRIMARY_BORDER))
+                            .border_color(rgb(theme().primary_border))
                             .flex()
                             .items_center()
                             .text_size(px(10.5))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(PRIMARY_TEXT))
-                            .hover(|s| s.bg(rgb(PRIMARY_HOVER)))
+                            .text_color(rgb(theme().primary_text))
+                            .hover(|s| s.bg(rgb(theme().primary_hover)))
                             .child(tr("纳管…", "Adopt…"))
                             .on_click(cx.listener(move |view, _, window, cx| {
                                 cx.stop_propagation();
@@ -934,9 +966,9 @@ impl DesktopView {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .hover(|s| s.bg(rgb(HOVER)))
+                            .hover(|s| s.bg(rgb(theme().hover)))
                             .tooltip(tooltip(tr("忽略本次发现", "Ignore these").to_owned()))
-                            .child(icon(Icon::Close, SUBTLE))
+                            .child(icon(Icon::Close, theme().subtle))
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 cx.stop_propagation();
                                 view.dispatch(
@@ -957,7 +989,7 @@ impl DesktopView {
                 .pl(px(5.))
                 .my(px(1.))
                 .border_l_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(theme().border))
                 .flex()
                 .flex_col()
                 .gap(px(0.5))
@@ -1002,9 +1034,9 @@ impl DesktopView {
                 let mut row = div().flex().items_center().flex_shrink_0().gap(px(3.));
                 if counts.behind > 0 {
                     let (bg, border, fg) = if count_is_historical {
-                        (WARN_BG, WARN_BORDER, WARNING)
+                        (theme().warn_bg, theme().warn_border, theme().warning)
                     } else {
-                        (ACCENT_BG, ACCENT_BORDER, LINK)
+                        (theme().accent_bg, theme().accent_border, theme().link)
                     };
                     row = row.child(
                         div()
@@ -1023,9 +1055,9 @@ impl DesktopView {
                 }
                 if counts.ahead > 0 {
                     let (bg, border, fg) = if count_is_historical {
-                        (WARN_BG, WARN_BORDER, WARNING)
+                        (theme().warn_bg, theme().warn_border, theme().warning)
                     } else {
-                        (SUCCESS_BG, SUCCESS_BORDER, SUCCESS)
+                        (theme().success_bg, theme().success_border, theme().success)
                     };
                     row = row.child(
                         div()
@@ -1152,9 +1184,17 @@ impl DesktopView {
                 },
                 |dragged, _, _, cx| cx.new(|_| DragRepoBadge(dragged.name.clone())),
             )
-            .when(selected, |row| row.bg(rgb(ACTIVE)).child(selection_bar()))
-            .hover(move |s| s.bg(rgb(if selected { ACTIVE } else { HOVER })))
-            .focus_visible(|s| s.bg(rgb(ACTIVE)))
+            .when(selected, |row| {
+                row.bg(rgb(theme().active)).child(selection_bar())
+            })
+            .hover(move |s| {
+                s.bg(rgb(if selected {
+                    theme().active
+                } else {
+                    theme().hover
+                }))
+            })
+            .focus_visible(|s| s.bg(rgb(theme().active)))
             .on_click(
                 cx.listener(move |view, event: &gpui::ClickEvent, window, cx| {
                     view.select_repo(id, Some(group), window, cx);
@@ -1198,11 +1238,11 @@ impl DesktopView {
                 .child(icon(
                     Icon::RepoBook,
                     if selected {
-                        BRAND_TEXT
+                        theme().brand_text
                     } else if nested_parent.is_some() {
-                        SUBTLE
+                        theme().subtle
                     } else {
-                        MUTED
+                        theme().muted
                     },
                 ))
                 .child(
@@ -1221,13 +1261,17 @@ impl DesktopView {
                         } else {
                             FontWeight::MEDIUM
                         })
-                        .text_color(rgb(TEXT)),
+                        .text_color(rgb(theme().text)),
                 )
                 .child(
                     elide(branch_label)
                         .flex_1()
                         .text_size(rems(0.71))
-                        .text_color(rgb(if selected { MUTED } else { SUBTLE })),
+                        .text_color(rgb(if selected {
+                            theme().muted
+                        } else {
+                            theme().subtle
+                        })),
                 )
                 .when_some(status_label, |r, _| {
                     r.child(
@@ -1235,7 +1279,11 @@ impl DesktopView {
                             .size(px(5.5))
                             .flex_shrink_0()
                             .rounded(px(999.))
-                            .bg(rgb(if is_transient_status { BRAND } else { WARNING })),
+                            .bg(rgb(if is_transient_status {
+                                theme().brand
+                            } else {
+                                theme().warning
+                            })),
                     )
                 })
                 .children(sync_badges)
@@ -1263,8 +1311,8 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .hover(|s| s.bg(rgb(HOVER)))
-                    .child(icon(arrow, BRAND))
+                    .hover(|s| s.bg(rgb(theme().hover)))
+                    .child(icon(arrow, theme().brand))
                     .on_click(cx.listener(move |view, _, _, cx| {
                         cx.stop_propagation();
                         view.dispatch(Action::ToggleNested(id), cx);
@@ -1278,7 +1326,11 @@ impl DesktopView {
                 } else {
                     Icon::RepoBook
                 },
-                if selected { BRAND_TEXT } else { MUTED },
+                if selected {
+                    theme().brand_text
+                } else {
+                    theme().muted
+                },
             ))
             .child(
                 elide(repo.name.clone())
@@ -1288,7 +1340,7 @@ impl DesktopView {
                     } else {
                         FontWeight::MEDIUM
                     })
-                    .text_color(rgb(TEXT)),
+                    .text_color(rgb(theme().text)),
             );
 
         let first = div()
@@ -1303,9 +1355,9 @@ impl DesktopView {
                     .map(|(_, has_diverged, badge_text, tip_text)| {
                         let tip = tip_text.clone();
                         let (bg, border, fg) = if *has_diverged {
-                            (WARN_BG, WARN_BORDER, WARNING)
+                            (theme().warn_bg, theme().warn_border, theme().warning)
                         } else {
-                            (CARD, BORDER_STRONG, MUTED)
+                            (theme().card, theme().border_strong, theme().muted)
                         };
                         div()
                             .id(("nested-pill", id.get() as usize))
@@ -1322,7 +1374,7 @@ impl DesktopView {
                             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
                                 view.set_hovered_hint(hovered.then(|| tip.clone()), cx);
                             }))
-                            .hover(|s| s.border_color(rgb(BRAND)))
+                            .hover(|s| s.border_color(rgb(theme().brand)))
                             .child(badge_text.clone())
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 cx.stop_propagation();
@@ -1338,40 +1390,46 @@ impl DesktopView {
         } else {
             rems(1.25)
         };
-        let second = div()
-            .flex()
-            .ml(branch_indent)
-            .items_center()
-            .min_w_0()
-            .gap(px(5.))
-            .child(
-                elide(branch_label)
-                    .text_size(rems(0.72))
-                    .text_color(rgb(if selected { MUTED } else { SUBTLE })),
-            )
-            .children(status_label.map(|status| {
-                div()
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .size(px(4.5))
-                            .rounded(px(2.5))
-                            .bg(rgb(if is_transient_status { BRAND } else { WARNING })),
-                    )
-                    .child(
-                        div()
-                            .text_size(rems(0.68))
-                            .text_color(rgb(if is_transient_status {
-                                BRAND_TEXT
+        let second =
+            div()
+                .flex()
+                .ml(branch_indent)
+                .items_center()
+                .min_w_0()
+                .gap(px(5.))
+                .child(
+                    elide(branch_label)
+                        .text_size(rems(0.72))
+                        .text_color(rgb(if selected {
+                            theme().muted
+                        } else {
+                            theme().subtle
+                        })),
+                )
+                .children(status_label.map(|status| {
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(div().size(px(4.5)).rounded(px(2.5)).bg(rgb(
+                            if is_transient_status {
+                                theme().brand
                             } else {
-                                WARNING
-                            }))
-                            .child(status),
-                    )
-            }));
+                                theme().warning
+                            },
+                        )))
+                        .child(
+                            div()
+                                .text_size(rems(0.68))
+                                .text_color(rgb(if is_transient_status {
+                                    theme().brand_text
+                                } else {
+                                    theme().warning
+                                }))
+                                .child(status),
+                        )
+                }));
 
         let row_pl = if nested_summary.is_some() {
             px(6.)
@@ -1396,7 +1454,7 @@ impl DesktopView {
                 .ml(branch_indent)
                 .pr(px(5.))
                 .text_size(rems(0.66))
-                .text_color(rgb(WARNING))
+                .text_color(rgb(theme().warning))
             }))
             .into_any_element()
     }
@@ -1418,7 +1476,7 @@ impl DesktopView {
 
         let upstream_view: AnyElement = if let Some(up) = &repo.upstream {
             elide(up.clone())
-                .text_color(rgb(MUTED))
+                .text_color(rgb(theme().muted))
                 .font_weight(FontWeight::MEDIUM)
                 .into_any_element()
         } else if can_bind_upstream {
@@ -1426,7 +1484,7 @@ impl DesktopView {
                 .id("footer-bind-upstream")
                 .role(Role::Button)
                 .tab_index(0)
-                .text_color(rgb(WARNING))
+                .text_color(rgb(theme().warning))
                 .hover(|s| s.underline())
                 .child(tr("未设置 (绑定…)", "Unset (Bind…)"))
                 .on_click(cx.listener(move |view, _, window, cx| {
@@ -1446,7 +1504,10 @@ impl DesktopView {
                 }))
                 .into_any_element()
         } else {
-            div().text_color(rgb(SUBTLE)).child("—").into_any_element()
+            div()
+                .text_color(rgb(theme().subtle))
+                .child("—")
+                .into_any_element()
         };
 
         div()
@@ -1454,14 +1515,14 @@ impl DesktopView {
             .px(px(10.))
             .py(px(6.))
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(CHROME))
+            .border_color(rgb(theme().border))
+            .bg(rgb(theme().chrome))
             .flex()
             .items_center()
             .justify_between()
             .gap(px(8.))
             .text_size(rems(0.7))
-            .text_color(rgb(SUBTLE))
+            .text_color(rgb(theme().subtle))
             .child(
                 div()
                     .flex()
@@ -1479,7 +1540,7 @@ impl DesktopView {
                     .items_center()
                     .gap(px(4.))
                     .child(tr("获取", "Fetched"))
-                    .child(div().text_color(rgb(MUTED)).child(time)),
+                    .child(div().text_color(rgb(theme().muted)).child(time)),
             )
             .into_any_element()
     }
@@ -1555,12 +1616,12 @@ impl DesktopView {
                                     view.workspace.project_git_status.get(&entry_path).copied()
                                 };
                                 let status_color = match status {
-                                    Some(FileGitStatus::Modified) => LINK,
+                                    Some(FileGitStatus::Modified) => theme().link,
                                     Some(FileGitStatus::Added | FileGitStatus::Untracked) => {
-                                        SUCCESS
+                                        theme().success
                                     }
-                                    Some(FileGitStatus::Conflicted) => ERROR,
-                                    None => TEXT,
+                                    Some(FileGitStatus::Conflicted) => theme().error,
+                                    None => theme().text,
                                 };
                                 let click_path = entry_path.clone();
                                 let menu_path = entry_path.clone();
@@ -1588,19 +1649,23 @@ impl DesktopView {
                                     .rounded(px(5.))
                                     .text_size(rems(0.8125))
                                     .when(is_selected, |el| {
-                                        el.bg(rgb(ACTIVE)).child(selection_bar())
+                                        el.bg(rgb(theme().active)).child(selection_bar())
                                     })
                                     .hover(move |s| {
-                                        s.bg(rgb(if is_selected { ACTIVE } else { HOVER }))
+                                        s.bg(rgb(if is_selected {
+                                            theme().active
+                                        } else {
+                                            theme().hover
+                                        }))
                                     })
-                                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                                    .focus_visible(|s| s.bg(rgb(theme().hover)))
                                     .child(optional_icon(
                                         folder.then_some(if expanded {
                                             Icon::ChevronDown
                                         } else {
                                             Icon::ChevronRight
                                         }),
-                                        SUBTLE,
+                                        theme().subtle,
                                     ))
                                     .child(entry_icon)
                                     .child(elide(name).flex_1().text_color(rgb(status_color)))
@@ -1697,7 +1762,7 @@ impl DesktopView {
                     .pr(px(6.))
                     .gap(px(5.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(folder_type_icon(&repo.name, true))
                     .child(
                         elide(repo.name.clone())
@@ -1761,10 +1826,10 @@ impl DesktopView {
                         .flex()
                         .items_center()
                         .rounded(px(6.))
-                        .bg(rgb(CARD))
+                        .bg(rgb(theme().card))
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .child(icon(Icon::Search, SUBTLE))
+                        .border_color(rgb(theme().border))
+                        .child(icon(Icon::Search, theme().subtle))
                         .child(
                             div()
                                 .flex_1()
@@ -1817,7 +1882,7 @@ impl DesktopView {
                         div()
                             .px(px(10.))
                             .pb(px(6.))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child(tr("正在读取目录…", "Loading directory…")),
                     )
                 },

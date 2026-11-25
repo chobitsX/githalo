@@ -28,7 +28,8 @@ pub struct SyntaxSpan {
 
 struct Engine {
     syntaxes: SyntaxSet,
-    theme: Theme,
+    dark_theme: Theme,
+    light_theme: Theme,
 }
 
 static ENGINE: OnceLock<Engine> = OnceLock::new();
@@ -37,14 +38,26 @@ fn engine() -> &'static Engine {
     ENGINE.get_or_init(|| {
         let syntaxes = SyntaxSet::load_defaults_newlines();
         let themes = ThemeSet::load_defaults();
-        let theme = themes
+        let dark_theme = themes
             .themes
             .get("base16-ocean.dark")
             .or_else(|| themes.themes.get("base16-eighties.dark"))
             .or_else(|| themes.themes.values().next())
             .cloned()
             .unwrap_or_default();
-        Engine { syntaxes, theme }
+        let light_theme = themes
+            .themes
+            .get("InspiredGitHub")
+            .or_else(|| themes.themes.get("base16-ocean.light"))
+            .or_else(|| themes.themes.get("Solarized (light)"))
+            .or_else(|| themes.themes.values().next())
+            .cloned()
+            .unwrap_or_default();
+        Engine {
+            syntaxes,
+            dark_theme,
+            light_theme,
+        }
     })
 }
 
@@ -182,6 +195,24 @@ fn adjust_dark_fg(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
+/// Deepen overly bright foreground tokens so comments and yellows remain crisp on `#ffffff`
+/// as well as soft green/red diff backgrounds.
+#[inline]
+fn adjust_light_fg(r: u8, g: u8, b: u8) -> u32 {
+    let luma = (0.299 * f32::from(r)) + (0.587 * f32::from(g)) + (0.114 * f32::from(b));
+    let (r, g, b) = if luma > 152.0 {
+        let scale = 148.0 / luma.max(1.0);
+        (
+            (f32::from(r) * scale).clamp(0.0, 255.0) as u8,
+            (f32::from(g) * scale).clamp(0.0, 255.0) as u8,
+            (f32::from(b) * scale).clamp(0.0, 255.0) as u8,
+        )
+    } else {
+        (r, g, b)
+    };
+    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
 fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -198,6 +229,7 @@ fn highlight_single_line(
     syntaxes: &SyntaxSet,
     raw_line: &str,
     content_len: usize,
+    light: bool,
 ) -> Vec<SyntaxSpan> {
     if content_len == 0 {
         return Vec::new();
@@ -220,7 +252,11 @@ fn highlight_single_line(
         if start >= content_len || start >= end {
             continue;
         }
-        let color = adjust_dark_fg(style.foreground.r, style.foreground.g, style.foreground.b);
+        let color = if light {
+            adjust_light_fg(style.foreground.r, style.foreground.g, style.foreground.b)
+        } else {
+            adjust_dark_fg(style.foreground.r, style.foreground.g, style.foreground.b)
+        };
         let bold = style.font_style.contains(FontStyle::BOLD);
         let italic = style.font_style.contains(FontStyle::ITALIC);
         spans.push(SyntaxSpan {
@@ -240,9 +276,19 @@ fn highlight_single_line(
 /// Returns one `Vec<SyntaxSpan>` per line (indices match `text.split('\n')` with trailing `\r`
 /// excluded from byte offsets).
 pub fn highlight_document(path: &Path, text: &str) -> Vec<Vec<SyntaxSpan>> {
+    highlight_document_for_theme(path, text, crate::theme::is_light())
+}
+
+/// Highlight an entire document with an explicit light/dark theme selection.
+pub fn highlight_document_for_theme(path: &Path, text: &str, light: bool) -> Vec<Vec<SyntaxSpan>> {
     let eng = engine();
     let syntax = find_syntax(&eng.syntaxes, path);
-    let mut highlighter = HighlightLines::new(syntax, &eng.theme);
+    let theme = if light {
+        &eng.light_theme
+    } else {
+        &eng.dark_theme
+    };
+    let mut highlighter = HighlightLines::new(syntax, theme);
     let mut result = Vec::new();
 
     if text.is_empty() {
@@ -261,6 +307,7 @@ pub fn highlight_document(path: &Path, text: &str) -> Vec<Vec<SyntaxSpan>> {
             &eng.syntaxes,
             line_with_ending,
             content_len,
+            light,
         ));
     }
     if text.ends_with('\n') {
@@ -271,9 +318,23 @@ pub fn highlight_document(path: &Path, text: &str) -> Vec<Vec<SyntaxSpan>> {
 
 /// Highlight a sequence of code lines (without trailing newlines), suitable for Diff viewers.
 pub fn highlight_code_lines(path: &Path, lines: &[&str]) -> Vec<Vec<SyntaxSpan>> {
+    highlight_code_lines_for_theme(path, lines, crate::theme::is_light())
+}
+
+/// Highlight a sequence of code lines with an explicit light/dark theme selection.
+pub fn highlight_code_lines_for_theme(
+    path: &Path,
+    lines: &[&str],
+    light: bool,
+) -> Vec<Vec<SyntaxSpan>> {
     let eng = engine();
     let syntax = find_syntax(&eng.syntaxes, path);
-    let mut highlighter = HighlightLines::new(syntax, &eng.theme);
+    let theme = if light {
+        &eng.light_theme
+    } else {
+        &eng.dark_theme
+    };
+    let mut highlighter = HighlightLines::new(syntax, theme);
     let mut result = Vec::with_capacity(lines.len());
     let mut buf = String::new();
     for (idx, &line) in lines.iter().enumerate() {
@@ -290,6 +351,7 @@ pub fn highlight_code_lines(path: &Path, lines: &[&str]) -> Vec<Vec<SyntaxSpan>>
             &eng.syntaxes,
             &buf,
             sample.len(),
+            light,
         ));
     }
     result
@@ -339,5 +401,32 @@ mod tests {
             assert!(long_line.is_char_boundary(span.start));
             assert!(long_line.is_char_boundary(span.end));
         }
+    }
+
+    #[test]
+    fn light_theme_highlights_with_crisp_contrast_and_differs_from_dark() {
+        let code = "// comment\npub fn greet(name: &str) -> String { format!(\"hi {name}\") }";
+        let dark = highlight_document_for_theme(Path::new("lib.rs"), code, false);
+        let light = highlight_document_for_theme(Path::new("lib.rs"), code, true);
+        assert_eq!(dark.len(), 2);
+        assert_eq!(light.len(), 2);
+        assert!(!light[0].is_empty());
+        assert!(!light[1].is_empty());
+
+        // Light mode foreground tokens should stay dark enough to read cleanly on #ffffff
+        for line in &light {
+            for span in line {
+                let r = ((span.color >> 16) & 0xff) as f32;
+                let g = ((span.color >> 8) & 0xff) as f32;
+                let b = (span.color & 0xff) as f32;
+                let luma = 0.299 * r + 0.587 * g + 0.114 * b;
+                assert!(
+                    luma <= 155.0,
+                    "expected crisp light-theme luma <= 155, got {luma} for #{:06x}",
+                    span.color
+                );
+            }
+        }
+        assert_ne!(dark[1], light[1]);
     }
 }

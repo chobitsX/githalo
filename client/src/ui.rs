@@ -27,14 +27,15 @@ use githalo::branch_ops::{PullStrategy, RemoteOperation};
 use githalo::i18n::{
     self, AppPreferences, BranchClickMode, LanguagePreference, normalize_ui_scale, tr,
 };
+use githalo::theme::{self as app_theme, ThemeMode, ThemePreference};
 use githalo::workspace::{
     Action, DailyAction, GroupId, Panel, Workspace, WorktreeId, database_path,
 };
 use githalo::worktree::WorktreeTarget;
 use gpui::{
     AnyElement, App, Context, CursorStyle, Div, Entity, FocusHandle, Focusable, FontWeight,
-    KeyBinding, MouseButton, Pixels, Role, UniformListScrollHandle, Window, actions, div,
-    prelude::*, px, rems, rgb,
+    KeyBinding, MouseButton, Pixels, Role, UniformListScrollHandle, Window, WindowAppearance,
+    actions, div, prelude::*, px, rems, rgb,
 };
 
 use components::*;
@@ -96,6 +97,8 @@ enum PaletteCommand {
     ToggleBranchesDrawer,
     ToggleCommitDetails,
     ToggleDiffMode,
+    ToggleTheme,
+    SetTheme(ThemePreference),
     OpenSettings,
     OpenShortcuts,
     OpenAbout,
@@ -186,7 +189,9 @@ pub struct DesktopView {
     stash_ui: StashUi,
     shelf_ui: ShelfUi,
     pub(super) compare_base: Option<(WorktreeId, String)>,
+    settings_section: admin::SettingsSection,
     pub(super) language_pref: LanguagePreference,
+    pub(super) theme_pref: ThemePreference,
     pub(super) ui_scale: u16,
     pub(super) default_pull_strategy: PullStrategy,
     pub(super) show_commit_details: bool,
@@ -212,10 +217,26 @@ pub struct DesktopView {
     last_activation_reload: Option<Instant>,
 }
 
+fn theme_mode_from_appearance(appearance: WindowAppearance) -> ThemeMode {
+    match appearance {
+        WindowAppearance::Light | WindowAppearance::VibrantLight => ThemeMode::Light,
+        WindowAppearance::Dark | WindowAppearance::VibrantDark => ThemeMode::Dark,
+    }
+}
+
 impl DesktopView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prefs = AppPreferences::load(&AppPreferences::default_path());
         i18n::apply_preference(prefs.language);
+        let resolved_theme = match prefs.theme {
+            ThemePreference::System => std::env::var("GITHALO_THEME")
+                .ok()
+                .and_then(|raw| app_theme::parse_theme_hint(&raw))
+                .unwrap_or_else(|| theme_mode_from_appearance(window.appearance())),
+            ThemePreference::Dark => ThemeMode::Dark,
+            ThemePreference::Light => ThemeMode::Light,
+        };
+        app_theme::set_theme(resolved_theme);
         let ui_scale = normalize_ui_scale(prefs.ui_scale);
         window.set_rem_size(px(16. * (ui_scale as f32 / 100.)));
         let (workspace, updates) = Workspace::new(database_path());
@@ -267,6 +288,13 @@ impl DesktopView {
             }
         })
         .detach();
+        cx.observe_window_appearance(window, |view, window, cx| {
+            if view.theme_pref == ThemePreference::System {
+                let mode = theme_mode_from_appearance(window.appearance());
+                view.apply_effective_theme(mode, cx);
+            }
+        })
+        .detach();
 
         let branches_ui = branches::BranchesPanelUi::new(cx);
         let file_viewer_ui = file_viewer::FileViewerUi::new(window, cx);
@@ -296,7 +324,9 @@ impl DesktopView {
             stash_ui: StashUi::default(),
             shelf_ui: ShelfUi::default(),
             compare_base: None,
+            settings_section: admin::SettingsSection::Appearance,
             language_pref: prefs.language,
+            theme_pref: prefs.theme,
             ui_scale,
             default_pull_strategy: prefs.pull_strategy,
             show_commit_details: prefs.show_commit_details,
@@ -351,6 +381,7 @@ impl DesktopView {
     pub(super) fn save_preferences(&self) {
         let prefs = AppPreferences {
             language: self.language_pref,
+            theme: self.theme_pref,
             ui_scale: self.ui_scale,
             pull_strategy: self.default_pull_strategy,
             show_commit_details: self.show_commit_details,
@@ -410,8 +441,8 @@ impl DesktopView {
             .items_center()
             .rounded(px(6.))
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(CHROME))
+            .border_color(rgb(theme().border))
+            .bg(rgb(theme().chrome))
             .p(px(1.5))
             .child(
                 div()
@@ -425,10 +456,14 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .text_size(rems(0.75))
-                    .bg(rgb(if split { SELECT_SOFT } else { CHROME }))
-                    .text_color(rgb(if split { TEXT } else { SUBTLE }))
+                    .bg(rgb(if split {
+                        theme().select_soft
+                    } else {
+                        theme().chrome
+                    }))
+                    .text_color(rgb(if split { theme().text } else { theme().subtle }))
                     .when(split, |s| s.font_weight(FontWeight::MEDIUM))
-                    .hover(|s| s.text_color(rgb(TEXT)))
+                    .hover(|s| s.text_color(rgb(theme().text)))
                     .child(tr("左右对比", "Split"))
                     .on_click(cx.listener(|view, _, _, cx| {
                         view.set_diff_side_by_side(true, cx);
@@ -446,15 +481,77 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .text_size(rems(0.75))
-                    .bg(rgb(if !split { SELECT_SOFT } else { CHROME }))
-                    .text_color(rgb(if !split { TEXT } else { SUBTLE }))
+                    .bg(rgb(if !split {
+                        theme().select_soft
+                    } else {
+                        theme().chrome
+                    }))
+                    .text_color(rgb(if !split { theme().text } else { theme().subtle }))
                     .when(!split, |s| s.font_weight(FontWeight::MEDIUM))
-                    .hover(|s| s.text_color(rgb(TEXT)))
+                    .hover(|s| s.text_color(rgb(theme().text)))
                     .child(tr("统一视图", "Unified"))
                     .on_click(cx.listener(|view, _, _, cx| {
                         view.set_diff_side_by_side(false, cx);
                     })),
             )
+    }
+
+    pub(super) fn set_theme(
+        &mut self,
+        pref: ThemePreference,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.theme_pref = pref;
+        let window_override = match pref {
+            ThemePreference::System => None,
+            ThemePreference::Dark => Some(WindowAppearance::Dark),
+            ThemePreference::Light => Some(WindowAppearance::Light),
+        };
+        cx.set_window_appearance(window_override);
+        let mode = match pref {
+            ThemePreference::System => {
+                // On macOS clearing the override may notify `observe_window_appearance` asynchronously;
+                // resolve synchronously via OS preference so the UI updates on the exact same frame.
+                if cfg!(target_os = "macos") {
+                    app_theme::detect_system_theme()
+                } else {
+                    theme_mode_from_appearance(window.appearance())
+                }
+            }
+            ThemePreference::Dark => ThemeMode::Dark,
+            ThemePreference::Light => ThemeMode::Light,
+        };
+        self.save_preferences();
+        self.apply_effective_theme(mode, cx);
+        self.refresh_app_menus(cx);
+        cx.notify();
+    }
+
+    pub(super) fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = if app_theme::is_light() {
+            ThemePreference::Dark
+        } else {
+            ThemePreference::Light
+        };
+        self.set_theme(next, window, cx);
+    }
+
+    fn apply_effective_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
+        if app_theme::current_theme() == mode {
+            return;
+        }
+        app_theme::set_theme(mode);
+        self.file_viewer_ui.rehighlight_all(cx);
+        self.history_details.invalidate_patch();
+        self.sync_history_view();
+        self.daily_ui.invalidate_patches();
+        self.sync_daily_view(cx);
+        self.stash_ui.invalidate_patch();
+        self.sync_stash_view();
+        self.shelf_ui.invalidate_patch();
+        self.sync_shelf_view();
+        cx.notify();
     }
 
     pub(super) fn set_language(&mut self, pref: LanguagePreference, cx: &mut Context<Self>) {
@@ -855,6 +952,27 @@ impl DesktopView {
                 cmd: PaletteCommand::ToggleDiffMode,
             },
             PaletteEntry {
+                category: tr("视图", "View"),
+                title: if app_theme::is_light() {
+                    tr("切换为深色主题", "Switch to Dark Theme")
+                } else {
+                    tr("切换为浅色主题", "Switch to Light Theme")
+                }
+                .into(),
+                subtitle: Some(tr("立即切换界面明暗外观", "Toggle light/dark appearance").into()),
+                shortcut: None,
+                icon: Icon::Eye,
+                cmd: PaletteCommand::ToggleTheme,
+            },
+            PaletteEntry {
+                category: tr("视图", "View"),
+                title: tr("外观主题：跟随系统", "Appearance: Follow System").into(),
+                subtitle: None,
+                shortcut: None,
+                icon: Icon::Settings,
+                cmd: PaletteCommand::SetTheme(ThemePreference::System),
+            },
+            PaletteEntry {
                 category: tr("系统", "App"),
                 title: tr("从磁盘重新加载全部状态", "Reload All from Disk").into(),
                 subtitle: None,
@@ -1023,6 +1141,8 @@ impl DesktopView {
             PaletteCommand::ToggleDiffMode => {
                 self.set_diff_side_by_side(!self.diff_side_by_side, cx);
             }
+            PaletteCommand::ToggleTheme => self.toggle_theme(window, cx),
+            PaletteCommand::SetTheme(pref) => self.set_theme(pref, window, cx),
             PaletteCommand::OpenSettings => self.open_settings_dialog(window, cx),
             PaletteCommand::OpenShortcuts => self.open_confirmation(Dialog::Shortcuts, window, cx),
             PaletteCommand::OpenAbout => self.open_confirmation(Dialog::About, window, cx),
@@ -1087,10 +1207,10 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .rounded(px(6.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(theme().panel))
                     .border_1()
-                    .border_color(rgb(BORDER_STRONG))
-                    .child(icon(Icon::Search, BRAND))
+                    .border_color(rgb(theme().border_strong))
+                    .child(icon(Icon::Search, theme().brand))
                     .child(div().flex_1().min_w_0().child(input.clone()))
                     .child(
                         div()
@@ -1098,9 +1218,9 @@ impl DesktopView {
                             .py(px(1.))
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(rgb(BORDER_STRONG))
+                            .border_color(rgb(theme().border_strong))
                             .text_size(px(10.5))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child("Esc"),
                     ),
             )
@@ -1133,17 +1253,30 @@ impl DesktopView {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .when(is_sel, |r| r.bg(rgb(ACTIVE)).child(selection_bar()))
-                            .hover(move |s| s.bg(rgb(if is_sel { ACTIVE } else { HOVER })))
-                            .child(icon(entry.icon, if is_sel { BRAND_TEXT } else { MUTED }))
+                            .when(is_sel, |r| r.bg(rgb(theme().active)).child(selection_bar()))
+                            .hover(move |s| {
+                                s.bg(rgb(if is_sel {
+                                    theme().active
+                                } else {
+                                    theme().hover
+                                }))
+                            })
+                            .child(icon(
+                                entry.icon,
+                                if is_sel {
+                                    theme().brand_text
+                                } else {
+                                    theme().muted
+                                },
+                            ))
                             .child(
                                 div()
                                     .px(px(5.))
                                     .py(px(1.))
                                     .rounded(px(4.))
-                                    .bg(rgb(CARD))
+                                    .bg(rgb(theme().card))
                                     .text_size(px(10.5))
-                                    .text_color(rgb(SUBTLE))
+                                    .text_color(rgb(theme().subtle))
                                     .child(entry.category),
                             )
                             .child(
@@ -1155,7 +1288,7 @@ impl DesktopView {
                                     .gap(px(8.))
                                     .child(
                                         elide(entry.title)
-                                            .text_color(rgb(TEXT))
+                                            .text_color(rgb(theme().text))
                                             .when(is_sel, |t| t.font_weight(FontWeight::MEDIUM)),
                                     )
                                     .when_some(entry.subtitle, |r, sub| {
@@ -1163,7 +1296,7 @@ impl DesktopView {
                                             elide(sub)
                                                 .flex_1()
                                                 .text_size(px(11.))
-                                                .text_color(rgb(SUBTLE)),
+                                                .text_color(rgb(theme().subtle)),
                                         )
                                     }),
                             )
@@ -1175,9 +1308,9 @@ impl DesktopView {
                                         .py(px(1.))
                                         .rounded(px(4.))
                                         .border_1()
-                                        .border_color(rgb(BORDER_STRONG))
+                                        .border_color(rgb(theme().border_strong))
                                         .text_size(px(10.5))
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(theme().muted))
                                         .child(sc),
                                 )
                             })
@@ -1232,14 +1365,14 @@ impl DesktopView {
                 .px(px(8.))
                 .max_w(px(280.))
                 .rounded(px(6.))
-                .child(icon(Icon::Branch, BRAND))
+                .child(icon(Icon::Branch, theme().brand))
                 .child(elide(current).font_weight(FontWeight::MEDIUM))
-                .child(icon(Icon::ChevronDown, SUBTLE))
+                .child(icon(Icon::ChevronDown, theme().subtle))
                 .when(writable, |button| {
                     button
                         .tab_index(0)
-                        .hover(|button| button.bg(rgb(HOVER)))
-                        .focus_visible(|button| button.bg(rgb(HOVER)))
+                        .hover(|button| button.bg(rgb(theme().hover)))
+                        .focus_visible(|button| button.bg(rgb(theme().hover)))
                         .on_click(cx.listener(|view, event: &gpui::ClickEvent, window, cx| {
                             view.open_branches(event.position(), window, cx);
                         }))
@@ -1255,22 +1388,30 @@ impl DesktopView {
                     .h(px(22.))
                     .px(px(8.))
                     .rounded(px(999.))
-                    .bg(rgb(CARD))
+                    .bg(rgb(theme().card))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .flex()
                     .items_center()
                     .gap(px(6.))
                     .text_size(rems(0.72))
                     .child(
                         div()
-                            .text_color(rgb(if counts.behind > 0 { LINK } else { SUBTLE }))
+                            .text_color(rgb(if counts.behind > 0 {
+                                theme().link
+                            } else {
+                                theme().subtle
+                            }))
                             .when(counts.behind > 0, |t| t.font_weight(FontWeight::SEMIBOLD))
                             .child(format!("↓{}", counts.behind)),
                     )
                     .child(
                         div()
-                            .text_color(rgb(if counts.ahead > 0 { BRAND_TEXT } else { SUBTLE }))
+                            .text_color(rgb(if counts.ahead > 0 {
+                                theme().brand_text
+                            } else {
+                                theme().subtle
+                            }))
                             .when(counts.ahead > 0, |t| t.font_weight(FontWeight::SEMIBOLD))
                             .child(format!("↑{}", counts.ahead)),
                     ),
@@ -1298,32 +1439,34 @@ impl DesktopView {
                     .gap(px(5.))
                     .text_size(rems(0.76))
                     .text_color(rgb(if !enabled {
-                        SUBTLE
+                        theme().subtle
                     } else if let Some(c) = tint {
                         c
                     } else {
-                        TEXT
+                        theme().text
                     }))
                     .child(icon(
                         ico,
                         if !enabled {
-                            SUBTLE
+                            theme().subtle
                         } else if let Some(c) = tint {
                             c
                         } else {
-                            MUTED
+                            theme().muted
                         },
                     ))
                     .child(label)
-                    .when(enabled, |b| b.tab_index(0).hover(|s| s.bg(rgb(HOVER))))
+                    .when(enabled, |b| {
+                        b.tab_index(0).hover(|s| s.bg(rgb(theme().hover)))
+                    })
             };
             div()
                 .flex_shrink_0()
                 .h(rems(1.6875))
                 .rounded(px(6.))
                 .border_1()
-                .border_color(rgb(BORDER_STRONG))
-                .bg(rgb(CARD))
+                .border_color(rgb(theme().border_strong))
+                .bg(rgb(theme().card))
                 .overflow_hidden()
                 .flex()
                 .items_center()
@@ -1338,7 +1481,7 @@ impl DesktopView {
                         },
                         tr("获取远端更新 (⇧⌘T)", "Fetch Remote Updates (⇧⌘T)"),
                         !fetching,
-                        fetching.then_some(BRAND_TEXT),
+                        fetching.then_some(theme().brand_text),
                     )
                     .when(!fetching, |b| {
                         b.on_click(cx.listener(move |view, _, _, cx| {
@@ -1346,7 +1489,7 @@ impl DesktopView {
                         }))
                     }),
                 )
-                .child(div().w(px(1.)).h_full().bg(rgb(BORDER_STRONG)))
+                .child(div().w(px(1.)).h_full().bg(rgb(theme().border_strong)))
                 .child(
                     seg(
                         "pull-current",
@@ -1362,7 +1505,7 @@ impl DesktopView {
                         }))
                     }),
                 )
-                .child(div().w(px(1.)).h_full().bg(rgb(BORDER_STRONG)))
+                .child(div().w(px(1.)).h_full().bg(rgb(theme().border_strong)))
                 .child(
                     seg(
                         "push-current",
@@ -1395,7 +1538,7 @@ impl DesktopView {
             .flex()
             .items_center()
             .gap(px(7.))
-            .bg(rgb(CHROME))
+            .bg(rgb(theme().chrome))
             .child(
                 div()
                     .id("worktree-picker")
@@ -1410,18 +1553,18 @@ impl DesktopView {
                     .min_w(px(96.))
                     .max_w(px(260.))
                     .rounded(px(6.))
-                    .hover(|s| s.bg(rgb(HOVER)))
-                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                    .hover(|s| s.bg(rgb(theme().hover)))
+                    .focus_visible(|s| s.bg(rgb(theme().hover)))
                     .child(icon(
                         if has_nested {
                             Icon::Stack
                         } else {
                             Icon::RepoBook
                         },
-                        MUTED,
+                        theme().muted,
                     ))
                     .child(elide(title).font_weight(FontWeight::MEDIUM))
-                    .child(icon(Icon::ChevronDown, SUBTLE))
+                    .child(icon(Icon::ChevronDown, theme().subtle))
                     .on_click(cx.listener(|view, event: &gpui::ClickEvent, window, cx| {
                         view.open_menu(MenuKind::Worktrees, event.position(), window, cx);
                     })),
@@ -1457,15 +1600,18 @@ impl DesktopView {
                     .items_center()
                     .rounded(px(6.))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(CARD))
-                    .hover(|s| s.bg(rgb(HOVER)).border_color(rgb(BORDER_STRONG)))
-                    .child(icon(Icon::Search, SUBTLE))
+                    .border_color(rgb(theme().border))
+                    .bg(rgb(theme().card))
+                    .hover(|s| {
+                        s.bg(rgb(theme().hover))
+                            .border_color(rgb(theme().border_strong))
+                    })
+                    .child(icon(Icon::Search, theme().subtle))
                     .child(
                         elide(tr("命令与跳转…", "Commands & Go to…"))
                             .flex_1()
                             .text_size(rems(0.75))
-                            .text_color(rgb(SUBTLE)),
+                            .text_color(rgb(theme().subtle)),
                     )
                     .child(
                         div()
@@ -1474,9 +1620,9 @@ impl DesktopView {
                             .py(px(0.5))
                             .rounded(px(4.))
                             .border_1()
-                            .border_color(rgb(BORDER_STRONG))
+                            .border_color(rgb(theme().border_strong))
                             .text_size(px(10.))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child(palette_shortcut),
                     )
                     .on_click(cx.listener(|view, _, window, cx| {
@@ -1505,11 +1651,11 @@ impl DesktopView {
         let repo_dot_color = if !self.sidebar_visible || self.workspace.panel == Panel::ProjectFiles
         {
             if counts.commit_conflicts {
-                Some(ERROR)
+                Some(theme().error)
             } else if counts.commit_files > 0 {
-                Some(LINK)
+                Some(theme().link)
             } else if counts.diverged_repos > 0 {
-                Some(BRAND)
+                Some(theme().brand)
             } else {
                 None
             }
@@ -1535,9 +1681,22 @@ impl DesktopView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .when(active, |b| b.bg(rgb(BRAND_BG)))
-                .hover(move |s| s.bg(rgb(if active { BRAND_BG } else { HOVER })))
-                .child(icon(ico, if active { BRAND_TEXT } else { SUBTLE }))
+                .when(active, |b| b.bg(rgb(theme().brand_bg)))
+                .hover(move |s| {
+                    s.bg(rgb(if active {
+                        theme().brand_bg
+                    } else {
+                        theme().hover
+                    }))
+                })
+                .child(icon(
+                    ico,
+                    if active {
+                        theme().brand_text
+                    } else {
+                        theme().subtle
+                    },
+                ))
                 .when_some(dot_color, |btn, color| {
                     btn.child(
                         div()
@@ -1548,7 +1707,7 @@ impl DesktopView {
                             .rounded(px(999.))
                             .bg(rgb(color))
                             .border_1()
-                            .border_color(rgb(RAIL_BG)),
+                            .border_color(rgb(theme().rail_bg)),
                     )
                 })
                 .on_click(cx.listener(move |view, _, _, cx| view.toggle_panel(panel, cx)))
@@ -1561,9 +1720,9 @@ impl DesktopView {
             .items_center()
             .pt(px(8.))
             .gap(px(6.))
-            .bg(rgb(RAIL_BG))
+            .bg(rgb(theme().rail_bg))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .child(button(
                 "repo-tool",
                 Panel::Repositories,
@@ -1597,10 +1756,10 @@ impl DesktopView {
             .h_full()
             .flex_shrink_0()
             .border_l_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
+            .border_color(rgb(theme().border))
+            .bg(rgb(theme().panel))
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|s| s.bg(rgb(BRAND)))
+            .hover(|s| s.bg(rgb(theme().brand)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
@@ -1619,20 +1778,20 @@ impl DesktopView {
         let message = if running {
             Some((
                 tr("正在执行 Git 操作…", "Running Git operation…"),
-                BRAND_TEXT,
+                theme().brand_text,
                 false,
             ))
         } else if let Some(error) = &state.error {
-            Some((error.as_str(), ERROR, true))
+            Some((error.as_str(), theme().error, true))
         } else if let Some(notice) = &self.notice {
-            Some((notice.as_str(), WARNING, true))
+            Some((notice.as_str(), theme().warning, true))
         } else if let Some(notice) = &state.notice {
-            Some((notice.as_str(), MUTED, true))
+            Some((notice.as_str(), theme().muted, true))
         } else {
             self.workspace
                 .message
                 .as_deref()
-                .map(|message| (message, WARNING, true))
+                .map(|message| (message, theme().warning, true))
         };
         let repo_info = self
             .workspace
@@ -1650,10 +1809,10 @@ impl DesktopView {
             .items_center()
             .gap(px(10.))
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(CHROME))
+            .border_color(rgb(theme().border))
+            .bg(rgb(theme().chrome))
             .text_size(rems(0.72))
-            .text_color(rgb(SUBTLE))
+            .text_color(rgb(theme().subtle))
             .child(
                 div()
                     .flex_shrink_0()
@@ -1661,9 +1820,9 @@ impl DesktopView {
                     .items_center()
                     .gap(px(5.))
                     .child(div().size(px(6.)).rounded(px(999.)).bg(rgb(if running {
-                        LINK
+                        theme().link
                     } else {
-                        BRAND
+                        theme().brand
                     })))
                     .child(if running {
                         tr("运行中", "Busy")
@@ -1676,7 +1835,7 @@ impl DesktopView {
                     .id("status-hovered-hint")
                     .min_w_0()
                     .flex_1()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme().muted))
                     .child(elide(hint))
                     .into_any_element()
             } else if let Some(short) = short_path {
@@ -1763,8 +1922,8 @@ impl Render for DesktopView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .bg(rgb(CHROME))
-            .text_color(rgb(TEXT))
+            .bg(rgb(theme().chrome))
+            .text_color(rgb(theme().text))
             .text_size(rems(0.8125))
             .line_height(rems(1.22))
             .on_action(cx.listener(|view, _: &Dismiss, window, cx| {
@@ -1872,7 +2031,7 @@ impl Render for DesktopView {
                     .flex_1()
                     .min_h_0()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(self.rail(cx))
                     .when(self.sidebar_visible, |this| {
                         this.child(self.sidebar(sidebar_width, cx))

@@ -414,9 +414,9 @@ impl DesktopView {
                                     .max_h(window.viewport_size().height - px(24.))
                                     .overflow_y_scroll()
                                     .p(px(4.))
-                                    .bg(rgb(POPUP))
+                                    .bg(rgb(theme().popup))
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(theme().border))
                                     .rounded(px(7.))
                                     .shadow(popup_shadow())
                                     .children(items),
@@ -430,8 +430,8 @@ impl DesktopView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(backdrop.bg(rgba(0x00000066)))
-                .child(self.dialog(dialog, window.viewport_size().height, cx))
+                .child(backdrop.bg(rgba(theme().backdrop_rgba)))
+                .child(self.dialog(dialog, window.viewport_size(), cx))
                 .into_any_element(),
         };
         Some(gpui::deferred(overlay).with_priority(2).into_any_element())
@@ -772,9 +772,11 @@ impl DesktopView {
     fn dialog(
         &self,
         dialog: &Dialog,
-        viewport_height: Pixels,
+        viewport_size: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let viewport_height = viewport_size.height;
+        let viewport_width = viewport_size.width;
         let mut container = div()
             .id("dialog")
             .role(Role::Dialog)
@@ -782,9 +784,9 @@ impl DesktopView {
             .tab_group()
             .occlude()
             .w(px(364.))
-            .bg(rgb(POPUP))
+            .bg(rgb(theme().popup))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .rounded(px(8.))
             .shadow(popup_shadow())
             .flex()
@@ -821,7 +823,7 @@ impl DesktopView {
                     .children(
                         error
                             .clone()
-                            .map(|message| div().text_color(rgb(ERROR)).child(message)),
+                            .map(|message| div().text_color(rgb(theme().error)).child(message)),
                     )
                     .child(
                         buttons.child(
@@ -851,14 +853,14 @@ impl DesktopView {
                 container = container
                     .aria_label(tr("删除分组", "Delete Group"))
                     .child(dialog_heading(format!("{} \"{name}\"", tr("删除", "Delete"))))
-                    .child(div().text_color(rgb(MUTED)).child(tr(
+                    .child(div().text_color(rgb(theme().muted)).child(tr(
                         "解除该组的成员关系。没有其他分组的仓库将移入“未分组”。",
                         "Remove group memberships. Repositories with no other groups move to Ungrouped.",
                     )))
                     .child(
                         buttons.child(
                             text_button("dialog-delete-group", tr("删除分组", "Delete Group"), false)
-                                .text_color(rgb(ERROR))
+                                .text_color(rgb(theme().error))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.close_overlay(window, cx);
                                     view.dispatch(Action::DeleteGroup(id), cx);
@@ -875,15 +877,15 @@ impl DesktopView {
                 container = container
                     .aria_label(tr("从列表移除仓库", "Remove Repository"))
                     .child(dialog_heading(tr("从列表移除仓库", "Remove Repository")))
-                    .children(path.map(|path| div().text_color(rgb(MUTED)).child(path)))
-                    .child(div().text_color(rgb(MUTED)).child(tr(
+                    .children(path.map(|path| div().text_color(rgb(theme().muted)).child(path)))
+                    .child(div().text_color(rgb(theme().muted)).child(tr(
                         "仅从应用列表移除，不会删除磁盘文件。之后可随时重新添加。",
                         "Files on disk are untouched. You can add this repository again later.",
                     )))
                     .child(
                         buttons.child(
                             text_button("dialog-remove-repo", tr("移除", "Remove"), false)
-                                .text_color(rgb(ERROR))
+                                .text_color(rgb(theme().error))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.close_overlay(window, cx);
                                     view.dispatch(Action::RemoveRepo(id), cx);
@@ -1150,9 +1152,17 @@ impl DesktopView {
                     .child(self.command_palette_dialog(input, *selected_idx, viewport_height, cx));
             }
             Dialog::Settings => {
+                let dialog_w = (viewport_width - px(48.)).clamp(px(580.), px(740.));
+                let dialog_h = (viewport_height - px(64.)).clamp(px(390.), px(548.));
                 container = container
                     .aria_label(tr("视图与偏好设置", "Settings"))
-                    .w(px(540.))
+                    .w(dialog_w)
+                    .h(dialog_h)
+                    .p(px(0.))
+                    .gap(px(0.))
+                    .rounded(px(12.))
+                    .border_color(rgb(theme().border_strong))
+                    .overflow_hidden()
                     .child(self.settings_dialog(cx));
             }
             Dialog::About => {
@@ -1192,12 +1202,15 @@ pub(super) fn menu_item(
         .px(px(8.))
         .py(px(3.))
         .rounded(px(3.))
-        .hover(|s| s.bg(rgb(ACTIVE)))
-        .focus_visible(|s| s.bg(rgb(ACTIVE)))
+        .hover(|s| s.bg(rgb(theme().active)))
+        .focus_visible(|s| s.bg(rgb(theme().active)))
         .child(elide(label))
         .when_some(subtitle, |item, subtitle| {
-            item.aria_description(subtitle.clone())
-                .child(elide(subtitle).text_color(rgb(SUBTLE)).text_size(px(11.)))
+            item.aria_description(subtitle.clone()).child(
+                elide(subtitle)
+                    .text_color(rgb(theme().subtle))
+                    .text_size(px(11.)),
+            )
         })
         .on_click(cx.listener(move |view, event, window, cx| {
             cx.stop_propagation();
@@ -1223,13 +1236,13 @@ pub(super) fn menu_rule() -> AnyElement {
         .my(px(3.))
         .mx(px(4.))
         .h(px(1.))
-        .bg(rgb(BORDER))
+        .bg(rgb(theme().border))
         .into_any_element()
 }
 
 fn popup_shadow() -> Vec<BoxShadow> {
     vec![BoxShadow {
-        color: rgba(0x00000080).into(),
+        color: rgba(theme().shadow_rgba).into(),
         offset: point(px(0.), px(4.)),
         blur_radius: px(14.),
         spread_radius: px(1.),

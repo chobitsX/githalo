@@ -28,6 +28,12 @@ pub(super) struct ShelfUi {
     patch: Option<(Arc<str>, Rc<ParsedPatch>)>,
 }
 
+impl ShelfUi {
+    pub(super) fn invalidate_patch(&mut self) {
+        self.patch = None;
+    }
+}
+
 pub(super) struct ShelveForm {
     pub(super) target: WorktreeTarget,
     pub(super) paths: Vec<PathBuf>,
@@ -179,30 +185,52 @@ impl DesktopView {
                         .py(px(6.))
                         .rounded(px(5.))
                         .border_1()
-                        .border_color(rgb(if is_selected { ACTIVE_BORDER } else { BORDER }))
-                        .bg(rgb(if is_selected { ACTIVE } else { CARD }))
-                        .hover(move |s| s.bg(rgb(if is_selected { ACTIVE } else { HOVER })))
+                        .border_color(rgb(if is_selected {
+                            theme().active_border
+                        } else {
+                            theme().border
+                        }))
+                        .bg(rgb(if is_selected {
+                            theme().active
+                        } else {
+                            theme().card
+                        }))
+                        .hover(move |s| {
+                            s.bg(rgb(if is_selected {
+                                theme().active
+                            } else {
+                                theme().hover
+                            }))
+                        })
                         .flex()
                         .flex_col()
                         .gap(px(3.))
                         .child(
                             elide(entry.name.clone())
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(rgb(TEXT)),
+                                .text_color(rgb(theme().text)),
                         )
                         .child(
                             div()
                                 .flex()
                                 .items_center()
                                 .gap(px(5.))
-                                .child(pill(entry.branch.clone(), ACCENT_BG, ACCENT_BORDER, LINK))
-                                .child(div().text_size(px(11.)).text_color(rgb(SUBTLE)).child(
-                                    if is_zh() {
-                                        format!("{} 个文件", entry.files.len())
-                                    } else {
-                                        format!("{} files", entry.files.len())
-                                    },
-                                )),
+                                .child(pill(
+                                    entry.branch.clone(),
+                                    theme().accent_bg,
+                                    theme().accent_border,
+                                    theme().link,
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(theme().subtle))
+                                        .child(if is_zh() {
+                                            format!("{} 个文件", entry.files.len())
+                                        } else {
+                                            format!("{} files", entry.files.len())
+                                        }),
+                                ),
                         )
                         .on_click(cx.listener(move |view, _, _, cx| {
                             view.dispatch_shelf(
@@ -240,10 +268,10 @@ impl DesktopView {
                 .children(entry.files.iter().enumerate().map(|(idx, file)| {
                     let is_open = state.selected_file.as_ref() == Some(file);
                     let color = match file.status.as_str() {
-                        "A" | "?" => SUCCESS,
-                        "D" => ERROR,
-                        "R" | "C" => WARNING,
-                        _ => LINK,
+                        "A" | "?" => theme().success,
+                        "D" => theme().error,
+                        "R" | "C" => theme().warning,
+                        _ => theme().link,
                     };
                     let click_entry = entry.clone();
                     let click_file = file.clone();
@@ -255,8 +283,14 @@ impl DesktopView {
                         .h(px(24.))
                         .px(px(7.))
                         .rounded(px(4.))
-                        .when(is_open, |r| r.bg(rgb(ACTIVE)))
-                        .hover(move |s| s.bg(rgb(if is_open { ACTIVE } else { HOVER })))
+                        .when(is_open, |r| r.bg(rgb(theme().active)))
+                        .hover(move |s| {
+                            s.bg(rgb(if is_open {
+                                theme().active
+                            } else {
+                                theme().hover
+                            }))
+                        })
                         .flex()
                         .items_center()
                         .gap(px(6.))
@@ -308,7 +342,7 @@ impl DesktopView {
                     .items_center()
                     .gap(px(5.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(
                         icon_button(
                             "reload-shelf",
@@ -346,7 +380,7 @@ impl DesktopView {
                     .h(px(180.))
                     .flex_shrink_0()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(
                         div()
                             .h(px(28.))
@@ -354,7 +388,7 @@ impl DesktopView {
                             .flex()
                             .items_center()
                             .text_size(px(11.5))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme().muted))
                             .child(tr("补丁文件", "Patch Files")),
                     )
                     .child(files_view),
@@ -366,7 +400,7 @@ impl DesktopView {
                     .items_center()
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(
                         command_button(
                             "unshelve-entry",
@@ -450,12 +484,12 @@ impl DesktopView {
                     .items_center()
                     .gap(px(7.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(pill(
                         tr("Shelf 补丁", "Shelf Patch"),
-                        REMOTE_BG,
-                        REMOTE_BORDER,
-                        REMOTE_TEXT,
+                        theme().remote_bg,
+                        theme().remote_border,
+                        theme().remote_text,
                     ))
                     .child(elide(title).flex_1())
                     .child(self.diff_mode_toggle("shelf-diff-mode", cx))
@@ -512,7 +546,7 @@ impl DesktopView {
                     .rounded(px(4.))
                     .px(px(4.))
                     .py(px(3.))
-                    .hover(|r| r.bg(rgb(HOVER)))
+                    .hover(|r| r.bg(rgb(theme().hover)))
                     .child(check_indicator(form.keep_local))
                     .child("仅保存补丁副本，保留本地工作区改动")
                     .on_click(cx.listener(|view, _, _, cx| {
@@ -525,7 +559,7 @@ impl DesktopView {
             .child(
                 div()
                     .text_size(px(11.5))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child("Shelf 以独立补丁保存，不影响 git stash list。"),
             )
             .child(self.review_buttons(
@@ -592,7 +626,7 @@ impl DesktopView {
                     .rounded(px(4.))
                     .px(px(4.))
                     .py(px(3.))
-                    .hover(|r| r.bg(rgb(HOVER)))
+                    .hover(|r| r.bg(rgb(theme().hover)))
                     .child(check_indicator(keep_entry))
                     .child("恢复成功后仍保留此 Shelf 条目")
                     .on_click(cx.listener(|view, _, _, cx| {
@@ -649,7 +683,7 @@ impl DesktopView {
             .child(review_detail("Shelf 条目", dialog.entry.name.clone()))
             .child(
                 div()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme().muted))
                     .child("删除后该 Shelf 补丁将永久移除，不可撤销。"),
             )
             .child(

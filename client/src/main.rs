@@ -1,6 +1,7 @@
 mod ui;
 
 use githalo::i18n::{self, AppPreferences, tr};
+use githalo::theme::{self, ThemePreference};
 use gpui::{
     AppContext as _, QuitMode, TitlebarOptions, WindowAppearance, WindowBounds, WindowOptions,
     point, px, size,
@@ -11,11 +12,24 @@ use ui::DesktopView;
 fn main() {
     let prefs = AppPreferences::load(&AppPreferences::default_path());
     i18n::apply_preference(prefs.language);
+    theme::apply_preference(prefs.theme);
+
+    let initial_appearance = match prefs.theme {
+        ThemePreference::System => std::env::var("GITHALO_THEME")
+            .ok()
+            .and_then(|raw| theme::parse_theme_hint(&raw))
+            .map(|mode| match mode {
+                theme::ThemeMode::Dark => WindowAppearance::Dark,
+                theme::ThemeMode::Light => WindowAppearance::Light,
+            }),
+        ThemePreference::Dark => Some(WindowAppearance::Dark),
+        ThemePreference::Light => Some(WindowAppearance::Light),
+    };
 
     gpui_platform::application()
         .with_quit_mode(QuitMode::LastWindowClosed)
-        .run(|cx| {
-            cx.set_window_appearance(Some(WindowAppearance::Dark));
+        .run(move |cx| {
+            cx.set_window_appearance(initial_appearance);
             ui::bind_keys(cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1320.), px(810.)), cx)),

@@ -8,7 +8,7 @@ use gpui::{
     prelude::*, px, rgb, size,
 };
 
-use super::components::{ACTIVE, BORDER, LINK, PANEL, SUBTLE, TEXT};
+use super::components::theme;
 
 actions!(
     text_field,
@@ -522,12 +522,17 @@ impl TextField {
                     TextRun {
                         len: cut[1] - offset,
                         font: style.font(),
-                        color: rgb(if self.text.is_empty() { SUBTLE } else { TEXT }).into(),
+                        color: rgb(if self.text.is_empty() {
+                            theme().subtle
+                        } else {
+                            theme().text
+                        })
+                        .into(),
                         background_color: (focused && selection.contains(&offset))
-                            .then(|| rgb(ACTIVE).into()),
+                            .then(|| rgb(theme().editor_selection_bg).into()),
                         underline: (mark_start <= offset && offset < mark_end).then(|| {
                             UnderlineStyle {
-                                color: Some(rgb(LINK).into()),
+                                color: Some(rgb(theme().link).into()),
                                 thickness: px(1.),
                                 wavy: false,
                             }
@@ -629,7 +634,7 @@ impl Render for TextField {
                     if let Some(caret) = caret {
                         window.paint_quad(fill(
                             Bounds::new(origin + caret, size(px(1.), height)),
-                            rgb(LINK),
+                            rgb(theme().link),
                         ));
                     }
                 });
@@ -658,9 +663,13 @@ impl Render for TextField {
             .when(self.multiline, |el| el.items_start().py(px(6.)))
             .when(!self.multiline, |el| el.items_center())
             .px(px(7.))
-            .bg(rgb(PANEL))
+            .bg(rgb(theme().panel))
             .border_1()
-            .border_color(rgb(if focused { LINK } else { BORDER }))
+            .border_color(rgb(if focused {
+                theme().link
+            } else {
+                theme().border
+            }))
             .rounded(px(4.))
             .cursor(CursorStyle::IBeam)
             .key_context(if self.multiline {

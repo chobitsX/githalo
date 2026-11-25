@@ -465,6 +465,13 @@ pub(super) struct DailyUi {
     pub(super) review_patch: Option<(u64, Rc<ParsedPatch>)>,
 }
 
+impl DailyUi {
+    pub(super) fn invalidate_patches(&mut self) {
+        self.patch = None;
+        self.review_patch = None;
+    }
+}
+
 impl Default for DailyUi {
     fn default() -> Self {
         Self {
@@ -841,7 +848,7 @@ impl DesktopView {
                 .items_center()
                 .gap(px(2.))
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(theme().border))
                 .child(
                     icon_button(
                         "reload-working-changes",
@@ -886,7 +893,7 @@ impl DesktopView {
                     )
                     .size(px(24.))
                     .when(!has_selected_file, |b| b.opacity(0.35))
-                    .when(self.working_patch_open(), |b| b.bg(rgb(ACTIVE)))
+                    .when(self.working_patch_open(), |b| b.bg(rgb(theme().active)))
                     .when(has_selected_file, |b| {
                         b.on_click(cx.listener(|view, _, _, cx| {
                             let next = !view.working_patch_open();
@@ -927,7 +934,13 @@ impl DesktopView {
                         }),
                     ),
                 )
-                .child(div().w(px(1.)).h(px(14.)).mx(px(3.)).bg(rgb(BORDER)))
+                .child(
+                    div()
+                        .w(px(1.))
+                        .h(px(14.))
+                        .mx(px(3.))
+                        .bg(rgb(theme().border)),
+                )
                 .child(
                     icon_button(
                         "commit-toolbar-expand-all",
@@ -969,7 +982,7 @@ impl DesktopView {
                     bar.child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child(tr("读取中…", "Loading…")),
                     )
                 });
@@ -1046,9 +1059,15 @@ impl DesktopView {
             .justify_center()
             .cursor(CursorStyle::ResizeUpDown)
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .hover(|s| s.bg(rgb(HOVER)))
-            .child(div().w(px(28.)).h(px(2.)).rounded(px(1.)).bg(rgb(0x4a4e57)))
+            .border_color(rgb(theme().border))
+            .hover(|s| s.bg(rgb(theme().hover)))
+            .child(
+                div()
+                    .w(px(28.))
+                    .h(px(2.))
+                    .rounded(px(1.))
+                    .bg(rgb(theme().drag_handle)),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, event: &gpui::MouseDownEvent, _, cx| {
@@ -1098,10 +1117,14 @@ impl DesktopView {
                             .px(px(3.))
                             .py(px(2.))
                             .text_size(px(11.5))
-                            .text_color(rgb(if has_head { MUTED } else { SUBTLE }))
+                            .text_color(rgb(if has_head {
+                                theme().muted
+                            } else {
+                                theme().subtle
+                            }))
                             .when(has_head, |row| {
-                                row.hover(|s| s.bg(rgb(HOVER))).on_click(cx.listener(
-                                    |view, _, _, cx| {
+                                row.hover(|s| s.bg(rgb(theme().hover)))
+                                    .on_click(cx.listener(|view, _, _, cx| {
                                         view.daily_ui.amend = !view.daily_ui.amend;
                                         if view.daily_ui.amend
                                             && let Some(target) = view.active_worktree().cloned()
@@ -1112,8 +1135,7 @@ impl DesktopView {
                                             );
                                         }
                                         cx.notify();
-                                    },
-                                ))
+                                    }))
                             })
                             .child(check_indicator(amend && has_head))
                             .child(tr("Amend", "Amend"))
@@ -1126,9 +1148,9 @@ impl DesktopView {
                                             .id("amend-head-pill")
                                             .px(px(4.))
                                             .rounded(px(3.))
-                                            .bg(rgb(ACCENT_BG))
+                                            .bg(rgb(theme().accent_bg))
                                             .text_size(px(10.5))
-                                            .text_color(rgb(LINK))
+                                            .text_color(rgb(theme().link))
                                             .tooltip(tooltip(tip))
                                             .child(short),
                                     )
@@ -1143,9 +1165,9 @@ impl DesktopView {
                                 .px(px(4.))
                                 .text_size(px(10.5))
                                 .text_color(rgb(if first_line_chars > 72 {
-                                    WARNING
+                                    theme().warning
                                 } else {
-                                    SUBTLE
+                                    theme().subtle
                                 }))
                                 .child(format!("{first_line_chars}")),
                         )
@@ -1176,12 +1198,12 @@ impl DesktopView {
                             .px(px(5.))
                             .py(px(1.))
                             .rounded(px(3.))
-                            .bg(rgb(CARD))
+                            .bg(rgb(theme().card))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(theme().border))
                             .text_size(px(10.5))
-                            .text_color(rgb(MUTED))
-                            .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
+                            .text_color(rgb(theme().muted))
+                            .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
                             .child(kind_str)
                             .on_click(cx.listener(move |view, _, _, cx| {
                                 view.apply_conventional_prefix(kind_str, cx);
@@ -1224,7 +1246,7 @@ impl DesktopView {
                             self.commit_sign_off
                                 || self.commit_no_verify
                                 || self.commit_review_before,
-                            |btn| btn.bg(rgb(ACCENT_BG)),
+                            |btn| btn.bg(rgb(theme().accent_bg)),
                         )
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1359,14 +1381,14 @@ impl DesktopView {
                     .rounded(px(5.))
                     .flex()
                     .items_center()
-                    .hover(|s| s.bg(rgb(HOVER)))
+                    .hover(|s| s.bg(rgb(theme().hover)))
                     .child(icon(
                         if *expanded {
                             Icon::ChevronDown
                         } else {
                             Icon::ChevronRight
                         },
-                        SUBTLE,
+                        theme().subtle,
                     ))
                     .child(
                         div()
@@ -1387,13 +1409,13 @@ impl DesktopView {
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_size(rems(0.8125))
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(theme().text))
                             .child(title),
                     )
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child(count_suffix(*file_count)),
                     )
                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -1438,9 +1460,9 @@ impl DesktopView {
                 let paths_chk = paths.clone();
                 let st = *state;
                 let badge_color = if *group == CommitGroupKind::Unversioned {
-                    0xe28d6a
+                    theme().untracked_fg
                 } else {
-                    0x4c8dff
+                    theme().editor_git_modified
                 };
                 div()
                     .id(("commit-repo-header", row_idx))
@@ -1453,14 +1475,14 @@ impl DesktopView {
                     .rounded(px(5.))
                     .flex()
                     .items_center()
-                    .hover(|s| s.bg(rgb(HOVER)))
+                    .hover(|s| s.bg(rgb(theme().hover)))
                     .child(icon(
                         if *expanded {
                             Icon::ChevronDown
                         } else {
                             Icon::ChevronRight
                         },
-                        SUBTLE,
+                        theme().subtle,
                     ))
                     .child(
                         div()
@@ -1488,13 +1510,13 @@ impl DesktopView {
                         elide(repo_name.clone())
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(rems(0.8125))
-                            .text_color(rgb(TEXT)),
+                            .text_color(rgb(theme().text)),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_size(rems(0.72))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child(count_suffix(*file_count)),
                     )
                     .child(
@@ -1504,11 +1526,11 @@ impl DesktopView {
                             .px(px(5.))
                             .py(px(1.))
                             .rounded(px(4.))
-                            .bg(rgb(CARD))
+                            .bg(rgb(theme().card))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(theme().border))
                             .text_size(rems(0.7))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(theme().muted))
                             .child(elide(branch.clone())),
                     )
                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -1548,14 +1570,14 @@ impl DesktopView {
                     .rounded(px(5.))
                     .flex()
                     .items_center()
-                    .hover(|s| s.bg(rgb(HOVER)))
+                    .hover(|s| s.bg(rgb(theme().hover)))
                     .child(icon(
                         if *expanded {
                             Icon::ChevronDown
                         } else {
                             Icon::ChevronRight
                         },
-                        SUBTLE,
+                        theme().subtle,
                     ))
                     .child(
                         div()
@@ -1578,13 +1600,13 @@ impl DesktopView {
                             .flex_1()
                             .min_w_0()
                             .text_size(rems(0.8125))
-                            .text_color(rgb(TEXT)),
+                            .text_color(rgb(theme().text)),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
                             .text_size(rems(0.7))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child(count_suffix(*file_count)),
                     )
                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -1688,9 +1710,15 @@ impl DesktopView {
                     .rounded(px(5.))
                     .flex()
                     .items_center()
-                    .when(selected, |r| r.bg(rgb(ACTIVE)))
-                    .hover(move |r| r.bg(rgb(if selected { ACTIVE } else { HOVER })))
-                    .focus_visible(|r| r.bg(rgb(ACTIVE)))
+                    .when(selected, |r| r.bg(rgb(theme().active)))
+                    .hover(move |r| {
+                        r.bg(rgb(if selected {
+                            theme().active
+                        } else {
+                            theme().hover
+                        }))
+                    })
+                    .focus_visible(|r| r.bg(rgb(theme().active)))
                     .child(
                         div()
                             .id(("commit-file-chk", row_idx))
@@ -1722,7 +1750,11 @@ impl DesktopView {
                                     .when(is_deleted, |t| t.line_through()),
                             )
                             .when_some(parent_hint, |r, dir| {
-                                r.child(elide(dir).text_size(rems(0.72)).text_color(rgb(SUBTLE)))
+                                r.child(
+                                    elide(dir)
+                                        .text_size(rems(0.72))
+                                        .text_color(rgb(theme().subtle)),
+                                )
                             }),
                     )
                     .child(
@@ -2162,7 +2194,7 @@ impl DesktopView {
                     .px(px(10.))
                     .py(px(8.))
                     .text_size(px(11.5))
-                    .text_color(rgb(SUBTLE))
+                    .text_color(rgb(theme().subtle))
                     .child(tr("暂无历史提交说明", "No commit message history yet"))
                     .into_any_element(),
             ];
@@ -2310,11 +2342,11 @@ impl DesktopView {
             .gap(px(7.))
             .px(px(8.))
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(theme().muted))
                     .child(side_label(*side)),
             )
             .child(
@@ -2578,12 +2610,16 @@ impl DesktopView {
             .flex()
             .items_center()
             .gap(px(6.))
-            .bg(rgb(if selected { ACTIVE } else { 0x202b3c }))
-            .text_color(rgb(LINK))
+            .bg(rgb(if selected {
+                theme().active
+            } else {
+                theme().diff_hunk_bg
+            }))
+            .text_color(rgb(theme().link))
             .text_size(rems(0.76))
             .whitespace_nowrap()
-            .hover(|row| row.bg(rgb(ACTIVE)))
-            .focus_visible(|row| row.bg(rgb(ACTIVE)))
+            .hover(|row| row.bg(rgb(theme().active)))
+            .focus_visible(|row| row.bg(rgb(theme().active)))
             .child(check_indicator(selected))
             .child(label)
             .on_click(cx.listener(move |view, _, _, cx| {
@@ -2644,10 +2680,16 @@ pub(super) fn check_indicator(selected: bool) -> Div {
 }
 
 fn tri_check_indicator(state: CheckState) -> Div {
+    let t = theme();
     let (bg, border, fg, glyph) = match state {
-        CheckState::Checked => (ACTIVE, LINK, 0xffffff, "✓"),
-        CheckState::Partial => (ACCENT_BG, LINK, LINK, "−"),
-        CheckState::Unchecked => (PANEL, 0x555a66, SUBTLE, ""),
+        CheckState::Checked => (
+            t.check_checked_bg,
+            t.check_checked_border,
+            t.check_checked_fg,
+            "✓",
+        ),
+        CheckState::Partial => (t.accent_bg, t.link, t.link, "−"),
+        CheckState::Unchecked => (t.panel, t.check_unchecked_border, t.subtle, ""),
     };
     div()
         .size(px(14.))
@@ -2693,15 +2735,19 @@ fn side_label(side: DiffSide) -> &'static str {
 
 fn change_status(kind: &ChangeKind) -> (&'static str, String, u32) {
     let (mark, text, color) = match kind {
-        ChangeKind::Added => ("A", tr("新增", "Added"), SUCCESS),
-        ChangeKind::Modified => ("M", tr("修改", "Modified"), LINK),
-        ChangeKind::Deleted => ("D", tr("删除", "Deleted"), ERROR),
-        ChangeKind::Renamed => ("R", tr("重命名", "Renamed"), WARNING),
-        ChangeKind::Copied => ("C", tr("复制", "Copied"), WARNING),
-        ChangeKind::TypeChanged => ("T", tr("类型变更", "Type Changed"), WARNING),
-        ChangeKind::Untracked => ("?", tr("未跟踪", "Untracked"), 0xe28d6a),
+        ChangeKind::Added => ("A", tr("新增", "Added"), theme().success),
+        ChangeKind::Modified => ("M", tr("修改", "Modified"), theme().link),
+        ChangeKind::Deleted => ("D", tr("删除", "Deleted"), theme().error),
+        ChangeKind::Renamed => ("R", tr("重命名", "Renamed"), theme().warning),
+        ChangeKind::Copied => ("C", tr("复制", "Copied"), theme().warning),
+        ChangeKind::TypeChanged => ("T", tr("类型变更", "Type Changed"), theme().warning),
+        ChangeKind::Untracked => ("?", tr("未跟踪", "Untracked"), theme().untracked_fg),
         ChangeKind::Conflicted(code) => {
-            return ("!", format!("{} {code}", tr("冲突", "Conflicted")), ERROR);
+            return (
+                "!",
+                format!("{} {code}", tr("冲突", "Conflicted")),
+                theme().error,
+            );
         }
     };
     (mark, text.into(), color)

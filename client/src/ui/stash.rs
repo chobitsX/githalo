@@ -32,6 +32,12 @@ pub(super) struct StashUi {
     patch: Option<(Arc<str>, Rc<ParsedPatch>)>,
 }
 
+impl StashUi {
+    pub(super) fn invalidate_patch(&mut self) {
+        self.patch = None;
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum StashEditor {
     #[default]
@@ -179,7 +185,7 @@ impl DesktopView {
                     .items_center()
                     .gap(px(6.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(
                         icon_button(
                             "reload-stash",
@@ -214,7 +220,7 @@ impl DesktopView {
                     .flex_shrink_0()
                     .px(px(8.))
                     .py(px(6.))
-                    .text_color(rgb(ERROR))
+                    .text_color(rgb(theme().error))
                     .child(elide(error.lines().next().unwrap_or_default().to_owned()))
             }))
             .when(state.selected.is_some(), |panel| {
@@ -226,7 +232,7 @@ impl DesktopView {
                         .gap(px(4.))
                         .p(px(7.))
                         .border_t_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(theme().border))
                         .children(actions.into_iter().map(|(id, label, operation)| {
                             let btn = if matches!(operation, StashOperation::Drop) {
                                 danger_button(id, label, writable)
@@ -297,13 +303,23 @@ impl DesktopView {
             .justify_center()
             .px(px(7.))
             .rounded(px(4.))
-            .when(selected, |row| row.bg(rgb(ACTIVE)))
-            .hover(move |row| row.bg(rgb(if selected { ACTIVE } else { HOVER })))
-            .focus_visible(|row| row.bg(rgb(ACTIVE)))
+            .when(selected, |row| row.bg(rgb(theme().active)))
+            .hover(move |row| {
+                row.bg(rgb(if selected {
+                    theme().active
+                } else {
+                    theme().hover
+                }))
+            })
+            .focus_visible(|row| row.bg(rgb(theme().active)))
             .child(elide(message))
             .child(
                 elide(format!("{selector} · {}", oid.get(..12).unwrap_or(&oid)))
-                    .text_color(rgb(if selected { TEXT } else { SUBTLE }))
+                    .text_color(rgb(if selected {
+                        theme().text
+                    } else {
+                        theme().subtle
+                    }))
                     .text_size(px(11.)),
             )
             .on_click(cx.listener(move |view, _, _, cx| {
@@ -370,7 +386,7 @@ impl DesktopView {
                     .gap(px(7.))
                     .px(px(9.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme().border))
                     .child(elide(title).flex_1().font_weight(FontWeight::MEDIUM))
                     .child(
                         command_button(
@@ -400,7 +416,7 @@ impl DesktopView {
                             .min_h_0()
                             .w((available * 0.30).clamp(px(166.), px(306.)))
                             .border_r_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(theme().border))
                             .child(stash_pane_heading().child(tr("变更文件", "Changed Files")))
                             .child(files),
                     )
@@ -417,7 +433,7 @@ impl DesktopView {
                                     .child(
                                         div()
                                             .flex_shrink_0()
-                                            .text_color(rgb(SUBTLE))
+                                            .text_color(rgb(theme().subtle))
                                             .child(part_and_path.as_ref().map_or("Diff", |v| v.0)),
                                     )
                                     .children(part_and_path.map(|(_, path)| {
@@ -491,16 +507,26 @@ impl DesktopView {
             .gap(px(5.))
             .px(px(6.))
             .rounded(px(4.))
-            .when(selected, |row| row.bg(rgb(ACTIVE)))
-            .hover(move |row| row.bg(rgb(if selected { ACTIVE } else { HOVER })))
-            .focus_visible(|row| row.bg(rgb(ACTIVE)))
-            .child(icon(Icon::File, MUTED))
+            .when(selected, |row| row.bg(rgb(theme().active)))
+            .hover(move |row| {
+                row.bg(rgb(if selected {
+                    theme().active
+                } else {
+                    theme().hover
+                }))
+            })
+            .focus_visible(|row| row.bg(rgb(theme().active)))
+            .child(icon(Icon::File, theme().muted))
             .child(elide(path).flex_1())
             .child(
                 div()
                     .flex_shrink_0()
                     .text_size(px(11.))
-                    .text_color(rgb(if selected { TEXT } else { SUBTLE }))
+                    .text_color(rgb(if selected {
+                        theme().text
+                    } else {
+                        theme().subtle
+                    }))
                     .child(part),
             )
             .on_click(cx.listener(move |view, _, _, cx| {
@@ -711,7 +737,7 @@ impl DesktopView {
             .child(review_detail("条目", stash_selector(&review.entry)))
             .child(review_detail("说明", review.entry.message.clone()))
             .child(review_detail("对象 ID", review.entry.oid.clone()))
-            .child(div().text_color(rgb(MUTED)).child(description))
+            .child(div().text_color(rgb(theme().muted)).child(description))
             .when(
                 matches!(
                     review.operation,
@@ -771,7 +797,7 @@ fn stash_pane_heading() -> Div {
         .items_center()
         .px(px(9.))
         .border_b_1()
-        .border_color(rgb(BORDER))
+        .border_color(rgb(theme().border))
 }
 
 fn stash_dialog_body() -> Div {
@@ -795,8 +821,8 @@ fn stash_option(id: &'static str, label: &'static str, checked: bool) -> Statefu
         .rounded(px(3.))
         .px(px(4.))
         .py(px(3.))
-        .hover(|row| row.bg(rgb(HOVER)))
-        .focus_visible(|row| row.bg(rgb(HOVER)))
+        .hover(|row| row.bg(rgb(theme().hover)))
+        .focus_visible(|row| row.bg(rgb(theme().hover)))
         .child(check_indicator(checked))
         .child(label)
 }

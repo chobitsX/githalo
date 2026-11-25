@@ -1,61 +1,353 @@
+use githalo::theme as app_theme;
 use gpui::{
     AnyElement, App, Bounds, Context, Div, ElementId, FontWeight, Hsla, PathBuilder, Pixels, Point,
     Role, SharedString, Stateful, Window, canvas, div, fill, point, prelude::*, px, rems, rgb,
     size,
 };
 
-// ===== GitHalo v2 设计令牌（克制冷石板暗色层级 + 品牌青绿强调色） =====
-pub(super) const CHROME: u32 = 0x131417;
-pub(super) const RAIL_BG: u32 = 0x15161a;
-pub(super) const SIDEBAR_BG: u32 = 0x17181c;
-pub(super) const PANEL: u32 = 0x1b1c20;
-pub(super) const CARD: u32 = 0x22242a;
-pub(super) const POPUP: u32 = 0x25272e;
-pub(super) const BORDER: u32 = 0x2a2c34;
-pub(super) const BORDER_STRONG: u32 = 0x363944;
+/// 完整语义化主题调色板，覆盖深色（冷石板暗色）与浅色（冷白石板）双套视觉体系。
+#[derive(Clone, Copy)]
+pub(super) struct ThemePalette {
+    // 五级表面层级与边框
+    pub chrome: u32,
+    pub rail_bg: u32,
+    pub sidebar_bg: u32,
+    pub panel: u32,
+    pub card: u32,
+    pub popup: u32,
+    pub border: u32,
+    pub border_strong: u32,
 
-pub(super) const TEXT: u32 = 0xe7e9ed;
-pub(super) const MUTED: u32 = 0x9fa5b0;
-pub(super) const SUBTLE: u32 = 0x6b717e;
+    // 排版文字
+    pub text: u32,
+    pub muted: u32,
+    pub subtle: u32,
 
-pub(super) const HOVER: u32 = 0x23262e;
-pub(super) const SELECT_SOFT: u32 = 0x262932;
+    // 悬停与选中态
+    pub hover: u32,
+    pub select_soft: u32,
+    pub active: u32,
+    pub active_border: u32,
 
-// 品牌主色（GitHalo 青绿）与克制选中态（替代旧版高饱和宝蓝框）
-pub(super) const BRAND: u32 = 0x5ed6be;
-pub(super) const BRAND_TEXT: u32 = 0x82ead5;
-pub(super) const BRAND_BG: u32 = 0x172e2b;
-pub(super) const BRAND_BORDER: u32 = 0x2d5e56;
+    // 品牌青绿强调色
+    pub brand: u32,
+    pub brand_text: u32,
+    pub brand_bg: u32,
+    pub brand_border: u32,
 
-pub(super) const ACTIVE: u32 = 0x1c2f2e;
-pub(super) const ACTIVE_BORDER: u32 = 0x34665d;
+    // 主操作按钮
+    pub primary_bg: u32,
+    pub primary_hover: u32,
+    pub primary_border: u32,
+    pub primary_text: u32,
 
-// 主操作按钮（实心祖母青绿 + 纯净亮字，全屏最多一处焦点）
-pub(super) const PRIMARY_BG: u32 = 0x1e6b5e;
-pub(super) const PRIMARY_HOVER: u32 = 0x258070;
-pub(super) const PRIMARY_BORDER: u32 = 0x3ba18f;
-pub(super) const PRIMARY_TEXT: u32 = 0xeefffc;
+    // 语义状态与引用色
+    pub link: u32,
+    pub accent_bg: u32,
+    pub accent_border: u32,
 
-// 语义引用与状态色
-pub(super) const LINK: u32 = 0x8fb4ff;
-pub(super) const ACCENT_BG: u32 = 0x1b273b;
-pub(super) const ACCENT_BORDER: u32 = 0x324b73;
+    pub success: u32,
+    pub success_bg: u32,
+    pub success_border: u32,
 
-pub(super) const SUCCESS: u32 = 0x7ccf8e;
-pub(super) const SUCCESS_BG: u32 = 0x192e21;
-pub(super) const SUCCESS_BORDER: u32 = 0x2f5c3f;
+    pub remote_bg: u32,
+    pub remote_border: u32,
+    pub remote_text: u32,
 
-pub(super) const REMOTE_BG: u32 = 0x252038;
-pub(super) const REMOTE_BORDER: u32 = 0x483b6e;
-pub(super) const REMOTE_TEXT: u32 = 0xc49bff;
+    pub warning: u32,
+    pub warn_bg: u32,
+    pub warn_border: u32,
 
-pub(super) const WARNING: u32 = 0xe8b968;
-pub(super) const WARN_BG: u32 = 0x302617;
-pub(super) const WARN_BORDER: u32 = 0x644d26;
+    pub error: u32,
+    pub danger_bg: u32,
+    pub danger_border: u32,
+    pub danger_hover: u32,
 
-pub(super) const ERROR: u32 = 0xf08f94;
-pub(super) const DANGER_BG: u32 = 0x341d22;
-pub(super) const DANGER_BORDER: u32 = 0x6e363f;
+    // 浮层遮罩与阴影 (RGBA)
+    pub backdrop_rgba: u32,
+    pub shadow_rgba: u32,
+
+    // Diff 专属色板（左右对比 / 统一视图 / 编辑器 Hunk 弹窗）
+    pub diff_hunk_bg: u32,
+    pub diff_removed_bg: u32,
+    pub diff_removed_fg: u32,
+    pub diff_removed_mark: u32,
+    pub diff_removed_word_bg: u32,
+    pub diff_added_bg: u32,
+    pub diff_added_fg: u32,
+    pub diff_added_mark: u32,
+    pub diff_added_word_bg: u32,
+    pub diff_empty_bg: u32,
+
+    // 一体化代码编辑器与文本选区
+    pub editor_chrome_bg: u32,
+    pub editor_gutter_bg: u32,
+    pub editor_gutter_border: u32,
+    pub editor_line_num: u32,
+    pub editor_current_line_bg: u32,
+    pub editor_selection_bg: u32,
+    pub editor_bookmark_color: u32,
+    pub editor_bookmark_gutter_bg: u32,
+    pub editor_match_bg: u32,
+    pub editor_match_active_bg: u32,
+    pub editor_git_added: u32,
+    pub editor_git_modified: u32,
+    pub editor_git_deleted: u32,
+    pub editor_blame_divider_rgba: u32,
+    pub editor_blame_author: u32,
+    pub editor_blame_palette: [u32; 6],
+    pub scrollbar_thumb_rgba: u32,
+
+    // 提交图谱与作者头像
+    pub graph_colors: [u32; 8],
+    pub avatar_palette: [u32; 8],
+    pub avatar_fg: u32,
+
+    // Commit / 侧栏徽章 / 控件微色
+    pub untracked_fg: u32,
+    pub check_checked_bg: u32,
+    pub check_checked_border: u32,
+    pub check_checked_fg: u32,
+    pub check_unchecked_border: u32,
+    pub drag_handle: u32,
+    pub badge_repos_active_bg: u32,
+    pub badge_conflict_active_bg: u32,
+    pub badge_commit_active_bg: u32,
+    pub badge_stash_active_bg: u32,
+    pub badge_shelf_active_bg: u32,
+}
+
+// ===== GitHalo v2 深色设计令牌（克制冷石板暗色层级 + 品牌青绿强调色） =====
+pub(super) const DARK_PALETTE: ThemePalette = ThemePalette {
+    chrome: 0x131417,
+    rail_bg: 0x15161a,
+    sidebar_bg: 0x17181c,
+    panel: 0x1b1c20,
+    card: 0x22242a,
+    popup: 0x25272e,
+    border: 0x2a2c34,
+    border_strong: 0x363944,
+
+    text: 0xe7e9ed,
+    muted: 0x9fa5b0,
+    subtle: 0x6b717e,
+
+    hover: 0x23262e,
+    select_soft: 0x262932,
+    active: 0x1c2f2e,
+    active_border: 0x34665d,
+
+    brand: 0x5ed6be,
+    brand_text: 0x82ead5,
+    brand_bg: 0x172e2b,
+    brand_border: 0x2d5e56,
+
+    primary_bg: 0x1e6b5e,
+    primary_hover: 0x258070,
+    primary_border: 0x3ba18f,
+    primary_text: 0xeefffc,
+
+    link: 0x8fb4ff,
+    accent_bg: 0x1b273b,
+    accent_border: 0x324b73,
+
+    success: 0x7ccf8e,
+    success_bg: 0x192e21,
+    success_border: 0x2f5c3f,
+
+    remote_bg: 0x252038,
+    remote_border: 0x483b6e,
+    remote_text: 0xc49bff,
+
+    warning: 0xe8b968,
+    warn_bg: 0x302617,
+    warn_border: 0x644d26,
+
+    error: 0xf08f94,
+    danger_bg: 0x341d22,
+    danger_border: 0x6e363f,
+    danger_hover: 0x4a272e,
+
+    backdrop_rgba: 0x00000066,
+    shadow_rgba: 0x00000080,
+
+    diff_hunk_bg: 0x202b3c,
+    diff_removed_bg: 0x352527,
+    diff_removed_fg: 0xf0aca9,
+    diff_removed_mark: 0xe87b77,
+    diff_removed_word_bg: 0x5d292e,
+    diff_added_bg: 0x213128,
+    diff_added_fg: 0xabd5a5,
+    diff_added_mark: 0x6ec97a,
+    diff_added_word_bg: 0x1e5735,
+    diff_empty_bg: 0x181a1e,
+
+    editor_chrome_bg: 0x1b1d22,
+    editor_gutter_bg: 0x1b1d21,
+    editor_gutter_border: 0x262930,
+    editor_line_num: 0x5d6370,
+    editor_current_line_bg: 0x20232b,
+    editor_selection_bg: 0x1c2f2e,
+    editor_bookmark_color: 0xe5b473,
+    editor_bookmark_gutter_bg: 0x2c261c,
+    editor_match_bg: 0x5d4418,
+    editor_match_active_bg: 0x8a5f17,
+    editor_git_added: 0x57ab5a,
+    editor_git_modified: 0x4c8dff,
+    editor_git_deleted: 0xe5534b,
+    editor_blame_divider_rgba: 0xffffff0c,
+    editor_blame_author: 0xb7bdc8,
+    editor_blame_palette: [0x4c8dff, 0x4391c9, 0x3b8698, 0x5a73b8, 0x4d6b7d, 0x435368],
+    scrollbar_thumb_rgba: 0x8e96a844,
+
+    graph_colors: [
+        0x5ed6be, // 品牌青绿（主干）
+        0xc49bff, // 柔紫
+        0x8fb4ff, // 天蓝
+        0xe8b968, // 暖金
+        0x7ccf8e, // 翠绿
+        0xf0947d, // 珊瑚
+        0x6ec5e8, // 冰青
+        0xd98cb8, // 玫瑰
+    ],
+    avatar_palette: [
+        0x8ed6c6, 0x9abaff, 0xc9abff, 0xedc87e, 0x98dba6, 0xf2ab9b, 0x8cd0eb, 0xe0a5c8,
+    ],
+    avatar_fg: 0x0f1316,
+
+    untracked_fg: 0xe28d6a,
+    check_checked_bg: 0x1c2f2e,
+    check_checked_border: 0x8fb4ff,
+    check_checked_fg: 0xffffff,
+    check_unchecked_border: 0x555a66,
+    drag_handle: 0x4a4e57,
+    badge_repos_active_bg: 0x1e3c38,
+    badge_conflict_active_bg: 0x4c232b,
+    badge_commit_active_bg: 0x243652,
+    badge_stash_active_bg: 0x3e311d,
+    badge_shelf_active_bg: 0x32294c,
+};
+
+// ===== GitHalo v2 浅色设计令牌（冷白石板五级表面 + 沉稳翡翠青绿强调色） =====
+pub(super) const LIGHT_PALETTE: ThemePalette = ThemePalette {
+    chrome: 0xeaeef3,
+    rail_bg: 0xedf1f6,
+    sidebar_bg: 0xf3f6fa,
+    panel: 0xffffff,
+    card: 0xf8fafc,
+    popup: 0xffffff,
+    border: 0xdce2ec,
+    border_strong: 0xc5cedd,
+
+    text: 0x171c26,
+    muted: 0x515c6e,
+    subtle: 0x7c8799,
+
+    hover: 0xe5eaf2,
+    select_soft: 0xffffff,
+    active: 0xe0f5f0,
+    active_border: 0x86d3c2,
+
+    brand: 0x0d9480,
+    brand_text: 0x0a7262,
+    brand_bg: 0xe0f5f0,
+    brand_border: 0x90d9cb,
+
+    primary_bg: 0x0e8674,
+    primary_hover: 0x0b7061,
+    primary_border: 0x096254,
+    primary_text: 0xffffff,
+
+    link: 0x1d63d8,
+    accent_bg: 0xe8f0fe,
+    accent_border: 0xb4cdf9,
+
+    success: 0x15803d,
+    success_bg: 0xe6f7ec,
+    success_border: 0x9bdab2,
+
+    remote_bg: 0xf1ebfe,
+    remote_border: 0xc9b5fa,
+    remote_text: 0x6b3dd6,
+
+    warning: 0xa66208,
+    warn_bg: 0xfef5e4,
+    warn_border: 0xedc680,
+
+    error: 0xc92a38,
+    danger_bg: 0xfdebec,
+    danger_border: 0xf1adb3,
+    danger_hover: 0xfad4d8,
+
+    backdrop_rgba: 0x0f172a33,
+    shadow_rgba: 0x0f172a26,
+
+    diff_hunk_bg: 0xedf4ff,
+    diff_removed_bg: 0xffebe9,
+    diff_removed_fg: 0x82071e,
+    diff_removed_mark: 0xcf222e,
+    diff_removed_word_bg: 0xffc1c0,
+    diff_added_bg: 0xe6ffec,
+    diff_added_fg: 0x116329,
+    diff_added_mark: 0x1a7f37,
+    diff_added_word_bg: 0xabf2bc,
+    diff_empty_bg: 0xf4f6f9,
+
+    editor_chrome_bg: 0xf5f7fa,
+    editor_gutter_bg: 0xf8f9fb,
+    editor_gutter_border: 0xe6eaf1,
+    editor_line_num: 0x8a95a6,
+    editor_current_line_bg: 0xf1f6fd,
+    editor_selection_bg: 0xc8ece4,
+    editor_bookmark_color: 0xc27710,
+    editor_bookmark_gutter_bg: 0xfef3db,
+    editor_match_bg: 0xfde68a,
+    editor_match_active_bg: 0xf5b942,
+    editor_git_added: 0x2da44e,
+    editor_git_modified: 0x218bff,
+    editor_git_deleted: 0xcf222e,
+    editor_blame_divider_rgba: 0x0f172a12,
+    editor_blame_author: 0x4a5568,
+    editor_blame_palette: [0x2563eb, 0x0284c7, 0x0d9488, 0x4f46e5, 0x64748b, 0x94a3b8],
+    scrollbar_thumb_rgba: 0x4755693d,
+
+    graph_colors: [
+        0x0f9d88, // 翡翠青绿（主干）
+        0x7c4dff, // 宝石紫
+        0x2563eb, // 钴蓝
+        0xd97706, // 琥珀金
+        0x16a34a, // 翠绿
+        0xe11d48, // 玫红
+        0x0284c7, // 晴空蓝
+        0xc026d3, // 绛紫红
+    ],
+    avatar_palette: [
+        0x0f9884, 0x346fd9, 0x764cd6, 0xc77714, 0x218c4f, 0xd45242, 0x1688b5, 0xbe4484,
+    ],
+    avatar_fg: 0xffffff,
+
+    untracked_fg: 0xc25824,
+    check_checked_bg: 0x0f8a77,
+    check_checked_border: 0x0c7464,
+    check_checked_fg: 0xffffff,
+    check_unchecked_border: 0xa0aab8,
+    drag_handle: 0xc4ccd8,
+    badge_repos_active_bg: 0xcbefea,
+    badge_conflict_active_bg: 0xfad3d8,
+    badge_commit_active_bg: 0xd4e4fd,
+    badge_stash_active_bg: 0xfbe5bc,
+    badge_shelf_active_bg: 0xe3d6fc,
+};
+
+/// 获取当前生效的主题调色板（无锁读取全局主题状态）。
+#[inline]
+pub(super) fn theme() -> &'static ThemePalette {
+    if app_theme::is_light() {
+        &LIGHT_PALETTE
+    } else {
+        &DARK_PALETTE
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Icon {
@@ -473,7 +765,7 @@ pub(super) fn selection_bar() -> Div {
         .bottom(px(4.))
         .w(px(2.5))
         .rounded(px(2.))
-        .bg(rgb(BRAND))
+        .bg(rgb(theme().brand))
 }
 
 pub(super) fn vertical_rule() -> Div {
@@ -481,7 +773,7 @@ pub(super) fn vertical_rule() -> Div {
         .w(px(1.))
         .h(px(15.))
         .flex_shrink_0()
-        .bg(rgb(BORDER_STRONG))
+        .bg(rgb(theme().border_strong))
 }
 
 pub(super) fn elide(text: impl Into<SharedString>) -> Div {
@@ -489,12 +781,13 @@ pub(super) fn elide(text: impl Into<SharedString>) -> Div {
 }
 
 pub(super) fn icon_button(id: impl Into<ElementId>, kind: Icon, label: &str) -> Stateful<Div> {
+    let t = theme();
     div()
         .id(id)
         .role(Role::Button)
         .aria_label(label.to_owned())
         .tab_index(0)
-        .focus_visible(|s| s.bg(rgb(HOVER)).border_color(rgb(ACTIVE_BORDER)))
+        .focus_visible(move |s| s.bg(rgb(t.hover)).border_color(rgb(t.active_border)))
         .tooltip(tooltip(label.to_owned()))
         .size(rems(1.6875))
         .flex()
@@ -502,8 +795,8 @@ pub(super) fn icon_button(id: impl Into<ElementId>, kind: Icon, label: &str) -> 
         .items_center()
         .justify_center()
         .rounded(px(6.))
-        .hover(|s| s.bg(rgb(HOVER)))
-        .child(icon(kind, MUTED))
+        .hover(move |s| s.bg(rgb(t.hover)))
+        .child(icon(kind, t.muted))
 }
 
 pub(super) fn text_button(
@@ -520,6 +813,7 @@ pub(super) fn command_button(
     primary: bool,
     enabled: bool,
 ) -> Stateful<Div> {
+    let t = theme();
     let text = text.into();
     div()
         .id(id)
@@ -535,24 +829,28 @@ pub(super) fn command_button(
         .rounded(px(6.))
         .border_1()
         .border_color(rgb(if primary && enabled {
-            PRIMARY_BORDER
+            t.primary_border
         } else {
-            BORDER_STRONG
+            t.border_strong
         }))
-        .bg(rgb(if primary && enabled { PRIMARY_BG } else { CARD }))
-        .text_color(rgb(if !enabled {
-            SUBTLE
-        } else if primary {
-            PRIMARY_TEXT
+        .bg(rgb(if primary && enabled {
+            t.primary_bg
         } else {
-            TEXT
+            t.card
+        }))
+        .text_color(rgb(if !enabled {
+            t.subtle
+        } else if primary {
+            t.primary_text
+        } else {
+            t.text
         }))
         .when(primary && enabled, |b| b.font_weight(FontWeight::MEDIUM))
         .when(enabled, |button| {
             button
                 .tab_index(0)
-                .hover(|s| s.bg(rgb(if primary { PRIMARY_HOVER } else { HOVER })))
-                .focus_visible(|s| s.border_color(rgb(BRAND)))
+                .hover(move |s| s.bg(rgb(if primary { t.primary_hover } else { t.hover })))
+                .focus_visible(move |s| s.border_color(rgb(t.brand)))
         })
         .child(text)
 }
@@ -564,13 +862,14 @@ pub(super) fn icon_text_button(
     primary: bool,
     enabled: bool,
 ) -> Stateful<Div> {
+    let t = theme();
     let text = text.into();
     let ico_color = if !enabled {
-        SUBTLE
+        t.subtle
     } else if primary {
-        PRIMARY_TEXT
+        t.primary_text
     } else {
-        MUTED
+        t.muted
     };
     div()
         .id(id)
@@ -586,24 +885,28 @@ pub(super) fn icon_text_button(
         .rounded(px(6.))
         .border_1()
         .border_color(rgb(if primary && enabled {
-            PRIMARY_BORDER
+            t.primary_border
         } else {
-            BORDER_STRONG
+            t.border_strong
         }))
-        .bg(rgb(if primary && enabled { PRIMARY_BG } else { CARD }))
-        .text_color(rgb(if !enabled {
-            SUBTLE
-        } else if primary {
-            PRIMARY_TEXT
+        .bg(rgb(if primary && enabled {
+            t.primary_bg
         } else {
-            TEXT
+            t.card
+        }))
+        .text_color(rgb(if !enabled {
+            t.subtle
+        } else if primary {
+            t.primary_text
+        } else {
+            t.text
         }))
         .when(primary && enabled, |b| b.font_weight(FontWeight::MEDIUM))
         .when(enabled, |button| {
             button
                 .tab_index(0)
-                .hover(|s| s.bg(rgb(if primary { PRIMARY_HOVER } else { HOVER })))
-                .focus_visible(|s| s.border_color(rgb(BRAND)))
+                .hover(move |s| s.bg(rgb(if primary { t.primary_hover } else { t.hover })))
+                .focus_visible(move |s| s.border_color(rgb(t.brand)))
         })
         .child(icon(leading_icon, ico_color))
         .child(text)
@@ -614,6 +917,7 @@ pub(super) fn danger_button(
     text: impl Into<SharedString>,
     enabled: bool,
 ) -> Stateful<Div> {
+    let t = theme();
     let text = text.into();
     div()
         .id(id)
@@ -628,14 +932,14 @@ pub(super) fn danger_button(
         .flex_shrink_0()
         .rounded(px(6.))
         .border_1()
-        .border_color(rgb(if enabled { DANGER_BORDER } else { BORDER }))
-        .bg(rgb(if enabled { DANGER_BG } else { CARD }))
-        .text_color(rgb(if enabled { ERROR } else { SUBTLE }))
+        .border_color(rgb(if enabled { t.danger_border } else { t.border }))
+        .bg(rgb(if enabled { t.danger_bg } else { t.card }))
+        .text_color(rgb(if enabled { t.error } else { t.subtle }))
         .when(enabled, |button| {
             button
                 .tab_index(0)
-                .hover(|s| s.bg(rgb(0x4a272e)))
-                .focus_visible(|s| s.border_color(rgb(ERROR)))
+                .hover(move |s| s.bg(rgb(t.danger_hover)))
+                .focus_visible(move |s| s.border_color(rgb(t.error)))
         })
         .child(text)
 }
@@ -660,6 +964,7 @@ pub(super) fn workspace_tab(
     label: impl Into<SharedString>,
     active: bool,
 ) -> Stateful<Div> {
+    let t = theme();
     div()
         .id(id)
         .role(Role::Tab)
@@ -674,15 +979,19 @@ pub(super) fn workspace_tab(
         .px(px(9.))
         .rounded(px(5.))
         .border_1()
-        .border_color(rgb(if active { BORDER_STRONG } else { SIDEBAR_BG }))
-        .bg(rgb(if active { PANEL } else { SIDEBAR_BG }))
-        .text_color(rgb(if active { TEXT } else { MUTED }))
-        .when(active, |t| t.font_weight(FontWeight::MEDIUM))
+        .border_color(rgb(if active {
+            t.border_strong
+        } else {
+            t.sidebar_bg
+        }))
+        .bg(rgb(if active { t.panel } else { t.sidebar_bg }))
+        .text_color(rgb(if active { t.text } else { t.muted }))
+        .when(active, |tab| tab.font_weight(FontWeight::MEDIUM))
         .hover(move |tab| {
-            tab.bg(rgb(if active { PANEL } else { HOVER }))
-                .text_color(rgb(TEXT))
+            tab.bg(rgb(if active { t.panel } else { t.hover }))
+                .text_color(rgb(t.text))
         })
-        .focus_visible(|tab| tab.border_color(rgb(BRAND)))
+        .focus_visible(move |tab| tab.border_color(rgb(t.brand)))
 }
 
 pub(super) fn empty(text: impl Into<SharedString>) -> Div {
@@ -694,7 +1003,7 @@ pub(super) fn empty(text: impl Into<SharedString>) -> Div {
         .justify_center()
         .p(px(16.))
         .text_center()
-        .text_color(rgb(SUBTLE))
+        .text_color(rgb(theme().subtle))
         .child(text.into())
 }
 
@@ -702,17 +1011,18 @@ struct Tooltip(SharedString);
 
 impl Render for Tooltip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let t = theme();
         div()
-            .bg(rgb(POPUP))
+            .bg(rgb(t.popup))
             .border_1()
-            .border_color(rgb(BORDER_STRONG))
+            .border_color(rgb(t.border_strong))
             .rounded(px(5.))
             .px(px(7.))
             .py(px(3.5))
             .max_w(px(320.))
             .text_size(rems(0.72))
             .line_height(rems(1.05))
-            .text_color(rgb(MUTED))
+            .text_color(rgb(t.muted))
             .child(self.0.clone())
     }
 }

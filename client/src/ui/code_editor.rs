@@ -15,7 +15,7 @@ use gpui::{
     canvas, div, fill, point, prelude::*, px, rems, rgb, rgba, size,
 };
 
-use super::components::{ACTIVE, LINK, PANEL, SUBTLE, TEXT};
+use super::components::theme;
 
 actions!(
     code_editor,
@@ -179,17 +179,6 @@ const BLAME_COL_WIDTH: f32 = 196.0;
 const MARKER_COL_WIDTH: f32 = 9.0;
 const MAX_UNDO_STEPS: usize = 200;
 const MAX_EXACT_WRAP_LINES: usize = 2_500;
-
-const GUTTER_BG: u32 = 0x1b1d21;
-const GUTTER_BORDER: u32 = 0x262930;
-const CURRENT_LINE_BG: u32 = 0x20232b;
-const BOOKMARK_COLOR: u32 = 0xe5b473;
-const BOOKMARK_GUTTER_BG: u32 = 0x2c261c;
-const MATCH_BG: u32 = 0x5d4418;
-const MATCH_ACTIVE_BG: u32 = 0x8a5f17;
-const GIT_ADDED: u32 = 0x57ab5a;
-const GIT_MODIFIED: u32 = 0x4c8dff;
-const GIT_DELETED: u32 = 0xe5534b;
 
 #[derive(Clone)]
 struct UndoSnapshot {
@@ -728,6 +717,12 @@ impl CodeEditor {
         true
     }
 
+    pub(super) fn rehighlight(&mut self, cx: &mut Context<Self>) {
+        self.highlights = syntax::highlight_document(&self.path, &self.text);
+        self.wrap_cache = None;
+        cx.notify();
+    }
+
     fn rebuild_text_caches(&mut self) {
         self.text_version = self.text_version.wrapping_add(1);
         self.line_starts = compute_line_starts(&self.text);
@@ -1263,7 +1258,7 @@ impl CodeEditor {
                 let run = TextRun {
                     len: line_str.len(),
                     font: font.clone(),
-                    color: rgb(TEXT).into(),
+                    color: rgb(theme().text).into(),
                     background_color: None,
                     underline: None,
                     strikethrough: None,
@@ -1387,7 +1382,7 @@ impl CodeEditor {
             if a >= b {
                 continue;
             }
-            let mut color = TEXT;
+            let mut color = theme().text;
             let mut bold = false;
             let mut italic = false;
             if let Some(span) = syntax_spans.iter().find(|s| s.start <= a && b <= s.end) {
@@ -1407,9 +1402,16 @@ impl CodeEditor {
                 .is_some_and(|r| r.start <= a && b <= r.end);
 
             let background_color = if in_sel {
-                Some(rgb(ACTIVE).into())
+                Some(rgb(theme().editor_selection_bg).into())
             } else {
-                match_hit.map(|active| rgb(if active { MATCH_ACTIVE_BG } else { MATCH_BG }).into())
+                match_hit.map(|active| {
+                    rgb(if active {
+                        theme().editor_match_active_bg
+                    } else {
+                        theme().editor_match_bg
+                    })
+                    .into()
+                })
             };
 
             let mut font = base_font.clone();
@@ -1426,7 +1428,7 @@ impl CodeEditor {
                 color: rgb(color).into(),
                 background_color,
                 underline: in_mark.then(|| UnderlineStyle {
-                    color: Some(rgb(LINK).into()),
+                    color: Some(rgb(theme().link).into()),
                     thickness: px(1.),
                     wavy: false,
                 }),
@@ -2147,11 +2149,12 @@ impl Render for CodeEditor {
                 let left_chrome_w = layout.blame_width + layout.gutter_width + layout.marker_width;
 
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    let t = theme();
                     // 1. Left gutter & blame column background
                     if left_chrome_w > px(0.) {
                         window.paint_quad(fill(
                             Bounds::new(bounds.origin, size(left_chrome_w, bounds.size.height)),
-                            rgb(GUTTER_BG),
+                            rgb(t.editor_gutter_bg),
                         ));
                         // Separator between blame and line numbers
                         if layout.blame_width > px(0.) {
@@ -2163,7 +2166,7 @@ impl Render for CodeEditor {
                                     ),
                                     size(px(1.), bounds.size.height),
                                 ),
-                                rgb(GUTTER_BORDER),
+                                rgb(t.editor_gutter_border),
                             ));
                         }
                         // Separator between gutter chrome and code area
@@ -2172,7 +2175,7 @@ impl Render for CodeEditor {
                                 point(bounds.origin.x + left_chrome_w - px(1.), bounds.origin.y),
                                 size(px(1.), bounds.size.height),
                             ),
-                            rgb(GUTTER_BORDER),
+                            rgb(t.editor_gutter_border),
                         ));
                     }
 
@@ -2184,7 +2187,7 @@ impl Render for CodeEditor {
                                 point(bounds.origin.x + left_chrome_w, top),
                                 size(bounds.size.width - left_chrome_w, rl.height),
                             ),
-                            rgb(CURRENT_LINE_BG),
+                            rgb(t.editor_current_line_bg),
                         ));
                     }
 
@@ -2212,7 +2215,7 @@ impl Render for CodeEditor {
                                                 point(bounds.origin.x + px(3.), y),
                                                 size(layout.blame_width - px(4.), px(1.)),
                                             ),
-                                            rgba(0xffffff0c),
+                                            rgba(t.editor_blame_divider_rgba),
                                         ));
                                     }
                                     let label = format!("{date_short}{author_suffix}");
@@ -2220,7 +2223,7 @@ impl Render for CodeEditor {
                                         TextRun {
                                             len: date_short.len(),
                                             font: mono_font.clone(),
-                                            color: rgb(SUBTLE).into(),
+                                            color: rgb(t.subtle).into(),
                                             background_color: None,
                                             underline: None,
                                             strikethrough: None,
@@ -2228,8 +2231,12 @@ impl Render for CodeEditor {
                                         TextRun {
                                             len: author_suffix.len(),
                                             font: mono_font.clone(),
-                                            color: rgb(if is_current { TEXT } else { 0xb7bdc8 })
-                                                .into(),
+                                            color: rgb(if is_current {
+                                                t.text
+                                            } else {
+                                                t.editor_blame_author
+                                            })
+                                            .into(),
                                             background_color: None,
                                             underline: None,
                                             strikethrough: None,
@@ -2257,7 +2264,7 @@ impl Render for CodeEditor {
                                 let runs = [TextRun {
                                     len: label.len(),
                                     font: mono_font.clone(),
-                                    color: rgb(SUBTLE).into(),
+                                    color: rgb(t.subtle).into(),
                                     background_color: None,
                                     underline: None,
                                     strikethrough: None,
@@ -2285,23 +2292,23 @@ impl Render for CodeEditor {
                             if is_bookmarked {
                                 window.paint_quad(fill(
                                     Bounds::new(point(gx, y), size(layout.gutter_width, rl.height)),
-                                    rgb(BOOKMARK_GUTTER_BG),
+                                    rgb(t.editor_bookmark_gutter_bg),
                                 ));
                                 window.paint_quad(fill(
                                     Bounds::new(
                                         point(gx + px(2.), y + px(3.)),
                                         size(px(3.), (line_h - px(6.)).max(px(6.))),
                                     ),
-                                    rgb(BOOKMARK_COLOR),
+                                    rgb(t.editor_bookmark_color),
                                 ));
                             }
                             let num_str = (rl.line_idx + 1).to_string();
                             let num_color = if is_bookmarked {
-                                BOOKMARK_COLOR
+                                t.editor_bookmark_color
                             } else if is_current {
-                                LINK
+                                t.link
                             } else {
-                                0x5d6370
+                                t.editor_line_num
                             };
                             let mut num_font = mono_font.clone();
                             if is_current || is_bookmarked {
@@ -2345,7 +2352,7 @@ impl Render for CodeEditor {
                                             point(mx + px(2.), y + px(1.)),
                                             size(px(3.), (rl.height - px(2.)).max(px(4.))),
                                         ),
-                                        rgb(GIT_ADDED),
+                                        rgb(t.editor_git_added),
                                     ));
                                 }
                                 GutterDiffKind::Modified => {
@@ -2354,13 +2361,13 @@ impl Render for CodeEditor {
                                             point(mx + px(2.), y + px(1.)),
                                             size(px(3.), (rl.height - px(2.)).max(px(4.))),
                                         ),
-                                        rgb(GIT_MODIFIED),
+                                        rgb(t.editor_git_modified),
                                     ));
                                 }
                                 GutterDiffKind::DeletedAbove => {
                                     window.paint_quad(fill(
                                         Bounds::new(point(mx + px(1.), y), size(px(6.), px(3.))),
-                                        rgb(GIT_DELETED),
+                                        rgb(t.editor_git_deleted),
                                     ));
                                 }
                             }
@@ -2401,7 +2408,7 @@ impl Render for CodeEditor {
                             if let Some(caret) = caret_pos {
                                 window.paint_quad(fill(
                                     Bounds::new(caret, size(px(1.5), line_h)),
-                                    rgb(LINK),
+                                    rgb(t.link),
                                 ));
                             }
                         },
@@ -2409,10 +2416,10 @@ impl Render for CodeEditor {
 
                     // 5. Scrollbar thumbs
                     if let Some(v_thumb) = layout.v_thumb {
-                        window.paint_quad(fill(v_thumb, rgba(0x8e96a844)));
+                        window.paint_quad(fill(v_thumb, rgba(t.scrollbar_thumb_rgba)));
                     }
                     if let Some(h_thumb) = layout.h_thumb {
-                        window.paint_quad(fill(h_thumb, rgba(0x8e96a844)));
+                        window.paint_quad(fill(h_thumb, rgba(t.scrollbar_thumb_rgba)));
                     }
                 });
 
@@ -2431,7 +2438,7 @@ impl Render for CodeEditor {
             .h_full()
             .min_w_0()
             .min_h_0()
-            .bg(rgb(PANEL))
+            .bg(rgb(theme().panel))
             .font_family("Menlo")
             .text_size(rems(0.8125))
             .cursor(CursorStyle::IBeam)
@@ -2766,20 +2773,12 @@ fn apply_block_indent(
 }
 
 fn blame_age_color(oid: &str, date: &str) -> u32 {
-    // Combine commit hash bucket with subtle blue/teal/slate palette like IntelliJ / Rebased
-    const PALETTE: [u32; 6] = [
-        0x4c8dff, // vivid blue
-        0x4391c9, // sky blue
-        0x3b8698, // teal blue
-        0x5a73b8, // indigo slate
-        0x4d6b7d, // steel blue
-        0x435368, // muted slate
-    ];
+    let palette = theme().editor_blame_palette;
     let mut hash: usize = 0;
     for b in oid.bytes().take(8).chain(date.bytes().take(7)) {
         hash = hash.wrapping_mul(31).wrapping_add(usize::from(b));
     }
-    PALETTE[hash % PALETTE.len()]
+    palette[hash % palette.len()]
 }
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {

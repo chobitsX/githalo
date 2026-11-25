@@ -910,9 +910,9 @@ impl DesktopView {
             .min_h(px(136.))
             .flex()
             .flex_col()
-            .bg(rgb(RAIL_BG))
+            .bg(rgb(theme().rail_bg))
             .border_t_1()
-            .border_color(rgb(BORDER_STRONG))
+            .border_color(rgb(theme().border_strong))
             .child(
                 div()
                     .id("branches-drawer-splitter")
@@ -922,13 +922,13 @@ impl DesktopView {
                     .items_center()
                     .justify_center()
                     .cursor(CursorStyle::ResizeUpDown)
-                    .hover(|s| s.bg(rgb(HOVER)))
+                    .hover(|s| s.bg(rgb(theme().hover)))
                     .child(
                         div()
                             .w(px(26.))
                             .h(px(2.))
                             .rounded(px(2.))
-                            .bg(rgb(BORDER_STRONG)),
+                            .bg(rgb(theme().border_strong)),
                     )
                     .on_mouse_down(
                         MouseButton::Left,
@@ -996,7 +996,7 @@ impl DesktopView {
                     .flex_col()
                     .min_w_0()
                     .min_h_0()
-                    .bg(rgb(SIDEBAR_BG))
+                    .bg(rgb(theme().sidebar_bg))
                     .child(header)
                     .child(tree_body),
             )
@@ -1009,9 +1009,9 @@ impl DesktopView {
             .h_full()
             .flex_shrink_0()
             .border_l_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .cursor(CursorStyle::ResizeLeftRight)
-            .hover(|s| s.bg(rgb(BRAND)))
+            .hover(|s| s.bg(rgb(theme().brand)))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |view, event: &gpui::MouseDownEvent, _, cx| {
@@ -1088,13 +1088,13 @@ impl DesktopView {
                        active: bool,
                        tint: Option<u32>| {
             let color = if !enabled {
-                SUBTLE
+                theme().subtle
             } else if let Some(c) = tint {
                 c
             } else if active {
-                BRAND_TEXT
+                theme().brand_text
             } else {
-                MUTED
+                theme().muted
             };
             div()
                 .id(SharedString::from(format!("{scope}-{name}")))
@@ -1107,10 +1107,15 @@ impl DesktopView {
                 .items_center()
                 .justify_center()
                 .rounded(px(4.))
-                .when(active && enabled, |b| b.bg(rgb(BRAND_BG)))
+                .when(active && enabled, |b| b.bg(rgb(theme().brand_bg)))
                 .when(enabled, |b| {
-                    b.tab_index(0)
-                        .hover(move |s| s.bg(rgb(if active { BRAND_BG } else { HOVER })))
+                    b.tab_index(0).hover(move |s| {
+                        s.bg(rgb(if active {
+                            theme().brand_bg
+                        } else {
+                            theme().hover
+                        }))
+                    })
                 })
                 .child(icon(kind, color))
         };
@@ -1122,13 +1127,15 @@ impl DesktopView {
             .flex()
             .flex_shrink_0()
             .items_center()
-            .when(standalone, |h| h.border_b_1().border_color(rgb(BORDER)))
+            .when(standalone, |h| {
+                h.border_b_1().border_color(rgb(theme().border))
+            })
             .child(
                 elide(title)
                     .flex_1()
                     .text_size(rems(0.75))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(MUTED)),
+                    .text_color(rgb(theme().muted)),
             )
             .child({
                 let snap = snapshot.cloned();
@@ -1207,7 +1214,7 @@ impl DesktopView {
                     true,
                     self.branches_only_favorites && !fav_enabled,
                     if selected_is_fav || self.branches_only_favorites {
-                        Some(WARNING)
+                        Some(theme().warning)
                     } else {
                         None
                     },
@@ -1336,7 +1343,7 @@ impl DesktopView {
             .flex_shrink_0()
             .items_center()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme().border))
             .child(
                 div()
                     .flex_1()
@@ -1347,10 +1354,10 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .rounded(px(6.))
-                    .bg(rgb(CARD))
+                    .bg(rgb(theme().card))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .child(icon(Icon::Search, SUBTLE))
+                    .border_color(rgb(theme().border))
+                    .child(icon(Icon::Search, theme().subtle))
                     .child(
                         div()
                             .flex_1()
@@ -1384,17 +1391,17 @@ impl DesktopView {
                 .flex_shrink_0()
                 .items_center()
                 .justify_between()
-                .bg(rgb(WARN_BG))
+                .bg(rgb(theme().warn_bg))
                 .border_b_1()
-                .border_color(rgb(WARN_BORDER))
+                .border_color(rgb(theme().warn_border))
                 .text_size(px(11.))
-                .text_color(rgb(WARNING))
+                .text_color(rgb(theme().warning))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(4.))
-                        .child(icon(Icon::StarFilled, WARNING))
+                        .child(icon(Icon::StarFilled, theme().warning))
                         .child(tr("仅显示收藏分支", "Favorites only")),
                 )
                 .child(
@@ -1402,7 +1409,7 @@ impl DesktopView {
                         .id("clear-only-favs")
                         .px(px(4.))
                         .rounded(px(3.))
-                        .hover(|s| s.bg(rgb(HOVER)))
+                        .hover(|s| s.bg(rgb(theme().hover)))
                         .child("×")
                         .on_click(cx.listener(|view, _, _, cx| {
                             view.branches_only_favorites = false;
@@ -2683,7 +2690,7 @@ impl DesktopView {
             .children(
                 form.error
                     .clone()
-                    .map(|error| div().text_color(rgb(ERROR)).child(error)),
+                    .map(|error| div().text_color(rgb(theme().error)).child(error)),
             )
             .child(self.review_buttons(
                 "confirm-checkout-remote",
@@ -2755,7 +2762,7 @@ impl DesktopView {
                 dialog.remote.clone(),
             ))
             .child(review_detail(tr("目标分支", "Branch"), full))
-            .child(div().text_size(px(11.5)).text_color(rgb(WARNING)).child(tr(
+            .child(div().text_size(px(11.5)).text_color(rgb(theme().warning)).child(tr(
                 "此操作将执行 git push --delete 直接删除远端服务器上的分支引用，请确认操作。",
                 "This runs git push --delete and removes the branch on the remote repository.",
             )))
@@ -2856,10 +2863,15 @@ impl DesktopView {
                     .items_center()
                     .gap(px(7.))
                     .child(check_indicator(autostash))
-                    .child(div().text_size(px(12.)).text_color(rgb(TEXT)).child(tr(
-                        "自动暂存并恢复未提交改动（--autostash）",
-                        "Automatically stash and pop local changes (--autostash)",
-                    )))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(theme().text))
+                            .child(tr(
+                                "自动暂存并恢复未提交改动（--autostash）",
+                                "Automatically stash and pop local changes (--autostash)",
+                            )),
+                    )
                     .on_click(cx.listener(|view, _, _, cx| {
                         if let Some(Overlay::Dialog(Dialog::CheckoutAndRebase(d))) =
                             &mut view.overlay
@@ -2915,14 +2927,14 @@ fn menu_item_shortcut(
         .items_center()
         .justify_between()
         .gap(px(14.))
-        .hover(|s| s.bg(rgb(ACTIVE)))
-        .focus_visible(|s| s.bg(rgb(ACTIVE)))
-        .child(div().text_color(rgb(TEXT)).child(label))
+        .hover(|s| s.bg(rgb(theme().active)))
+        .focus_visible(|s| s.bg(rgb(theme().active)))
+        .child(div().text_color(rgb(theme().text)).child(label))
         .child(
             div()
                 .flex_shrink_0()
                 .text_size(px(11.))
-                .text_color(rgb(SUBTLE))
+                .text_color(rgb(theme().subtle))
                 .child(shortcut),
         )
         .on_click(cx.listener(move |view, event, window, cx| {
@@ -2953,26 +2965,32 @@ fn render_branch_row(
         .flex()
         .items_center()
         .gap(px(5.))
-        .when(is_selected, |el| el.bg(rgb(ACTIVE)))
-        .hover(move |s| s.bg(rgb(if is_selected { ACTIVE } else { HOVER })));
+        .when(is_selected, |el| el.bg(rgb(theme().active)))
+        .hover(move |s| {
+            s.bg(rgb(if is_selected {
+                theme().active
+            } else {
+                theme().hover
+            }))
+        });
 
     match row {
         BranchTreeRow::Head { branch_label, .. } => {
             let menu_snap = snapshot.cloned();
             let menu_label = branch_label.clone();
-            base.child(icon(Icon::HeadTag, BRAND))
+            base.child(icon(Icon::HeadTag, theme().brand))
                 .child(
                     elide(tr("HEAD (当前分支)", "HEAD (Current Branch)"))
                         .flex_1()
                         .text_size(rems(0.8125))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(TEXT)),
+                        .text_color(rgb(theme().text)),
                 )
                 .child(
                     div()
                         .flex_shrink_0()
                         .text_size(rems(0.7))
-                        .text_color(rgb(SUBTLE))
+                        .text_color(rgb(theme().subtle))
                         .child(branch_label),
                 )
                 .on_click(window.listener_for(
@@ -3019,20 +3037,20 @@ fn render_branch_row(
                     } else {
                         Icon::ChevronRight
                     },
-                    SUBTLE,
+                    theme().subtle,
                 ))
                 .child(
                     elide(title)
                         .flex_1()
                         .text_size(rems(0.8125))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT)),
+                        .text_color(rgb(theme().text)),
                 )
                 .child(
                     div()
                         .flex_shrink_0()
                         .text_size(rems(0.7))
-                        .text_color(rgb(SUBTLE))
+                        .text_color(rgb(theme().subtle))
                         .child(count.to_string()),
                 )
                 .on_click(window.listener_for(
@@ -3087,20 +3105,20 @@ fn render_branch_row(
                     } else {
                         Icon::ChevronRight
                     },
-                    SUBTLE,
+                    theme().subtle,
                 ))
-                .child(icon(Icon::Folder, MUTED))
+                .child(icon(Icon::Folder, theme().muted))
                 .child(
                     elide(label)
                         .flex_1()
                         .text_size(rems(0.8125))
-                        .text_color(rgb(TEXT)),
+                        .text_color(rgb(theme().text)),
                 )
                 .child(
                     div()
                         .flex_shrink_0()
                         .text_size(rems(0.7))
-                        .text_color(rgb(SUBTLE))
+                        .text_color(rgb(theme().subtle))
                         .child(count.to_string()),
                 )
                 .on_click(window.listener_for(
@@ -3153,11 +3171,11 @@ fn render_branch_row(
             let indent = px((depth as f32) * 14. + 18.);
             let is_filtered = active_filter == Some(ref_str.as_str());
             let (kind, icon_color) = if is_current {
-                (Icon::Branch, BRAND)
+                (Icon::Branch, theme().brand)
             } else if is_favorite {
-                (Icon::StarFilled, WARNING)
+                (Icon::StarFilled, theme().warning)
             } else {
-                (Icon::Branch, MUTED)
+                (Icon::Branch, theme().muted)
             };
             let menu_snap = snapshot.cloned();
             let occupied = occupied_path.is_some();
@@ -3169,25 +3187,29 @@ fn render_branch_row(
                         .flex_1()
                         .text_size(rems(0.8125))
                         .when(is_current, |t| t.font_weight(FontWeight::SEMIBOLD))
-                        .text_color(rgb(if is_filtered { BRAND_TEXT } else { TEXT })),
+                        .text_color(rgb(if is_filtered {
+                            theme().brand_text
+                        } else {
+                            theme().text
+                        })),
                 )
                 .when_some(upstream_hint, |r, up| {
                     r.child(
                         elide(up)
                             .max_w(px(88.))
                             .text_size(rems(0.66))
-                            .text_color(rgb(SUBTLE)),
+                            .text_color(rgb(theme().subtle)),
                     )
                 })
                 .when(is_filtered, |r| {
-                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(BRAND)))
+                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(theme().brand)))
                 })
                 .when(occupied, |r| {
                     r.child(
                         div()
                             .flex_shrink_0()
                             .text_size(px(10.))
-                            .text_color(rgb(SUBTLE))
+                            .text_color(rgb(theme().subtle))
                             .child("wt"),
                     )
                 })
@@ -3241,9 +3263,9 @@ fn render_branch_row(
             let indent = px((depth as f32) * 14. + 18.);
             let is_filtered = active_filter == Some(ref_str.as_str());
             let (kind, icon_color) = if is_favorite {
-                (Icon::StarFilled, WARNING)
+                (Icon::StarFilled, theme().warning)
             } else {
-                (Icon::Branch, REMOTE_TEXT)
+                (Icon::Branch, theme().remote_text)
             };
             let menu_snap = snapshot.cloned();
             base.pl(indent)
@@ -3252,10 +3274,14 @@ fn render_branch_row(
                     elide(label)
                         .flex_1()
                         .text_size(rems(0.8125))
-                        .text_color(rgb(if is_filtered { BRAND_TEXT } else { TEXT })),
+                        .text_color(rgb(if is_filtered {
+                            theme().brand_text
+                        } else {
+                            theme().text
+                        })),
                 )
                 .when(is_filtered, |r| {
-                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(BRAND)))
+                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(theme().brand)))
                 })
                 .on_click(window.listener_for(
                     entity,
@@ -3304,9 +3330,9 @@ fn render_branch_row(
             let indent = px((depth as f32) * 14. + 18.);
             let is_filtered = active_filter == Some(ref_str.as_str());
             let (kind, icon_color) = if is_favorite {
-                (Icon::StarFilled, WARNING)
+                (Icon::StarFilled, theme().warning)
             } else {
-                (Icon::Tag, WARNING)
+                (Icon::Tag, theme().warning)
             };
             let menu_snap = snapshot.cloned();
             base.pl(indent)
@@ -3315,10 +3341,14 @@ fn render_branch_row(
                     elide(label)
                         .flex_1()
                         .text_size(rems(0.8125))
-                        .text_color(rgb(if is_filtered { BRAND_TEXT } else { TEXT })),
+                        .text_color(rgb(if is_filtered {
+                            theme().brand_text
+                        } else {
+                            theme().text
+                        })),
                 )
                 .when(is_filtered, |r| {
-                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(BRAND)))
+                    r.child(div().size(px(6.)).rounded(px(999.)).bg(rgb(theme().brand)))
                 })
                 .on_click(window.listener_for(
                     entity,

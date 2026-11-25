@@ -187,6 +187,9 @@ cargo run --release --manifest-path client/Cargo.toml --locked
 # 临时指定界面语言（"en" 或 "zh"）
 GITHALO_LANG=en ./client/target/release/githalo
 
+# 临时指定外观主题（"light" 或 "dark"，默认跟随系统外观）
+GITHALO_THEME=light ./client/target/release/githalo
+
 # 使用独立的 SQLite 工作区数据库（适合体验或隔离测试）
 GITHALO_DB=/tmp/githalo-demo.sqlite3 ./client/target/release/githalo
 ```
@@ -207,7 +210,7 @@ GITHALO_DB=/tmp/githalo-demo.sqlite3 ./client/target/release/githalo
 | **Windows** | 规划中 | GPUI Windows 后端适配与打包，欢迎参与贡献 |
 
 **后续规划：**
-- 浅色主题与自定义配色方案
+- 自定义主题与用户配色方案扩展
 - Git Submodules 与 Git LFS 专项工作流
 - macOS Intel / Linux / Windows 预编译安装包与 Homebrew Cask 分发
 

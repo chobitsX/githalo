@@ -187,6 +187,9 @@ Useful runtime environment variables:
 # Override UI language ("en" or "zh")
 GITHALO_LANG=en ./client/target/release/githalo
 
+# Override appearance theme ("light" or "dark"; defaults to OS appearance)
+GITHALO_THEME=light ./client/target/release/githalo
+
 # Point to an isolated SQLite workspace database
 GITHALO_DB=/tmp/githalo-demo.sqlite3 ./client/target/release/githalo
 ```
@@ -207,7 +210,7 @@ Workspace registrations, group memberships, and fetch history are stored locally
 | **Windows** | Planned | GPUI Windows backend integration & packaging — PRs welcome |
 
 **Upcoming Focus Areas:**
-- Light theme & customizable color schemes
+- Custom themes & user-defined color schemes
 - Git Submodules & Git LFS management
 - Prebuilt binaries for macOS Intel, Linux, and Windows, plus Homebrew Cask distribution
 

@@ -44,10 +44,14 @@ impl InteractiveRowKind {
 
     fn colors(self) -> (u32, u32, u32) {
         match self {
-            Self::Pick => (ACCENT_BG, ACCENT_BORDER, LINK),
-            Self::Reword => (SUCCESS_BG, SUCCESS_BORDER, SUCCESS),
-            Self::Squash | Self::Fixup => (REMOTE_BG, REMOTE_BORDER, REMOTE_TEXT),
-            Self::Drop => (DANGER_BG, DANGER_BORDER, ERROR),
+            Self::Pick => (theme().accent_bg, theme().accent_border, theme().link),
+            Self::Reword => (theme().success_bg, theme().success_border, theme().success),
+            Self::Squash | Self::Fixup => (
+                theme().remote_bg,
+                theme().remote_border,
+                theme().remote_text,
+            ),
+            Self::Drop => (theme().danger_bg, theme().danger_border, theme().error),
         }
     }
 }
@@ -176,19 +180,19 @@ impl DesktopView {
         };
         let (accent, badge_bg, badge_border, badge_fg, badge_label, subtitle) = if has_conflicts {
             (
-                ERROR,
-                DANGER_BG,
-                DANGER_BORDER,
-                ERROR,
+                theme().error,
+                theme().danger_bg,
+                theme().danger_border,
+                theme().error,
                 format!("{kind_label} 冲突{step}"),
                 "解决冲突后点击「继续 Rebase」，或跳过当前提交 / 中止恢复原分支",
             )
         } else {
             (
-                SUCCESS,
-                SUCCESS_BG,
-                SUCCESS_BORDER,
-                SUCCESS,
+                theme().success,
+                theme().success_bg,
+                theme().success_border,
+                theme().success,
                 format!("{kind_label} 就绪{step}"),
                 "冲突已解决并暂存，可继续重放后续提交",
             )
@@ -213,7 +217,7 @@ impl DesktopView {
                 .rounded(px(7.))
                 .border_1()
                 .border_color(rgb(badge_border))
-                .bg(rgb(CARD))
+                .bg(rgb(theme().card))
                 .overflow_hidden()
                 .shadow_sm()
                 .flex()
@@ -243,9 +247,9 @@ impl DesktopView {
                                         .gap(px(5.))
                                         .child(pill(
                                             status.head_name().to_owned(),
-                                            ACCENT_BG,
-                                            ACCENT_BORDER,
-                                            LINK,
+                                            theme().accent_bg,
+                                            theme().accent_border,
+                                            theme().link,
                                         ))
                                         .child(
                                             elide(stopped_label).font_weight(FontWeight::MEDIUM),
@@ -350,7 +354,7 @@ impl DesktopView {
                         .child(
                             div()
                                 .text_size(px(11.5))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(theme().muted))
                                 .child(subtitle),
                         )
                         .when(has_conflicts, |body| {
@@ -388,14 +392,14 @@ impl DesktopView {
             .unwrap_or_default();
         let (border, fg, summary) = if conflicts > 0 {
             (
-                DANGER_BORDER,
-                ERROR,
+                theme().danger_border,
+                theme().error,
                 format!("Rebase 冲突{step} · 剩 {conflicts} 个文件"),
             )
         } else {
             (
-                SUCCESS_BORDER,
-                SUCCESS,
+                theme().success_border,
+                theme().success,
                 format!("Rebase 就绪{step} · 可继续"),
             )
         };
@@ -407,7 +411,7 @@ impl DesktopView {
                 .rounded(px(6.))
                 .border_1()
                 .border_color(rgb(border))
-                .bg(rgb(CARD))
+                .bg(rgb(theme().card))
                 .flex()
                 .flex_col()
                 .gap(px(6.))
@@ -510,13 +514,18 @@ impl DesktopView {
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .child(pill(current_branch, ACCENT_BG, ACCENT_BORDER, LINK))
-                            .child(div().text_color(rgb(SUBTLE)).child("Rebase 到 →"))
+                            .child(pill(
+                                current_branch,
+                                theme().accent_bg,
+                                theme().accent_border,
+                                theme().link,
+                            ))
+                            .child(div().text_color(rgb(theme().subtle)).child("Rebase 到 →"))
                             .child(pill(
                                 preview.onto_display().to_owned(),
-                                SUCCESS_BG,
-                                SUCCESS_BORDER,
-                                SUCCESS,
+                                theme().success_bg,
+                                theme().success_border,
+                                theme().success,
                             )),
                     )
                     .child(review_detail(
@@ -531,7 +540,7 @@ impl DesktopView {
                             .child(
                                 div()
                                     .text_size(px(11.5))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(theme().muted))
                                     .child(format!("待重放提交（{} 条）", preview.commits().len())),
                             )
                             .child(
@@ -540,9 +549,9 @@ impl DesktopView {
                                     .max_h((viewport_height * 0.25).clamp(px(80.), px(190.)))
                                     .overflow_y_scroll()
                                     .rounded(px(5.))
-                                    .bg(rgb(PANEL))
+                                    .bg(rgb(theme().panel))
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(theme().border))
                                     .p(px(6.))
                                     .flex()
                                     .flex_col()
@@ -556,7 +565,7 @@ impl DesktopView {
                                             .child(
                                                 div()
                                                     .flex_shrink_0()
-                                                    .text_color(rgb(LINK))
+                                                    .text_color(rgb(theme().link))
                                                     .child(short_oid(&c.oid).to_owned()),
                                             )
                                             .child(elide(c.subject.clone()).flex_1())
@@ -565,7 +574,7 @@ impl DesktopView {
                                         box_div.child(
                                             div()
                                                 .text_size(px(11.5))
-                                                .text_color(rgb(SUBTLE))
+                                                .text_color(rgb(theme().subtle))
                                                 .child("当前分支将直接快进到目标基底"),
                                         )
                                     }),
@@ -588,7 +597,7 @@ impl DesktopView {
                             .rounded(px(4.))
                             .px(px(4.))
                             .py(px(3.))
-                            .hover(|row| row.bg(rgb(HOVER)))
+                            .hover(|row| row.bg(rgb(theme().hover)))
                             .child(check_indicator(autostash))
                             .child("自动暂存并在结束后恢复未提交改动（--autostash）")
                             .on_click(cx.listener(|view, _, _, cx| {
@@ -601,7 +610,7 @@ impl DesktopView {
                             })),
                     )
             }
-            None => div().text_color(rgb(SUBTLE)).child(
+            None => div().text_color(rgb(theme().subtle)).child(
                 if state.preparing {
                     "正在读取 Rebase 预览…"
                 } else {
@@ -688,7 +697,7 @@ impl DesktopView {
                 .child(
                     div()
                         .text_size(px(11.5))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(theme().muted))
                         .child("按从旧到新顺序应用以下提交（可上/下调整顺序、切换 Pick / Reword / Squash / Fixup / Drop）："),
                 )
                 .child(
@@ -711,7 +720,7 @@ impl DesktopView {
                             div()
                                 .p(px(7.))
                                 .rounded(px(6.))
-                                .bg(rgb(PANEL))
+                                .bg(rgb(theme().panel))
                                 .border_1()
                                 .border_color(rgb(border))
                                 .flex()
@@ -771,7 +780,7 @@ impl DesktopView {
                                         .child(
                                             div()
                                                 .flex_shrink_0()
-                                                .text_color(rgb(LINK))
+                                                .text_color(rgb(theme().link))
                                                 .text_size(px(11.5))
                                                 .child(short_oid(&row.oid).to_owned()),
                                         )
@@ -780,9 +789,9 @@ impl DesktopView {
                                                 .flex_1()
                                                 .text_color(rgb(if row.kind == InteractiveRowKind::Drop
                                                 {
-                                                    SUBTLE
+                                                    theme().subtle
                                                 } else {
-                                                    TEXT
+                                                    theme().text
                                                 })),
                                         )
                                         .child(div().flex().gap(px(3.)).children(
@@ -852,7 +861,7 @@ impl DesktopView {
                         .rounded(px(4.))
                         .px(px(4.))
                         .py(px(3.))
-                        .hover(|row| row.bg(rgb(HOVER)))
+                        .hover(|row| row.bg(rgb(theme().hover)))
                         .child(check_indicator(autostash))
                         .child("自动暂存并在结束后恢复未提交改动（--autostash）")
                         .on_click(cx.listener(|view, _, _, cx| {
@@ -865,7 +874,7 @@ impl DesktopView {
                         })),
                 )
         } else {
-            div().text_color(rgb(SUBTLE)).child(
+            div().text_color(rgb(theme().subtle)).child(
                 if state.preparing {
                     "正在读取可改写的提交清单…"
                 } else {
@@ -978,7 +987,7 @@ impl DesktopView {
             ))
             .child(review_detail("原分支", status.head_name().to_owned()))
             .child(
-                div().text_color(rgb(MUTED)).child(
+                div().text_color(rgb(theme().muted)).child(
                     "中止将放弃当前 Rebase 进度，并完整恢复到 Rebase 开始前的分支与提交状态。",
                 ),
             )
