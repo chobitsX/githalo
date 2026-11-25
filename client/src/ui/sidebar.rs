@@ -19,6 +19,113 @@ use super::file_icons::{file_type_icon, folder_type_icon};
 use super::file_viewer::{ProjectEntryFormKind, ProjectEntryMenuTarget};
 use super::overlay::{MenuKind, PathOperation};
 
+const DEFAULT_NESTED_VISIBLE_LIMIT: usize = 10;
+const AUTO_DIVERGED_NESTED_CAP: usize = 20;
+const FILTERED_NESTED_VISIBLE_LIMIT: usize = 30;
+const NESTED_EXPAND_STEP: usize = 30;
+
+struct RepoFilter {
+    tokens: Vec<String>,
+    diverged_only: bool,
+}
+
+impl RepoFilter {
+    fn new(raw_query: &str, diverged_only: bool) -> Self {
+        let tokens = raw_query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        Self {
+            tokens,
+            diverged_only,
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        !self.tokens.is_empty() || self.diverged_only
+    }
+
+    fn has_query(&self) -> bool {
+        !self.tokens.is_empty()
+    }
+
+    fn matches(&self, repo: &RepoRow) -> bool {
+        if self.diverged_only && !repo_is_diverged(repo) {
+            return false;
+        }
+        repo_matches_tokens(repo, &self.tokens)
+    }
+}
+
+fn repo_is_diverged(repo: &RepoRow) -> bool {
+    repo.counts
+        .is_some_and(|counts| counts.behind > 0 || counts.ahead > 0)
+}
+
+fn repo_has_blocking_issue(repo: &RepoRow) -> bool {
+    let Some(issue) = repo.issue.as_deref() else {
+        return false;
+    };
+    !matches!(issue, "未设置上游" | "分离 HEAD" | "尚无提交")
+}
+
+fn repo_matches_tokens(repo: &RepoRow, tokens: &[String]) -> bool {
+    if tokens.is_empty() {
+        return true;
+    }
+    let name = repo.name.to_lowercase();
+    let path = repo.target.root.to_string_lossy().to_lowercase();
+    tokens
+        .iter()
+        .all(|token| name.contains(token) || path.contains(token))
+}
+
+/// Sorts nested children so actionable repositories (pending push/pull, then blocking errors)
+/// always float to the top ahead of alphabetical synced repositories.
+fn sort_nested_children(children: &mut [&RepoRow]) {
+    children.sort_by(|a, b| {
+        nested_sort_key(a)
+            .cmp(&nested_sort_key(b))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.target.id.cmp(&b.target.id))
+    });
+}
+
+fn nested_sort_key(repo: &RepoRow) -> (u8, u8, std::cmp::Reverse<u64>) {
+    if let Some(counts) = repo.counts.filter(|c| c.behind > 0 || c.ahead > 0) {
+        let live_rank = u8::from(repo.historical);
+        let magnitude = counts.ahead.saturating_add(counts.behind);
+        (0, live_rank, std::cmp::Reverse(magnitude))
+    } else if repo_has_blocking_issue(repo) {
+        (1, 0, std::cmp::Reverse(0))
+    } else {
+        (2, 0, std::cmp::Reverse(0))
+    }
+}
+
+/// Picks the visible slice of sorted nested children according to `limit`, ensuring the
+/// currently selected child stays visible even if it falls beyond the initial fold cutoff.
+fn select_visible_nested_children<'a>(
+    sorted: &[&'a RepoRow],
+    limit: usize,
+    selected: Option<WorktreeId>,
+) -> Vec<&'a RepoRow> {
+    if sorted.len() <= limit {
+        return sorted.to_vec();
+    }
+    let mut visible: Vec<&'a RepoRow> = sorted.iter().take(limit).copied().collect();
+    if let Some(selected_id) = selected
+        && !visible.iter().any(|repo| repo.target.id == selected_id)
+        && let Some(selected_repo) = sorted.iter().copied().find(|r| r.target.id == selected_id)
+    {
+        if !visible.is_empty() {
+            visible.pop();
+        }
+        visible.push(selected_repo);
+    }
+    visible
+}
+
 #[derive(Clone)]
 struct DraggedRepo {
     id: WorktreeId,
@@ -406,26 +513,94 @@ impl DesktopView {
                     .is_some_and(|c| (c.behind > 0 || c.ahead > 0) && !r.historical)
             })
             .count();
+        let raw_query = self.repo_filter.read(cx).text().to_owned();
+        let filter = RepoFilter::new(&raw_query, self.repo_filter_diverged_only);
+        let filtering = filter.is_active();
+        let diverged_filter_active = self.repo_filter_diverged_only;
+
+        let matched_repo_count = if filtering {
+            self.workspace
+                .repos
+                .iter()
+                .filter(|repo| filter.matches(repo))
+                .count()
+        } else {
+            total_repos
+        };
+
         let summary_pill: Option<AnyElement> = if total_repos == 0 {
             None
-        } else if diverged_repos > 0 {
-            let label = if is_zh() {
+        } else if diverged_repos > 0 || diverged_filter_active {
+            let label = if diverged_filter_active {
+                if is_zh() {
+                    format!("✓ {diverged_repos} 待同步")
+                } else {
+                    format!("✓ {diverged_repos} to sync")
+                }
+            } else if is_zh() {
                 format!("{diverged_repos} 待同步")
             } else {
                 format!("{diverged_repos} to sync")
             };
-            Some(
-                pill(
-                    label,
-                    theme().brand_bg,
-                    theme().brand_border,
-                    theme().brand_text,
+            let tip = if diverged_filter_active {
+                tr(
+                    "正在仅显示待同步仓库，点击恢复显示全部",
+                    "Showing diverged repositories only — click to show all",
                 )
-                .text_size(rems(0.68))
-                .into_any_element(),
+                .to_owned()
+            } else {
+                tr(
+                    "点击仅筛选待同步（待推送/待拉取）的仓库",
+                    "Click to filter repositories with pending push/pull",
+                )
+                .to_owned()
+            };
+            let (bg, border, fg) = if diverged_filter_active {
+                (
+                    theme().primary_bg,
+                    theme().primary_border,
+                    theme().primary_text,
+                )
+            } else {
+                (theme().brand_bg, theme().brand_border, theme().brand_text)
+            };
+            Some(
+                div()
+                    .id("toggle-diverged-repo-filter")
+                    .role(Role::Button)
+                    .aria_selected(diverged_filter_active)
+                    .tab_index(0)
+                    .flex_shrink_0()
+                    .px(px(6.5))
+                    .py(px(1.5))
+                    .rounded(px(999.))
+                    .bg(rgb(bg))
+                    .border_1()
+                    .border_color(rgb(border))
+                    .text_size(rems(0.68))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(fg))
+                    .hover(move |s| {
+                        s.bg(rgb(if diverged_filter_active {
+                            theme().primary_hover
+                        } else {
+                            theme().active
+                        }))
+                    })
+                    .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                        view.set_hovered_hint(hovered.then(|| tip.clone()), cx);
+                    }))
+                    .on_click(cx.listener(|view, _, _, cx| {
+                        view.repo_filter_diverged_only = !view.repo_filter_diverged_only;
+                        cx.notify();
+                    }))
+                    .child(label)
+                    .into_any_element(),
             )
         } else {
-            let label = if is_zh() {
+            let label = if filter.has_query() {
+                format!("{matched_repo_count} / {total_repos}")
+            } else if is_zh() {
                 format!("{total_repos} 仓库")
             } else if total_repos == 1 {
                 "1 repo".to_owned()
@@ -496,16 +671,77 @@ impl DesktopView {
             .child(div().flex_1())
             .children(summary_pill);
 
+        let search_bar = (total_repos > 0).then(|| {
+            let has_query = filter.has_query();
+            div()
+                .px(px(6.))
+                .pt(px(5.))
+                .pb(px(3.))
+                .flex_shrink_0()
+                .child(
+                    div()
+                        .h(px(26.))
+                        .px(px(7.))
+                        .gap(px(5.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(6.))
+                        .bg(rgb(theme().card))
+                        .border_1()
+                        .border_color(rgb(if has_query {
+                            theme().brand_border
+                        } else {
+                            theme().border
+                        }))
+                        .child(icon(
+                            Icon::Search,
+                            if has_query {
+                                theme().brand_text
+                            } else {
+                                theme().subtle
+                            },
+                        ))
+                        .child(div().flex_1().min_w_0().child(self.repo_filter.clone()))
+                        .when(has_query, |bar| {
+                            let badge = if is_zh() {
+                                format!("{matched_repo_count} 项")
+                            } else {
+                                format!("{matched_repo_count}")
+                            };
+                            bar.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(rems(0.66))
+                                    .text_color(rgb(theme().subtle))
+                                    .child(badge),
+                            )
+                            .child(
+                                icon_button(
+                                    "clear-repo-filter",
+                                    Icon::Close,
+                                    tr("清除仓库筛选", "Clear repository filter"),
+                                )
+                                .size(px(17.))
+                                .on_click(cx.listener(
+                                    |view, _, window, cx| {
+                                        view.repo_filter
+                                            .update(cx, |field, cx| field.clear(window, cx));
+                                    },
+                                )),
+                            )
+                        }),
+                )
+        });
+
         let selected = self.workspace.selected;
         let visible_group = selected.and_then(|id| {
             let mut expanded = self.workspace.groups.iter().filter(|group| {
-                group.expanded
+                (filtering || group.expanded)
                     && (group.members.contains(&id)
                         || group.members.iter().any(|member| {
-                            self.workspace
-                                .nested
-                                .get(member)
-                                .is_some_and(|n| n.expanded && n.children.contains(&id))
+                            self.workspace.nested.get(member).is_some_and(|n| {
+                                (filtering || n.expanded) && n.children.contains(&id)
+                            })
                         }))
             });
             let first = expanded.clone().next().map(|group| group.id);
@@ -513,11 +749,27 @@ impl DesktopView {
                 .filter(|preferred| expanded.any(|group| group.id == *preferred))
                 .or(first)
         });
-        let groups = self
+        let visible_groups: Vec<(&GroupView, Vec<WorktreeId>)> = self
             .workspace
             .groups
             .iter()
-            .filter(|group| group.id.is_some() || !group.members.is_empty());
+            .filter(|group| group.id.is_some() || !group.members.is_empty())
+            .filter_map(|group| {
+                if !filtering {
+                    return Some((group, group.members.clone()));
+                }
+                let matched_members: Vec<WorktreeId> = group
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|member_id| self.member_matches_filter(*member_id, &filter))
+                    .collect();
+                (!matched_members.is_empty()).then_some((group, matched_members))
+            })
+            .collect();
+        let filtered_empty =
+            filtering && visible_groups.is_empty() && !self.workspace.repos.is_empty();
+
         let board = div()
             .id("repository-board")
             .role(Role::Tree)
@@ -537,7 +789,35 @@ impl DesktopView {
             .on_drop::<ExternalPaths>(cx.listener(|view, paths: &ExternalPaths, _, cx| {
                 view.drop_external_paths(paths, None, cx);
             }))
-            .children(groups.map(|group| self.group(group, visible_group, cx)))
+            .children(
+                visible_groups.into_iter().map(|(group, members)| {
+                    self.group(group, &members, &filter, visible_group, cx)
+                }),
+            )
+            .when(filtered_empty, |list| {
+                list.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(8.))
+                        .py(px(14.))
+                        .px(px(7.))
+                        .child(div().text_color(rgb(theme().subtle)).child(tr(
+                            "没有匹配当前筛选条件的仓库或子仓库",
+                            "No repositories or sub-repos match the current filter",
+                        )))
+                        .child(
+                            text_button("reset-repo-filter", tr("清除筛选", "Clear Filter"), false)
+                                .on_click(cx.listener(|view, _, window, cx| {
+                                    view.repo_filter_diverged_only = false;
+                                    view.repo_filter
+                                        .update(cx, |field, cx| field.clear(window, cx));
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .when(!self.workspace.ready, |list| {
                 list.child(
                     div()
@@ -588,6 +868,7 @@ impl DesktopView {
             .flex_1()
             .min_h_0()
             .child(toolbar)
+            .children(search_bar)
             .child(board)
             .when(drawer_shown, |col| {
                 col.child(self.sidebar_branches_drawer(cx))
@@ -599,38 +880,57 @@ impl DesktopView {
             )
     }
 
+    fn member_matches_filter(&self, member_id: WorktreeId, filter: &RepoFilter) -> bool {
+        if let Some(repo) = self.workspace.repo(member_id)
+            && filter.matches(repo)
+        {
+            return true;
+        }
+        self.workspace.nested.get(&member_id).is_some_and(|nested| {
+            nested
+                .children
+                .iter()
+                .filter_map(|child_id| self.workspace.repo(*child_id))
+                .any(|child| filter.matches(child))
+        })
+    }
+
     fn group(
         &self,
         group: &GroupView,
+        visible_members: &[WorktreeId],
+        filter: &RepoFilter,
         visible_group: Option<Option<GroupId>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = group.id;
         let group_key = id.map_or(0, |id| id.get() as usize);
-        let (changed, uncertain) = group
-            .members
-            .iter()
-            .fold((0, 0), |(changed, uncertain), id| {
-                if let Some(counts) = self.workspace.repo(*id).and_then(|repo| {
-                    repo.counts
-                        .filter(|_| repo.issue.is_none() && !repo.historical)
-                }) {
-                    return (
-                        changed + usize::from(counts.behind > 0 || counts.ahead > 0),
-                        uncertain,
-                    );
-                }
-                (changed, uncertain + 1)
-            });
+        let filtering = filter.is_active();
+        let expanded = filtering || group.expanded;
+        let (changed, uncertain) =
+            visible_members
+                .iter()
+                .fold((0, 0), |(changed, uncertain), id| {
+                    if let Some(counts) = self.workspace.repo(*id).and_then(|repo| {
+                        repo.counts
+                            .filter(|_| repo.issue.is_none() && !repo.historical)
+                    }) {
+                        return (
+                            changed + usize::from(counts.behind > 0 || counts.ahead > 0),
+                            uncertain,
+                        );
+                    }
+                    (changed, uncertain + 1)
+                });
         let group_title = if id.is_none() {
             tr("未分组", "Ungrouped").to_owned()
         } else {
             group.name.clone()
         };
         let mut summary = if is_zh() {
-            format!("{} 个仓库 · {changed} 个有差异", group.members.len())
+            format!("{} 个仓库 · {changed} 个有差异", visible_members.len())
         } else {
-            format!("{} repos · {changed} diverged", group.members.len())
+            format!("{} repos · {changed} diverged", visible_members.len())
         };
         if uncertain > 0 {
             if is_zh() {
@@ -639,7 +939,7 @@ impl DesktopView {
                 summary.push_str(&format!(" · {uncertain} pending"));
             }
         }
-        let disclosure = if group.expanded {
+        let disclosure = if expanded {
             Icon::ChevronDown
         } else {
             Icon::ChevronRight
@@ -649,7 +949,7 @@ impl DesktopView {
             .role(Role::Button)
             .aria_label(group_title.clone())
             .aria_description(summary)
-            .aria_expanded(group.expanded)
+            .aria_expanded(expanded)
             .tab_index(0)
             .flex()
             .items_center()
@@ -674,7 +974,7 @@ impl DesktopView {
                     .flex_shrink_0()
                     .text_size(rems(0.7))
                     .text_color(rgb(theme().subtle))
-                    .child(group.members.len().to_string()),
+                    .child(visible_members.len().to_string()),
             )
             .when(changed > 0, |row| {
                 let badge = if is_zh() {
@@ -773,11 +1073,11 @@ impl DesktopView {
                 view.drop_repo_to_group(dragged, id, cx);
             }))
             .child(header)
-            .when(group.expanded, |entry| {
-                entry.children(group.members.iter().filter_map(|repo_id| {
+            .when(expanded, |entry| {
+                entry.children(visible_members.iter().filter_map(|repo_id| {
                     self.workspace
                         .repo(*repo_id)
-                        .map(|repo| self.repo_with_nested(repo, id, visible_group, cx))
+                        .map(|repo| self.repo_with_nested(repo, id, filter, visible_group, cx))
                 }))
             })
             .into_any_element()
@@ -844,6 +1144,7 @@ impl DesktopView {
         &self,
         repo: &RepoRow,
         group: Option<GroupId>,
+        filter: &RepoFilter,
         visible_group: Option<Option<GroupId>>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -983,25 +1284,226 @@ impl DesktopView {
             );
         }
 
-        if let Some(nested) = nested.filter(|n| n.expanded && !n.children.is_empty()) {
-            let children_view = div()
-                .ml(px(14.))
-                .pl(px(5.))
-                .my(px(1.))
-                .border_l_1()
-                .border_color(rgb(theme().border))
-                .flex()
-                .flex_col()
-                .gap(px(0.5))
-                .min_w_0()
-                .children(nested.children.iter().filter_map(|child_id| {
-                    self.workspace.repo(*child_id).map(|child| {
-                        let child_selected = self.workspace.selected == Some(*child_id)
+        if let Some(nested) = nested.filter(|n| !n.children.is_empty()) {
+            let all_children: Vec<&RepoRow> = nested
+                .children
+                .iter()
+                .filter_map(|child_id| self.workspace.repo(*child_id))
+                .collect();
+            let filtering = filter.is_active();
+            let matched_children: Vec<&RepoRow> = if filtering {
+                all_children
+                    .iter()
+                    .copied()
+                    .filter(|child| filter.matches(child))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let show_filtered_children = filtering && !matched_children.is_empty();
+            let should_show_children = show_filtered_children || nested.expanded;
+
+            if should_show_children {
+                let mut sorted_children = if show_filtered_children {
+                    matched_children
+                } else {
+                    all_children
+                };
+                sort_nested_children(&mut sorted_children);
+
+                let total_children = sorted_children.len();
+                let diverged_count = sorted_children
+                    .iter()
+                    .filter(|child| repo_is_diverged(child))
+                    .count();
+                let default_limit = if show_filtered_children {
+                    FILTERED_NESTED_VISIBLE_LIMIT
+                } else {
+                    DEFAULT_NESTED_VISIBLE_LIMIT.max(diverged_count.min(AUTO_DIVERGED_NESTED_CAP))
+                };
+                let current_limit = self
+                    .nested_visible_limits
+                    .get(&id)
+                    .copied()
+                    .map_or(default_limit, |saved| saved.max(default_limit));
+                let visible_children = select_visible_nested_children(
+                    &sorted_children,
+                    current_limit,
+                    self.workspace.selected,
+                );
+                let remaining = total_children.saturating_sub(visible_children.len());
+                let is_expanded_beyond_default =
+                    total_children > default_limit && current_limit > default_limit;
+
+                let mut children_view = div()
+                    .ml(px(14.))
+                    .pl(px(5.))
+                    .my(px(1.))
+                    .border_l_1()
+                    .border_color(rgb(theme().border))
+                    .flex()
+                    .flex_col()
+                    .gap(px(0.5))
+                    .min_w_0()
+                    .children(visible_children.into_iter().map(|child| {
+                        let child_id = child.target.id;
+                        let child_selected = self.workspace.selected == Some(child_id)
                             && visible_group == Some(group);
                         self.repo_row(child, group, Some(id), child_selected, cx)
-                    })
-                }));
-            container = container.child(children_view);
+                    }));
+
+                if remaining > 0 || is_expanded_beyond_default {
+                    let parent_key = id.get() as usize;
+                    let step_target = current_limit
+                        .saturating_add(NESTED_EXPAND_STEP)
+                        .min(total_children);
+                    let controls = if remaining > 0 {
+                        let expand_label = if remaining <= NESTED_EXPAND_STEP {
+                            if is_zh() {
+                                format!("展开剩余 {remaining} 个子仓库")
+                            } else {
+                                format!("Show {remaining} more sub-repos")
+                            }
+                        } else if is_zh() {
+                            format!("展开更多 (+{NESTED_EXPAND_STEP} · 剩 {remaining})")
+                        } else {
+                            format!("Show +{NESTED_EXPAND_STEP} more ({remaining} left)")
+                        };
+                        let expand_tip = if is_zh() {
+                            format!("共 {total_children} 个子仓库（待同步优先排前），点击继续展开")
+                        } else {
+                            format!(
+                                "{total_children} sub-repos total (diverged first); click to show more"
+                            )
+                        };
+                        let mut bar = div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .mt(px(1.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .id(("nested-expand-more", parent_key))
+                                    .role(Role::Button)
+                                    .tab_index(0)
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h(rems(1.5))
+                                    .pl(px(7.))
+                                    .pr(px(6.))
+                                    .rounded(px(5.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .text_size(rems(0.71))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(theme().brand_text))
+                                    .hover(|s| s.bg(rgb(theme().hover)))
+                                    .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                                        view.set_hovered_hint(
+                                            hovered.then(|| expand_tip.clone()),
+                                            cx,
+                                        );
+                                    }))
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.nested_visible_limits.insert(id, step_target);
+                                        cx.notify();
+                                    }))
+                                    .child(icon(Icon::ChevronDown, theme().brand_text))
+                                    .child(elide(expand_label)),
+                            );
+                        if remaining > NESTED_EXPAND_STEP {
+                            let all_label = if is_zh() {
+                                format!("全部 ({total_children})")
+                            } else {
+                                format!("All ({total_children})")
+                            };
+                            bar = bar.child(
+                                div()
+                                    .id(("nested-expand-all", parent_key))
+                                    .role(Role::Button)
+                                    .tab_index(0)
+                                    .flex_shrink_0()
+                                    .h(rems(1.375))
+                                    .px(px(6.))
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(rgb(theme().border))
+                                    .bg(rgb(theme().card))
+                                    .flex()
+                                    .items_center()
+                                    .text_size(rems(0.66))
+                                    .text_color(rgb(theme().muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme().hover)).text_color(rgb(theme().text))
+                                    })
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.nested_visible_limits.insert(id, total_children);
+                                        cx.notify();
+                                    }))
+                                    .child(all_label),
+                            );
+                        }
+                        if is_expanded_beyond_default {
+                            bar = bar.child(
+                                div()
+                                    .id(("nested-collapse-limit", parent_key))
+                                    .role(Role::Button)
+                                    .tab_index(0)
+                                    .flex_shrink_0()
+                                    .h(rems(1.375))
+                                    .px(px(6.))
+                                    .rounded(px(4.))
+                                    .flex()
+                                    .items_center()
+                                    .text_size(rems(0.66))
+                                    .text_color(rgb(theme().subtle))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme().hover)).text_color(rgb(theme().text))
+                                    })
+                                    .on_click(cx.listener(move |view, _, _, cx| {
+                                        view.nested_visible_limits.remove(&id);
+                                        cx.notify();
+                                    }))
+                                    .child(tr("收起", "Less")),
+                            );
+                        }
+                        bar.into_any_element()
+                    } else {
+                        let collapse_label = if is_zh() {
+                            format!("收起至前 {default_limit} 个（共 {total_children} 个）")
+                        } else {
+                            format!("Show top {default_limit} only ({total_children} total)")
+                        };
+                        div()
+                            .id(("nested-collapse-to-top", parent_key))
+                            .role(Role::Button)
+                            .tab_index(0)
+                            .mt(px(1.))
+                            .h(rems(1.5))
+                            .pl(px(7.))
+                            .pr(px(6.))
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .text_size(rems(0.71))
+                            .text_color(rgb(theme().subtle))
+                            .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                view.nested_visible_limits.remove(&id);
+                                cx.notify();
+                            }))
+                            .child(icon(Icon::ChevronUp, theme().subtle))
+                            .child(elide(collapse_label))
+                            .into_any_element()
+                    };
+                    children_view = children_view.child(controls);
+                }
+
+                container = container.child(children_view);
+            }
         }
 
         container.into_any_element()
@@ -1956,4 +2458,141 @@ fn repo_description(repo: &RepoRow) -> String {
         detail.push_str(tr("\n远端刷新时间未知", "\nLast fetch time unknown"));
     }
     detail
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use githalo::worktree::{SyncCounts, WorktreeId, WorktreeTarget};
+
+    use super::*;
+
+    fn fake_repo(
+        id: i64,
+        name: &str,
+        branch: &str,
+        counts: Option<SyncCounts>,
+        issue: Option<&str>,
+    ) -> RepoRow {
+        let mut row = RepoRow::test_stub(WorktreeTarget {
+            id: WorktreeId::new(id).unwrap(),
+            root: PathBuf::from(format!("/work/projects/{name}")),
+            path_revision: 1,
+        });
+        row.name = name.to_owned();
+        row.branch = branch.to_owned();
+        row.counts = counts;
+        row.issue = issue.map(str::to_owned);
+        row
+    }
+
+    #[test]
+    fn nested_children_prioritize_diverged_then_blocking_issue_then_alphabetical() {
+        let alpha_detached = fake_repo(1, "ab-test", "84af1777", None, Some("分离 HEAD"));
+        let beta_synced = fake_repo(
+            2,
+            "base-api",
+            "main",
+            Some(SyncCounts {
+                ahead: 0,
+                behind: 0,
+            }),
+            None,
+        );
+        let gamma_push = fake_repo(
+            3,
+            "z-push-only",
+            "feat/a",
+            Some(SyncCounts {
+                ahead: 2,
+                behind: 0,
+            }),
+            None,
+        );
+        let delta_both = fake_repo(
+            4,
+            "m-both-diverged",
+            "release/1",
+            Some(SyncCounts {
+                ahead: 3,
+                behind: 2,
+            }),
+            None,
+        );
+        let err_repo = fake_repo(
+            5,
+            "k-fetch-failed",
+            "main",
+            None,
+            Some("Fetch 失败（timeout）"),
+        );
+
+        let mut list = vec![
+            &beta_synced,
+            &alpha_detached,
+            &err_repo,
+            &gamma_push,
+            &delta_both,
+        ];
+        sort_nested_children(&mut list);
+        let names: Vec<&str> = list.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "m-both-diverged",
+                "z-push-only",
+                "k-fetch-failed",
+                "ab-test",
+                "base-api",
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_nested_slice_keeps_selected_child_even_past_fold_limit() {
+        let repos: Vec<RepoRow> = (1..=15)
+            .map(|i| fake_repo(i, &format!("repo-{i:02}"), "main", None, None))
+            .collect();
+        let refs: Vec<&RepoRow> = repos.iter().collect();
+        let selected_id = WorktreeId::new(14).unwrap();
+        let visible = select_visible_nested_children(&refs, 10, Some(selected_id));
+        assert_eq!(visible.len(), 10);
+        assert!(visible.iter().any(|r| r.target.id == selected_id));
+    }
+
+    #[test]
+    fn repo_filter_supports_multi_token_and_diverged_mode() {
+        let auth = fake_repo(
+            1,
+            "base-auth",
+            "release/31.34",
+            Some(SyncCounts {
+                ahead: 1,
+                behind: 0,
+            }),
+            None,
+        );
+        let skin = fake_repo(
+            2,
+            "base-skin",
+            "release/31.34",
+            Some(SyncCounts {
+                ahead: 0,
+                behind: 0,
+            }),
+            None,
+        );
+
+        let query = RepoFilter::new("projects base", false);
+        assert!(query.matches(&auth));
+        assert!(query.matches(&skin));
+
+        let branch_only = RepoFilter::new("31.34", false);
+        assert!(!branch_only.matches(&auth));
+
+        let diverged_query = RepoFilter::new("base", true);
+        assert!(diverged_query.matches(&auth));
+        assert!(!diverged_query.matches(&skin));
+    }
 }

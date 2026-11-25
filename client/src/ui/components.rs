@@ -357,6 +357,7 @@ pub(super) enum Icon {
     ChevronDown,
     ChevronLeft,
     ChevronRight,
+    ChevronUp,
     Close,
     CollapseAll,
     Compare,
@@ -442,6 +443,10 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                 }
                 Icon::ChevronRight => {
                     draw(&[(6.5, 4.5), (10., 8.), (6.5, 11.5)]);
+                    &[]
+                }
+                Icon::ChevronUp => {
+                    draw(&[(4.5, 9.5), (8., 6.), (11.5, 9.5)]);
                     &[]
                 }
                 Icon::Close => {

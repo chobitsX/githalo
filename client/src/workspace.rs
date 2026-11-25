@@ -57,6 +57,20 @@ pub struct NestedChildrenView {
     pub children: Vec<WorktreeId>,
 }
 
+/// Summary of how many registrations will be removed by a destructive catalog action.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RemovalImpact {
+    pub top_level: usize,
+    pub nested: usize,
+    pub kept_in_other_groups: usize,
+}
+
+impl RemovalImpact {
+    pub const fn total_removed(self) -> usize {
+        self.top_level + self.nested
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContainerDiscovery {
     pub container: PathBuf,
@@ -106,6 +120,10 @@ pub enum Action {
         group: Option<GroupId>,
     },
     RemoveRepo(WorktreeId),
+    RemoveRepoWithNested {
+        id: WorktreeId,
+        remove_nested: bool,
+    },
     RepairRepo {
         id: WorktreeId,
         path: PathBuf,
@@ -116,6 +134,8 @@ pub enum Action {
         name: String,
     },
     DeleteGroup(GroupId),
+    DeleteGroupWithRepos(GroupId),
+    ClearGroup(Option<GroupId>),
     AddMember {
         id: WorktreeId,
         group: GroupId,
@@ -382,6 +402,147 @@ impl Workspace {
         self.repo_index(id).map(|index| &self.repos[index])
     }
 
+    /// Calculates which repositories (including exclusive nested children) would be removed
+    /// when unregistering `id`.
+    pub fn removal_impact_for_repo(
+        &self,
+        id: WorktreeId,
+        remove_nested: bool,
+    ) -> (RemovalImpact, Vec<WorktreeId>) {
+        if self.repo(id).is_none() {
+            return (RemovalImpact::default(), Vec::new());
+        }
+        let mut to_delete = BTreeSet::from([id]);
+        if remove_nested {
+            let grouped = self.custom_group_members(None);
+            self.expand_exclusive_nested(&mut to_delete, &grouped);
+        }
+        let nested = to_delete.len().saturating_sub(1);
+        (
+            RemovalImpact {
+                top_level: 1,
+                nested,
+                kept_in_other_groups: 0,
+            },
+            to_delete.into_iter().collect(),
+        )
+    }
+
+    /// Calculates which repositories (including exclusive nested children) would be removed
+    /// when deleting or clearing `group` (`None` refers to Ungrouped).
+    pub fn removal_impact_for_group(
+        &self,
+        group: Option<GroupId>,
+    ) -> (RemovalImpact, Vec<WorktreeId>) {
+        let Some(members) = self
+            .groups
+            .iter()
+            .find(|g| g.id == group)
+            .map(|g| &g.members)
+        else {
+            return (RemovalImpact::default(), Vec::new());
+        };
+        if members.is_empty() {
+            return (RemovalImpact::default(), Vec::new());
+        }
+        let remaining_grouped = self.custom_group_members(group);
+        let mut to_delete: BTreeSet<WorktreeId> = if group.is_some() {
+            members
+                .iter()
+                .copied()
+                .filter(|id| !remaining_grouped.contains(id))
+                .collect()
+        } else {
+            members.iter().copied().collect()
+        };
+        if group.is_some() && !to_delete.is_empty() {
+            let edges = self.nested_edges();
+            loop {
+                let protected: Vec<WorktreeId> = to_delete
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        edges
+                            .iter()
+                            .any(|(parent, child)| child == id && !to_delete.contains(parent))
+                    })
+                    .collect();
+                if protected.is_empty() {
+                    break;
+                }
+                for id in protected {
+                    to_delete.remove(&id);
+                }
+            }
+        }
+        let top_level = to_delete.len();
+        let kept_in_other_groups = members.len().saturating_sub(top_level);
+        self.expand_exclusive_nested(&mut to_delete, &remaining_grouped);
+        let nested = to_delete.len().saturating_sub(top_level);
+        (
+            RemovalImpact {
+                top_level,
+                nested,
+                kept_in_other_groups,
+            },
+            to_delete.into_iter().collect(),
+        )
+    }
+
+    fn custom_group_members(&self, exclude: Option<GroupId>) -> BTreeSet<WorktreeId> {
+        let mut members = BTreeSet::new();
+        for group in &self.groups {
+            if let Some(id) = group.id
+                && Some(id) != exclude
+            {
+                members.extend(group.members.iter().copied());
+            }
+        }
+        members
+    }
+
+    fn nested_edges(&self) -> Vec<(WorktreeId, WorktreeId)> {
+        let mut edges = Vec::new();
+        for (&parent, entry) in &self.nested {
+            for &child in &entry.children {
+                edges.push((parent, child));
+            }
+        }
+        edges
+    }
+
+    fn expand_exclusive_nested(
+        &self,
+        to_delete: &mut BTreeSet<WorktreeId>,
+        grouped: &BTreeSet<WorktreeId>,
+    ) {
+        if to_delete.is_empty() {
+            return;
+        }
+        let edges = self.nested_edges();
+        loop {
+            let mut next = Vec::new();
+            for &(parent, child) in &edges {
+                if !to_delete.contains(&parent)
+                    || to_delete.contains(&child)
+                    || grouped.contains(&child)
+                {
+                    continue;
+                }
+                let referenced_elsewhere = edges
+                    .iter()
+                    .any(|&(other_parent, c)| c == child && !to_delete.contains(&other_parent));
+                if !referenced_elsewhere {
+                    next.push(child);
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            to_delete.extend(next);
+        }
+    }
+
     fn repo_mut(&mut self, id: WorktreeId) -> Option<&mut RepoRow> {
         self.repo_index(id).map(|index| &mut self.repos[index])
     }
@@ -480,6 +641,34 @@ impl Workspace {
                 self.edit_catalog(move |db| db.rename_group(id, &name))
             }
             Action::DeleteGroup(id) => self.edit_catalog(move |db| db.delete_group(id)),
+            Action::DeleteGroupWithRepos(id) => {
+                let (_, affected) = self.removal_impact_for_group(Some(id));
+                if affected.iter().any(|repo_id| self.writing(*repo_id)) {
+                    self.message = Some(
+                        crate::i18n::tr(
+                            "分组内有仓库正在执行 Git 操作，完成后可移除登记",
+                            "A repository in this group is running a Git operation; try again once finished",
+                        )
+                        .to_owned(),
+                    );
+                    return;
+                }
+                self.edit_catalog(move |db| db.delete_group_with_repos(id).map(|_| ()));
+            }
+            Action::ClearGroup(group) => {
+                let (_, affected) = self.removal_impact_for_group(group);
+                if affected.iter().any(|repo_id| self.writing(*repo_id)) {
+                    self.message = Some(
+                        crate::i18n::tr(
+                            "分组内有仓库正在执行 Git 操作，完成后可移除登记",
+                            "A repository in this group is running a Git operation; try again once finished",
+                        )
+                        .to_owned(),
+                    );
+                    return;
+                }
+                self.edit_catalog(move |db| db.clear_group(group).map(|_| ()));
+            }
             Action::AddRepo { path, group } => self.mutate(move |db| {
                 db.register(&git::discover(&path)?, group)
                     .map(|_| ())
@@ -586,6 +775,22 @@ impl Workspace {
                 Ok(())
             }),
             Action::RemoveRepo(id) => self.edit_catalog(move |db| db.unregister(id)),
+            Action::RemoveRepoWithNested { id, remove_nested } => {
+                let (_, affected) = self.removal_impact_for_repo(id, remove_nested);
+                if affected.iter().any(|repo_id| self.writing(*repo_id)) {
+                    self.message = Some(
+                        crate::i18n::tr(
+                            "此工作树或其子仓库正在执行 Git 操作，完成后可修改登记",
+                            "This repository or one of its nested repositories is running a Git operation",
+                        )
+                        .to_owned(),
+                    );
+                    return;
+                }
+                self.edit_catalog(move |db| {
+                    db.unregister_with_nested(id, remove_nested).map(|_| ())
+                });
+            }
             Action::AddMember { id, group } => {
                 self.edit_catalog(move |db| db.add_member(id, group))
             }

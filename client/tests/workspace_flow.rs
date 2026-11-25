@@ -1199,3 +1199,93 @@ fn first_release_timings() {
         );
     }
 }
+
+#[test]
+fn group_cleanup_and_nested_repo_removal_avoid_ungrouped_clutter() {
+    let dir = tempdir().unwrap();
+    let database = dir.path().join("cleanup-flow.sqlite");
+    let parent_a = init_plain_repo(dir.path(), "parent-a");
+    let child_a1 = init_plain_repo(&parent_a, "sub-a1");
+    let child_a2 = init_plain_repo(&parent_a, "sub-a2");
+    let shared_repo = init_plain_repo(dir.path(), "shared-repo");
+    let ungrouped_parent = init_plain_repo(dir.path(), "ungrouped-parent");
+    let ungrouped_child = init_plain_repo(&ungrouped_parent, "ungrouped-sub");
+
+    let mut harness = Harness::open(&database);
+    let group_a = harness.create_group("WorkspaceA");
+    let group_b = harness.create_group("WorkspaceB");
+
+    let parent_a_id = harness.add_repo(&parent_a, Some(group_a));
+    let shared_id = harness.add_repo(&shared_repo, Some(group_a));
+    harness.workspace.dispatch(Action::AddMember {
+        id: shared_id,
+        group: group_b,
+    });
+    harness.wait("add shared repo to second group", |w| {
+        w.groups
+            .iter()
+            .any(|g| g.id == Some(group_b) && g.members.contains(&shared_id))
+    });
+
+    harness.workspace.dispatch(Action::AdoptNested {
+        parent: parent_a_id,
+        paths: vec![child_a1, child_a2],
+        mode: githalo::workspace::NestedAdoptMode::UnderParent,
+    });
+    harness.wait("attach nested children under parent-a", |w| {
+        w.nested
+            .get(&parent_a_id)
+            .is_some_and(|n| n.children.len() == 2)
+    });
+
+    let (impact, _) = harness.workspace.removal_impact_for_group(Some(group_a));
+    assert_eq!(impact.top_level, 1);
+    assert_eq!(impact.nested, 2);
+    assert_eq!(impact.kept_in_other_groups, 1);
+
+    // Delete group A along with its exclusive repo + nested children; shared_repo stays in B.
+    harness
+        .workspace
+        .dispatch(Action::DeleteGroupWithRepos(group_a));
+    harness.wait("delete group A with exclusive repositories", |w| {
+        !w.groups.iter().any(|g| g.id == Some(group_a)) && w.repos.len() == 1
+    });
+    assert!(harness.workspace.repo(shared_id).is_some());
+    assert!(harness.workspace.groups.iter().all(|g| g.id.is_some()));
+
+    // Register an ungrouped parent with a nested child, then verify ClearGroup(None) clears both.
+    let ungrouped_id = harness.add_repo(&ungrouped_parent, None);
+    harness.workspace.dispatch(Action::AdoptNested {
+        parent: ungrouped_id,
+        paths: vec![ungrouped_child],
+        mode: githalo::workspace::NestedAdoptMode::UnderParent,
+    });
+    harness.wait("attach nested child under ungrouped parent", |w| {
+        w.nested
+            .get(&ungrouped_id)
+            .is_some_and(|n| n.children.len() == 1)
+    });
+
+    let (repo_impact, _) = harness
+        .workspace
+        .removal_impact_for_repo(ungrouped_id, true);
+    assert_eq!(repo_impact.top_level, 1);
+    assert_eq!(repo_impact.nested, 1);
+
+    let (ungrouped_impact, _) = harness.workspace.removal_impact_for_group(None);
+    assert_eq!(ungrouped_impact.top_level, 1);
+    assert_eq!(ungrouped_impact.nested, 1);
+
+    harness.workspace.dispatch(Action::ClearGroup(None));
+    harness.wait("clear ungrouped section", |w| {
+        !w.groups.iter().any(|g| g.id.is_none()) && w.repos.len() == 1
+    });
+    assert!(harness.workspace.repo(shared_id).is_some());
+}
+
+fn init_plain_repo(base: &Path, name: &str) -> PathBuf {
+    let path = base.join(name);
+    fs::create_dir_all(&path).unwrap();
+    git(&path, &["init", "-q"]);
+    path
+}

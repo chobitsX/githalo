@@ -691,3 +691,193 @@ fn nested_repos_persist_expansion_dismissals_and_cascade_on_remove() {
     assert!(!after_delete.nested.contains_key(&parent));
     assert!(!after_delete.dismissed_nested.contains_key(&parent));
 }
+
+#[test]
+fn delete_group_with_repos_removes_exclusive_repos_and_nested_children_but_keeps_shared() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("delete-group-with-repos.sqlite");
+    let mut registry = Registry::open(&database).unwrap();
+
+    let doomed_group = registry.create_group("Doomed").unwrap();
+    let kept_group = registry.create_group("Kept").unwrap();
+
+    let exclusive_parent = registry
+        .register(&root_in(&directory, "exclusive-parent"), Some(doomed_group))
+        .unwrap();
+    let shared_repo = registry
+        .register(&root_in(&directory, "shared-repo"), Some(doomed_group))
+        .unwrap();
+    registry.add_member(shared_repo, kept_group).unwrap();
+    let other_parent = registry
+        .register(&root_in(&directory, "other-parent"), Some(kept_group))
+        .unwrap();
+
+    let exclusive_child_path = root_in(&directory, "exclusive-parent/child-a");
+    let shared_child_path = root_in(&directory, "shared-child");
+    let grouped_child_path = root_in(&directory, "grouped-child");
+    let nested_ids = registry
+        .attach_nested_repos(
+            exclusive_parent,
+            &[
+                exclusive_child_path.clone(),
+                shared_child_path.clone(),
+                grouped_child_path.clone(),
+            ],
+        )
+        .unwrap();
+    let exclusive_child = nested_ids[0];
+    let shared_child = nested_ids[1];
+    let grouped_child = nested_ids[2];
+
+    // Attach shared_child under other_parent too, and place grouped_child in kept_group.
+    registry
+        .attach_nested_repos(other_parent, std::slice::from_ref(&shared_child_path))
+        .unwrap();
+    registry.add_member(grouped_child, kept_group).unwrap();
+
+    // Multi-level nested grandchild under exclusive_child.
+    let grandchild = registry
+        .attach_nested_repos(
+            exclusive_child,
+            &[root_in(&directory, "exclusive-parent/child-a/grandchild")],
+        )
+        .unwrap()[0];
+
+    let removed = registry.delete_group_with_repos(doomed_group).unwrap();
+    // exclusive_parent + exclusive_child + grandchild = 3 removed
+    assert_eq!(removed, 3);
+
+    let board = registry.board().unwrap();
+    let remaining_ids: Vec<_> = board.worktrees.iter().map(|w| w.id).collect();
+    assert!(!remaining_ids.contains(&exclusive_parent));
+    assert!(!remaining_ids.contains(&exclusive_child));
+    assert!(!remaining_ids.contains(&grandchild));
+    assert!(remaining_ids.contains(&shared_repo));
+    assert!(remaining_ids.contains(&other_parent));
+    assert!(remaining_ids.contains(&shared_child));
+    assert!(remaining_ids.contains(&grouped_child));
+    assert_eq!(board.groups.len(), 1);
+    assert_eq!(board.groups[0].id, kept_group);
+}
+
+#[test]
+fn clear_group_empties_custom_group_or_ungrouped_with_nested_children() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("clear-group.sqlite");
+    let mut registry = Registry::open(&database).unwrap();
+
+    let group_a = registry.create_group("GroupA").unwrap();
+    let group_b = registry.create_group("GroupB").unwrap();
+
+    let a_only = registry
+        .register(&root_in(&directory, "a-only"), Some(group_a))
+        .unwrap();
+    let a_nested = registry
+        .attach_nested_repos(a_only, &[root_in(&directory, "a-only/sub")])
+        .unwrap()[0];
+    let shared = registry
+        .register(&root_in(&directory, "shared"), Some(group_a))
+        .unwrap();
+    registry.add_member(shared, group_b).unwrap();
+
+    let ungrouped_parent = registry
+        .register(&root_in(&directory, "ungrouped-parent"), None)
+        .unwrap();
+    let ungrouped_child = registry
+        .attach_nested_repos(
+            ungrouped_parent,
+            &[root_in(&directory, "ungrouped-parent/sub-1")],
+        )
+        .unwrap()[0];
+
+    // Clearing custom group A keeps group A itself (now empty), deletes a_only + a_nested, keeps shared in B.
+    let cleared_a = registry.clear_group(Some(group_a)).unwrap();
+    assert_eq!(cleared_a, 2);
+    let board = registry.board().unwrap();
+    assert_eq!(board.groups.len(), 2);
+    assert!(
+        board
+            .groups
+            .iter()
+            .find(|g| g.id == group_a)
+            .unwrap()
+            .members
+            .is_empty()
+    );
+    assert_eq!(
+        board
+            .groups
+            .iter()
+            .find(|g| g.id == group_b)
+            .unwrap()
+            .members,
+        vec![shared]
+    );
+    let ids: Vec<_> = board.worktrees.iter().map(|w| w.id).collect();
+    assert!(!ids.contains(&a_only));
+    assert!(!ids.contains(&a_nested));
+    assert!(ids.contains(&shared));
+    assert!(ids.contains(&ungrouped_parent));
+    assert!(ids.contains(&ungrouped_child));
+
+    // Clearing Ungrouped removes ungrouped_parent + ungrouped_child while leaving GroupB intact.
+    let cleared_ungrouped = registry.clear_group(None).unwrap();
+    assert_eq!(cleared_ungrouped, 2);
+    let board = registry.board().unwrap();
+    let ids: Vec<_> = board.worktrees.iter().map(|w| w.id).collect();
+    assert_eq!(ids, vec![shared]);
+}
+
+#[test]
+fn unregister_with_nested_optionally_removes_exclusive_children_only() {
+    let directory = tempdir().unwrap();
+    let database = directory.path().join("unregister-nested.sqlite");
+    let mut registry = Registry::open(&database).unwrap();
+
+    let group = registry.create_group("Keep").unwrap();
+    let parent_one = registry
+        .register(&root_in(&directory, "parent-one"), None)
+        .unwrap();
+    let parent_two = registry
+        .register(&root_in(&directory, "parent-two"), None)
+        .unwrap();
+
+    let exclusive_path = root_in(&directory, "parent-one/only-here");
+    let grouped_path = root_in(&directory, "parent-one/in-group");
+    let children = registry
+        .attach_nested_repos(parent_one, &[exclusive_path, grouped_path])
+        .unwrap();
+    let exclusive_child = children[0];
+    let grouped_child = children[1];
+    registry.add_member(grouped_child, group).unwrap();
+
+    let removed = registry.unregister_with_nested(parent_one, true).unwrap();
+    assert_eq!(removed, 2);
+    let ids: Vec<_> = registry
+        .board()
+        .unwrap()
+        .worktrees
+        .iter()
+        .map(|w| w.id)
+        .collect();
+    assert!(!ids.contains(&parent_one));
+    assert!(!ids.contains(&exclusive_child));
+    assert!(ids.contains(&grouped_child));
+    assert!(ids.contains(&parent_two));
+
+    // When remove_nested is false, nested children remain registered as independent entries.
+    let kept_child = registry
+        .attach_nested_repos(parent_two, &[root_in(&directory, "parent-two/child")])
+        .unwrap()[0];
+    let removed_parent_only = registry.unregister_with_nested(parent_two, false).unwrap();
+    assert_eq!(removed_parent_only, 1);
+    let ids: Vec<_> = registry
+        .board()
+        .unwrap()
+        .worktrees
+        .iter()
+        .map(|w| w.id)
+        .collect();
+    assert!(!ids.contains(&parent_two));
+    assert!(ids.contains(&kept_child));
+}

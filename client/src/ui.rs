@@ -19,7 +19,7 @@ mod sidebar;
 mod stash;
 mod text_field;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -170,6 +170,9 @@ pub struct DesktopView {
     focus: FocusHandle,
     overlay_focus: FocusHandle,
     search: Entity<TextField>,
+    repo_filter: Entity<TextField>,
+    repo_filter_diverged_only: bool,
+    nested_visible_limits: BTreeMap<WorktreeId, usize>,
     overlay: Option<Overlay>,
     previous_focus: Option<FocusHandle>,
     notice: Option<String>,
@@ -253,6 +256,18 @@ impl DesktopView {
             cx.notify();
         })
         .detach();
+        let repo_filter = cx.new(|cx| {
+            TextField::new(
+                tr("搜索仓库或子仓…", "Filter repositories…"),
+                String::new(),
+                false,
+                cx,
+            )
+        });
+        cx.subscribe(&repo_filter, |_, _, _: &text_field::Changed, cx| {
+            cx.notify();
+        })
+        .detach();
         cx.spawn(async move |view, cx| {
             while let Ok(update) = updates.recv().await {
                 if view
@@ -305,6 +320,9 @@ impl DesktopView {
             focus,
             overlay_focus: cx.focus_handle(),
             search,
+            repo_filter,
+            repo_filter_diverged_only: false,
+            nested_visible_limits: BTreeMap::new(),
             overlay: None,
             previous_focus: None,
             notice: None,
@@ -566,6 +584,9 @@ impl DesktopView {
                 ),
                 cx,
             );
+        });
+        self.repo_filter.update(cx, |field, cx| {
+            field.set_placeholder(tr("搜索仓库或子仓…", "Filter repositories…"), cx);
         });
         self.branches_ui.refresh_placeholder(cx);
         self.file_viewer_ui.refresh_placeholders(cx);
@@ -1379,59 +1400,113 @@ impl DesktopView {
                 })
         });
 
-        let sync_pill = selected.and_then(|repo| {
-            let counts = repo.counts.filter(|_| repo.issue.is_none())?;
-            Some(
-                div()
-                    .id("titlebar-sync-pill")
-                    .flex_shrink_0()
-                    .h(px(22.))
-                    .px(px(8.))
-                    .rounded(px(999.))
-                    .bg(rgb(theme().card))
-                    .border_1()
-                    .border_color(rgb(theme().border))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(rems(0.72))
-                    .child(
-                        div()
-                            .text_color(rgb(if counts.behind > 0 {
-                                theme().link
-                            } else {
-                                theme().subtle
-                            }))
-                            .when(counts.behind > 0, |t| t.font_weight(FontWeight::SEMIBOLD))
-                            .child(format!("↓{}", counts.behind)),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(if counts.ahead > 0 {
-                                theme().brand_text
-                            } else {
-                                theme().subtle
-                            }))
-                            .when(counts.ahead > 0, |t| t.font_weight(FontWeight::SEMIBOLD))
-                            .child(format!("↑{}", counts.ahead)),
-                    ),
-            )
-        });
-
         let action_group: Option<AnyElement> = selected.map(|repo| {
             let repo_id = repo.target.id;
             let fetching = repo.fetching;
+            let sync_counts = repo
+                .counts
+                .filter(|_| repo.issue.is_none() || repo.historical);
+            let behind = sync_counts.map_or(0, |counts| counts.behind);
+            let ahead = sync_counts.map_or(0, |counts| counts.ahead);
+            let historical = repo.historical;
+
+            let pull_badge = format_sync_badge_count(behind).map(|text| {
+                let (bg, border, fg) = if !writable {
+                    (theme().hover, theme().border, theme().subtle)
+                } else if historical {
+                    (theme().warn_bg, theme().warn_border, theme().warning)
+                } else {
+                    (theme().accent_bg, theme().accent_border, theme().link)
+                };
+                (text, bg, border, fg)
+            });
+            let push_badge = format_sync_badge_count(ahead).map(|text| {
+                let (bg, border, fg) = if !writable {
+                    (theme().hover, theme().border, theme().subtle)
+                } else if historical {
+                    (theme().warn_bg, theme().warn_border, theme().warning)
+                } else {
+                    (theme().success_bg, theme().success_border, theme().success)
+                };
+                (text, bg, border, fg)
+            });
+
+            let pull_tip = if behind > 0 && historical {
+                if i18n::is_zh() {
+                    format!("拉取当前分支 (⌘T) · 上次缓存 {behind} 个待拉取")
+                } else {
+                    format!("Pull Current Branch (⌘T) · {behind} to pull (cached)")
+                }
+            } else if behind > 0 {
+                if i18n::is_zh() {
+                    format!("拉取当前分支 (⌘T) · {behind} 个待拉取")
+                } else {
+                    format!("Pull Current Branch (⌘T) · {behind} to pull")
+                }
+            } else if sync_counts.is_some() && !historical {
+                tr(
+                    "拉取当前分支 (⌘T) · 已与上游同步",
+                    "Pull Current Branch (⌘T) · Up to date",
+                )
+                .to_owned()
+            } else {
+                tr("拉取当前分支 (⌘T)", "Pull Current Branch (⌘T)").to_owned()
+            };
+
+            let push_tip = if ahead > 0 && historical {
+                if i18n::is_zh() {
+                    format!("推送当前分支 (⇧⌘K) · 上次缓存 {ahead} 个待推送")
+                } else {
+                    format!("Push Current Branch (⇧⌘K) · {ahead} to push (cached)")
+                }
+            } else if ahead > 0 {
+                if i18n::is_zh() {
+                    format!("推送当前分支 (⇧⌘K) · {ahead} 个待推送")
+                } else {
+                    format!("Push Current Branch (⇧⌘K) · {ahead} to push")
+                }
+            } else if sync_counts.is_some() && !historical {
+                tr(
+                    "推送当前分支 (⇧⌘K) · 暂无待推送提交",
+                    "Push Current Branch (⇧⌘K) · Nothing to push",
+                )
+                .to_owned()
+            } else {
+                tr("推送当前分支 (⇧⌘K)", "Push Current Branch (⇧⌘K)").to_owned()
+            };
+
+            let pull_icon_tint = if behind > 0 {
+                Some(if historical {
+                    theme().warning
+                } else {
+                    theme().link
+                })
+            } else {
+                None
+            };
+            let push_icon_tint = if ahead > 0 {
+                Some(if historical {
+                    theme().warning
+                } else {
+                    theme().success
+                })
+            } else {
+                None
+            };
+
             let seg = |id: &'static str,
                        ico: Icon,
                        label: &'static str,
-                       tip: &'static str,
+                       tip: String,
                        enabled: bool,
-                       tint: Option<u32>| {
+                       text_tint: Option<u32>,
+                       icon_tint: Option<u32>,
+                       badge: Option<(String, u32, u32, u32)>| {
                 div()
                     .id(id)
                     .role(Role::Button)
-                    .aria_label(tip)
-                    .tooltip(tooltip(tip.to_owned()))
+                    .aria_label(tip.clone())
+                    .tooltip(tooltip(tip))
                     .h_full()
                     .px(px(10.))
                     .flex()
@@ -1440,7 +1515,7 @@ impl DesktopView {
                     .text_size(rems(0.76))
                     .text_color(rgb(if !enabled {
                         theme().subtle
-                    } else if let Some(c) = tint {
+                    } else if let Some(c) = text_tint {
                         c
                     } else {
                         theme().text
@@ -1449,13 +1524,28 @@ impl DesktopView {
                         ico,
                         if !enabled {
                             theme().subtle
-                        } else if let Some(c) = tint {
+                        } else if let Some(c) = icon_tint.or(text_tint) {
                             c
                         } else {
                             theme().muted
                         },
                     ))
                     .child(label)
+                    .children(badge.map(|(text, bg, border, fg)| {
+                        div()
+                            .flex_shrink_0()
+                            .px(px(5.))
+                            .py(px(0.5))
+                            .rounded(px(999.))
+                            .bg(rgb(bg))
+                            .border_1()
+                            .border_color(rgb(border))
+                            .text_size(rems(0.66))
+                            .line_height(rems(0.92))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(fg))
+                            .child(text)
+                    }))
                     .when(enabled, |b| {
                         b.tab_index(0).hover(|s| s.bg(rgb(theme().hover)))
                     })
@@ -1479,9 +1569,11 @@ impl DesktopView {
                         } else {
                             tr("获取", "Fetch")
                         },
-                        tr("获取远端更新 (⇧⌘T)", "Fetch Remote Updates (⇧⌘T)"),
+                        tr("获取远端更新 (⇧⌘T)", "Fetch Remote Updates (⇧⌘T)").to_owned(),
                         !fetching,
                         fetching.then_some(theme().brand_text),
+                        None,
+                        None,
                     )
                     .when(!fetching, |b| {
                         b.on_click(cx.listener(move |view, _, _, cx| {
@@ -1495,9 +1587,11 @@ impl DesktopView {
                         "pull-current",
                         Icon::Download,
                         tr("拉取", "Pull"),
-                        tr("拉取当前分支 (⌘T)", "Pull Current Branch (⌘T)"),
+                        pull_tip,
                         writable,
                         None,
+                        pull_icon_tint,
+                        pull_badge,
                     )
                     .when(writable, |b| {
                         b.on_click(cx.listener(|view, _, window, cx| {
@@ -1511,9 +1605,11 @@ impl DesktopView {
                         "push-current",
                         Icon::Upload,
                         tr("推送", "Push"),
-                        tr("推送当前分支 (⇧⌘K)", "Push Current Branch (⇧⌘K)"),
+                        push_tip,
                         writable,
                         None,
+                        push_icon_tint,
+                        push_badge,
                     )
                     .when(writable, |b| {
                         b.on_click(cx.listener(|view, _, window, cx| {
@@ -1571,7 +1667,6 @@ impl DesktopView {
             )
             .children(selected.map(|_| vertical_rule()))
             .children(branch)
-            .children(sync_pill)
             .child(div().flex_1().h_full().min_w(px(24.)).on_mouse_down(
                 MouseButton::Left,
                 |event, window, _| {
@@ -2048,5 +2143,26 @@ fn rail_panel(panel: Panel) -> Panel {
     match panel {
         Panel::Commit | Panel::Stash | Panel::Shelf => Panel::Repositories,
         _ => panel,
+    }
+}
+
+fn format_sync_badge_count(count: u64) -> Option<String> {
+    match count {
+        0 => None,
+        1..=999 => Some(count.to_string()),
+        _ => Some("999+".to_owned()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_sync_badge_count;
+
+    #[test]
+    fn sync_badge_hides_zero_and_caps_large_counts() {
+        assert_eq!(format_sync_badge_count(0), None);
+        assert_eq!(format_sync_badge_count(1).as_deref(), Some("1"));
+        assert_eq!(format_sync_badge_count(999).as_deref(), Some("999"));
+        assert_eq!(format_sync_badge_count(1000).as_deref(), Some("999+"));
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use githalo::branch_ops::BranchSnapshot;
 use githalo::history_ops::RevertStatus;
-use githalo::i18n::tr;
+use githalo::i18n::{is_zh, tr};
 use githalo::merge_ops::MergeStatus;
 use githalo::rebase_ops::RebaseStatus;
 use githalo::workspace::{
@@ -103,8 +103,15 @@ pub(super) enum Dialog {
         input: Entity<TextField>,
         error: Option<SharedString>,
     },
-    DeleteGroup(GroupId),
-    RemoveRepository(WorktreeId),
+    DeleteGroup {
+        id: GroupId,
+        remove_repos: bool,
+    },
+    ClearGroup(Option<GroupId>),
+    RemoveRepository {
+        id: WorktreeId,
+        remove_nested: bool,
+    },
     NewBranch(BranchForm),
     SetUpstream(SetUpstreamForm),
     GitReview {
@@ -547,24 +554,58 @@ impl DesktopView {
                 ),
             ],
             &MenuKind::Group(group) => {
+                let has_members = self
+                    .workspace
+                    .groups
+                    .iter()
+                    .any(|row| row.id == group && !row.members.is_empty());
                 let mut items = vec![add_worktree(group, cx)];
                 if let Some(id) = group {
-                    items.extend([
-                        menu_item(
-                            "rename-group",
-                            tr("重命名分组…", "Rename Group…"),
-                            None,
-                            cx,
-                            move |view, _, window, cx| view.open_group_name(Some(id), window, cx),
-                        ),
-                        menu_rule(),
-                        menu_item(
-                            "delete-group",
-                            tr("删除分组…", "Delete Group…"),
+                    items.push(menu_item(
+                        "rename-group",
+                        tr("重命名分组…", "Rename Group…"),
+                        None,
+                        cx,
+                        move |view, _, window, cx| view.open_group_name(Some(id), window, cx),
+                    ));
+                    items.push(menu_rule());
+                    if has_members {
+                        items.push(menu_item(
+                            "clear-group",
+                            tr("清空组内仓库…", "Clear Group Repositories…"),
                             None,
                             cx,
                             move |view, _, window, cx| {
-                                view.open_confirmation(Dialog::DeleteGroup(id), window, cx);
+                                view.open_confirmation(Dialog::ClearGroup(Some(id)), window, cx);
+                            },
+                        ));
+                    }
+                    items.push(menu_item(
+                        "delete-group",
+                        tr("删除分组…", "Delete Group…"),
+                        None,
+                        cx,
+                        move |view, _, window, cx| {
+                            view.open_confirmation(
+                                Dialog::DeleteGroup {
+                                    id,
+                                    remove_repos: true,
+                                },
+                                window,
+                                cx,
+                            );
+                        },
+                    ));
+                } else if has_members {
+                    items.extend([
+                        menu_rule(),
+                        menu_item(
+                            "clear-ungrouped",
+                            tr("清空未分组…", "Clear Ungrouped…"),
+                            None,
+                            cx,
+                            move |view, _, window, cx| {
+                                view.open_confirmation(Dialog::ClearGroup(None), window, cx);
                             },
                         ),
                     ]);
@@ -718,7 +759,14 @@ impl DesktopView {
                         None,
                         cx,
                         move |view, _, window, cx| {
-                            view.open_confirmation(Dialog::RemoveRepository(id), window, cx);
+                            view.open_confirmation(
+                                Dialog::RemoveRepository {
+                                    id,
+                                    remove_nested: true,
+                                },
+                                window,
+                                cx,
+                            );
                         },
                     ),
                 ]);
@@ -842,42 +890,485 @@ impl DesktopView {
                         ),
                     );
             }
-            Dialog::DeleteGroup(group) => {
-                let id = *group;
-                let name = self
-                    .workspace
-                    .groups
-                    .iter()
-                    .find(|group| group.id == Some(id))
-                    .map_or(tr("分组", "Group"), |row| row.name.as_str());
+            Dialog::DeleteGroup { id, remove_repos } => {
+                let id = *id;
+                let remove_repos = *remove_repos;
+                let group_row = self.workspace.groups.iter().find(|g| g.id == Some(id));
+                let name = group_row.map_or(tr("分组", "Group"), |row| row.name.as_str());
+                let member_count = group_row.map_or(0, |row| row.members.len());
+                let (impact, _) = self.workspace.removal_impact_for_group(Some(id));
+
+                if member_count == 0 || impact.top_level == 0 {
+                    let message = if member_count == 0 {
+                        tr(
+                            "该分组当前没有仓库，删除后仅移除此分组。",
+                            "This group is currently empty. Only the group itself will be deleted.",
+                        )
+                        .to_owned()
+                    } else if is_zh() {
+                        format!(
+                            "该分组中的 {member_count} 个仓库均同时属于其他分组，删除后它们会保留在原分组中。"
+                        )
+                    } else {
+                        format!(
+                            "All {member_count} repositories in this group also belong to other groups and will stay there."
+                        )
+                    };
+                    container = container
+                        .aria_label(tr("删除分组", "Delete Group"))
+                        .child(dialog_heading(format!(
+                            "{} \"{name}\"",
+                            tr("删除", "Delete")
+                        )))
+                        .child(div().text_color(rgb(theme().muted)).child(message))
+                        .child(
+                            buttons.child(
+                                text_button(
+                                    "dialog-delete-group",
+                                    tr("删除分组", "Delete Group"),
+                                    false,
+                                )
+                                .text_color(rgb(theme().error))
+                                .on_click(cx.listener(
+                                    move |view, _, window, cx| {
+                                        view.close_overlay(window, cx);
+                                        view.dispatch(Action::DeleteGroup(id), cx);
+                                    },
+                                )),
+                            ),
+                        );
+                } else {
+                    let remove_desc = if is_zh() {
+                        let mut text = if impact.nested > 0 {
+                            format!(
+                                "从列表移除仅属于此分组的 {} 个仓库及 {} 个纳管子仓库",
+                                impact.top_level, impact.nested
+                            )
+                        } else {
+                            format!("从列表移除仅属于此分组的 {} 个仓库", impact.top_level)
+                        };
+                        if impact.kept_in_other_groups > 0 {
+                            text.push_str(&format!(
+                                "；另有 {} 个跨组仓库保留在其他分组中",
+                                impact.kept_in_other_groups
+                            ));
+                        }
+                        text.push_str("。仅移出应用列表，不会删除磁盘文件。");
+                        text
+                    } else {
+                        let mut text = if impact.nested > 0 {
+                            format!(
+                                "Remove {} exclusive repositories and {} nested repositories from the list",
+                                impact.top_level, impact.nested
+                            )
+                        } else {
+                            format!(
+                                "Remove {} exclusive repositories from the list",
+                                impact.top_level
+                            )
+                        };
+                        if impact.kept_in_other_groups > 0 {
+                            text.push_str(&format!(
+                                "; {} shared repositories stay in their other groups",
+                                impact.kept_in_other_groups
+                            ));
+                        }
+                        text.push_str(". Files on disk are untouched.");
+                        text
+                    };
+                    let keep_desc = if is_zh() {
+                        format!(
+                            "只解除分组关系，仅属于此分组的 {} 个仓库将移入“未分组”。",
+                            impact.top_level
+                        )
+                    } else {
+                        format!(
+                            "Only remove memberships. {} exclusive repositories will move to Ungrouped.",
+                            impact.top_level
+                        )
+                    };
+
+                    let option_card = |elem_id: &'static str,
+                                       selected: bool,
+                                       title: &'static str,
+                                       desc: String,
+                                       value: bool| {
+                        div()
+                            .id(elem_id)
+                            .role(Role::Button)
+                            .aria_selected(selected)
+                            .tab_index(0)
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .px(px(10.))
+                            .py(px(9.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(rgb(if selected {
+                                theme().brand_border
+                            } else {
+                                theme().border
+                            }))
+                            .bg(rgb(if selected {
+                                theme().brand_bg
+                            } else {
+                                theme().card
+                            }))
+                            .hover(|s| {
+                                s.border_color(rgb(if selected {
+                                    theme().brand
+                                } else {
+                                    theme().muted
+                                }))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .child(
+                                        div()
+                                            .size(px(11.))
+                                            .flex_shrink_0()
+                                            .rounded(px(6.))
+                                            .border_1()
+                                            .border_color(rgb(if selected {
+                                                theme().brand
+                                            } else {
+                                                theme().subtle
+                                            }))
+                                            .bg(rgb(if selected {
+                                                theme().brand
+                                            } else {
+                                                theme().panel
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_size(px(12.5))
+                                            .text_color(rgb(theme().text))
+                                            .child(title),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .pl(px(18.))
+                                    .text_size(px(11.5))
+                                    .line_height(px(16.))
+                                    .text_color(rgb(theme().muted))
+                                    .child(desc),
+                            )
+                            .on_click(cx.listener(move |view, _, _, cx| {
+                                if let Some(Overlay::Dialog(Dialog::DeleteGroup {
+                                    remove_repos,
+                                    ..
+                                })) = &mut view.overlay
+                                {
+                                    *remove_repos = value;
+                                    cx.notify();
+                                }
+                            }))
+                    };
+
+                    let confirm_label = if remove_repos {
+                        tr("删除分组并移除仓库", "Delete Group & Remove")
+                    } else {
+                        tr("仅删除分组", "Delete Group Only")
+                    };
+                    container = container
+                        .w(px(436.))
+                        .aria_label(tr("删除分组", "Delete Group"))
+                        .child(dialog_heading(format!(
+                            "{} \"{name}\"",
+                            tr("删除", "Delete")
+                        )))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(option_card(
+                                    "delete-group-remove-repos",
+                                    remove_repos,
+                                    tr(
+                                        "删除分组并移除组内仓库",
+                                        "Delete Group & Remove Repositories",
+                                    ),
+                                    remove_desc,
+                                    true,
+                                ))
+                                .child(option_card(
+                                    "delete-group-keep-repos",
+                                    !remove_repos,
+                                    tr(
+                                        "仅删除分组，仓库移入“未分组”",
+                                        "Delete Group Only (Move to Ungrouped)",
+                                    ),
+                                    keep_desc,
+                                    false,
+                                )),
+                        )
+                        .child(
+                            buttons.child(
+                                text_button("dialog-delete-group", confirm_label, false)
+                                    .bg(rgb(theme().danger_bg))
+                                    .border_color(rgb(theme().danger_border))
+                                    .text_color(rgb(theme().error))
+                                    .hover(|s| s.bg(rgb(theme().danger_hover)))
+                                    .on_click(cx.listener(move |view, _, window, cx| {
+                                        view.close_overlay(window, cx);
+                                        if remove_repos {
+                                            view.dispatch(Action::DeleteGroupWithRepos(id), cx);
+                                        } else {
+                                            view.dispatch(Action::DeleteGroup(id), cx);
+                                        }
+                                    })),
+                            ),
+                        );
+                }
+            }
+            Dialog::ClearGroup(group) => {
+                let group = *group;
+                let (impact, _) = self.workspace.removal_impact_for_group(group);
+                let (heading, summary, confirm_label) = if let Some(id) = group {
+                    let name = self
+                        .workspace
+                        .groups
+                        .iter()
+                        .find(|row| row.id == Some(id))
+                        .map_or(tr("分组", "Group"), |row| row.name.as_str());
+                    let heading = if is_zh() {
+                        format!("清空分组 \"{name}\"")
+                    } else {
+                        format!("Clear Group \"{name}\"")
+                    };
+                    let summary = if is_zh() {
+                        let mut text = if impact.top_level == 0 {
+                            format!(
+                                "将解除该分组内全部 {} 个跨组仓库的成员关系（它们会保留在其他分组中）。分组本身将保留为空分组。",
+                                impact.kept_in_other_groups
+                            )
+                        } else if impact.nested > 0 {
+                            format!(
+                                "将从列表移除仅属于此分组的 {} 个仓库及 {} 个纳管子仓库，并保留空分组。",
+                                impact.top_level, impact.nested
+                            )
+                        } else {
+                            format!(
+                                "将从列表移除仅属于此分组的 {} 个仓库，并保留空分组。",
+                                impact.top_level
+                            )
+                        };
+                        if impact.top_level > 0 && impact.kept_in_other_groups > 0 {
+                            text.push_str(&format!(
+                                "另有 {} 个跨组仓库仅解除本组关联，将继续保留在其他分组中。",
+                                impact.kept_in_other_groups
+                            ));
+                        }
+                        text
+                    } else {
+                        let mut text = if impact.top_level == 0 {
+                            format!(
+                                "Unlink all {} shared repositories from this group (they remain in their other groups) and keep the group empty.",
+                                impact.kept_in_other_groups
+                            )
+                        } else if impact.nested > 0 {
+                            format!(
+                                "Remove {} exclusive repositories and {} nested repositories from the list, keeping this group empty.",
+                                impact.top_level, impact.nested
+                            )
+                        } else {
+                            format!(
+                                "Remove {} exclusive repositories from the list, keeping this group empty.",
+                                impact.top_level
+                            )
+                        };
+                        if impact.top_level > 0 && impact.kept_in_other_groups > 0 {
+                            text.push_str(&format!(
+                                " {} shared repositories stay in their other groups.",
+                                impact.kept_in_other_groups
+                            ));
+                        }
+                        text
+                    };
+                    (heading, summary, tr("清空分组", "Clear Group"))
+                } else {
+                    let heading = tr("清空“未分组”", "Clear Ungrouped").to_owned();
+                    let summary = if is_zh() {
+                        if impact.nested > 0 {
+                            format!(
+                                "将从应用列表移除“未分组”中的 {} 个仓库及 {} 个纳管子仓库。",
+                                impact.top_level, impact.nested
+                            )
+                        } else {
+                            format!("将从应用列表移除“未分组”中的 {} 个仓库。", impact.top_level)
+                        }
+                    } else if impact.nested > 0 {
+                        format!(
+                            "Remove {} ungrouped repositories and {} nested repositories from the list.",
+                            impact.top_level, impact.nested
+                        )
+                    } else {
+                        format!(
+                            "Remove {} ungrouped repositories from the list.",
+                            impact.top_level
+                        )
+                    };
+                    (heading, summary, tr("清空未分组", "Clear Ungrouped"))
+                };
                 container = container
-                    .aria_label(tr("删除分组", "Delete Group"))
-                    .child(dialog_heading(format!("{} \"{name}\"", tr("删除", "Delete"))))
+                    .w(px(410.))
+                    .aria_label(heading.clone())
+                    .child(dialog_heading(heading))
+                    .child(div().text_color(rgb(theme().text)).child(summary))
                     .child(div().text_color(rgb(theme().muted)).child(tr(
-                        "解除该组的成员关系。没有其他分组的仓库将移入“未分组”。",
-                        "Remove group memberships. Repositories with no other groups move to Ungrouped.",
+                        "仅从应用列表移除登记，不会删除磁盘上的任何文件。之后可随时重新添加。",
+                        "Files on disk are untouched. You can add these repositories again later.",
                     )))
                     .child(
                         buttons.child(
-                            text_button("dialog-delete-group", tr("删除分组", "Delete Group"), false)
+                            text_button("dialog-clear-group", confirm_label, false)
+                                .bg(rgb(theme().danger_bg))
+                                .border_color(rgb(theme().danger_border))
                                 .text_color(rgb(theme().error))
+                                .hover(|s| s.bg(rgb(theme().danger_hover)))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.close_overlay(window, cx);
-                                    view.dispatch(Action::DeleteGroup(id), cx);
+                                    view.dispatch(Action::ClearGroup(group), cx);
                                 })),
                         ),
                     );
             }
-            Dialog::RemoveRepository(id) => {
+            Dialog::RemoveRepository { id, remove_nested } => {
                 let id = *id;
+                let remove_nested = *remove_nested;
                 let path = self
                     .workspace
                     .repo(id)
                     .map(|repo| repo.target.root.to_string_lossy().into_owned());
+                let (nested_impact, _) = self.workspace.removal_impact_for_repo(id, true);
+                let exclusive_nested = nested_impact.nested;
+                if exclusive_nested > 0 {
+                    container = container.w(px(416.));
+                }
                 container = container
                     .aria_label(tr("从列表移除仓库", "Remove Repository"))
                     .child(dialog_heading(tr("从列表移除仓库", "Remove Repository")))
                     .children(path.map(|path| div().text_color(rgb(theme().muted)).child(path)))
+                    .when(exclusive_nested > 0, |dlg| {
+                        let title = if is_zh() {
+                            format!("同时移除其独有的 {exclusive_nested} 个纳管子仓库")
+                        } else {
+                            format!("Also remove {exclusive_nested} exclusive nested repositories")
+                        };
+                        let hint = if remove_nested {
+                            if is_zh() {
+                                format!(
+                                    "父仓库及 {exclusive_nested} 个独有子仓库将一并从应用列表移除，不会散落到“未分组”。"
+                                )
+                            } else {
+                                format!(
+                                    "The parent and its {exclusive_nested} exclusive nested repositories will be removed together."
+                                )
+                            }
+                        } else if is_zh() {
+                            format!(
+                                "仅移除父仓库，这 {exclusive_nested} 个子仓库将脱离嵌套并移入“未分组”。"
+                            )
+                        } else {
+                            format!(
+                                "Only the parent will be removed; the {exclusive_nested} nested repositories will move to Ungrouped."
+                            )
+                        };
+                        dlg.child(
+                            div()
+                                .id("remove-repo-include-nested")
+                                .role(Role::Button)
+                                .aria_selected(remove_nested)
+                                .tab_index(0)
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .px(px(10.))
+                                .py(px(8.))
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(rgb(if remove_nested {
+                                    theme().brand_border
+                                } else {
+                                    theme().border
+                                }))
+                                .bg(rgb(if remove_nested {
+                                    theme().brand_bg
+                                } else {
+                                    theme().card
+                                }))
+                                .hover(|s| {
+                                    s.border_color(rgb(if remove_nested {
+                                        theme().brand
+                                    } else {
+                                        theme().muted
+                                    }))
+                                })
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(7.))
+                                        .child(
+                                            div()
+                                                .size(px(13.))
+                                                .flex_shrink_0()
+                                                .rounded(px(3.))
+                                                .border_1()
+                                                .border_color(rgb(if remove_nested {
+                                                    theme().brand
+                                                } else {
+                                                    theme().border_strong
+                                                }))
+                                                .bg(rgb(if remove_nested {
+                                                    theme().brand
+                                                } else {
+                                                    theme().panel
+                                                }))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .text_size(px(10.))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(rgb(theme().primary_text))
+                                                .when(remove_nested, |box_el| box_el.child("✓")),
+                                        )
+                                        .child(
+                                            div()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_size(px(12.))
+                                                .text_color(rgb(theme().text))
+                                                .child(title),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .pl(px(20.))
+                                        .text_size(px(11.))
+                                        .line_height(px(15.))
+                                        .text_color(rgb(theme().muted))
+                                        .child(hint),
+                                )
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    if let Some(Overlay::Dialog(Dialog::RemoveRepository {
+                                        remove_nested,
+                                        ..
+                                    })) = &mut view.overlay
+                                    {
+                                        *remove_nested = !*remove_nested;
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                    })
                     .child(div().text_color(rgb(theme().muted)).child(tr(
                         "仅从应用列表移除，不会删除磁盘文件。之后可随时重新添加。",
                         "Files on disk are untouched. You can add this repository again later.",
@@ -888,7 +1379,14 @@ impl DesktopView {
                                 .text_color(rgb(theme().error))
                                 .on_click(cx.listener(move |view, _, window, cx| {
                                     view.close_overlay(window, cx);
-                                    view.dispatch(Action::RemoveRepo(id), cx);
+                                    if exclusive_nested > 0 {
+                                        view.dispatch(
+                                            Action::RemoveRepoWithNested { id, remove_nested },
+                                            cx,
+                                        );
+                                    } else {
+                                        view.dispatch(Action::RemoveRepo(id), cx);
+                                    }
                                 })),
                         ),
                     );

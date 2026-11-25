@@ -81,6 +81,11 @@ impl RepoRow {
         self.snapshot.is_some()
     }
 
+    #[doc(hidden)]
+    pub fn test_stub(target: WorktreeTarget) -> Self {
+        Self::new(target)
+    }
+
     pub(super) fn new(target: WorktreeTarget) -> Self {
         let name = target
             .root

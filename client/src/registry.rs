@@ -1,7 +1,7 @@
 //! Persistent worktree registrations, repository groups, and successful fetch times.
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -366,6 +366,59 @@ impl Registry {
         Ok(())
     }
 
+    /// Deletes `group` and also unregisters repositories that belonged exclusively to it
+    /// (along with their exclusive nested child repositories). Repositories that still belong
+    /// to another group or remain nested under another kept parent are preserved.
+    pub fn delete_group_with_repos(&mut self, group: GroupId) -> Result<usize> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let members = group_member_ids(&transaction, group)?;
+        transaction.execute("DELETE FROM groups WHERE id = ?1", [group.get()])?;
+        let removed = delete_orphan_candidates(&transaction, members)?;
+        transaction.commit()?;
+        Ok(removed)
+    }
+
+    /// Removes all repositories in `group` from the registry (keeping the custom group itself
+    /// when `group` is `Some`, or clearing all ungrouped top-level repositories when `None`),
+    /// along with their exclusive nested child repositories.
+    pub fn clear_group(&mut self, group: Option<GroupId>) -> Result<usize> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = if let Some(group) = group {
+            let exists: bool = transaction
+                .query_row("SELECT 1 FROM groups WHERE id = ?1", [group.get()], |_| {
+                    Ok(())
+                })
+                .optional()?
+                .is_some();
+            if !exists {
+                return Err(RegistryError::UnknownGroup(group));
+            }
+            let members = group_member_ids(&transaction, group)?;
+            transaction.execute(
+                "DELETE FROM group_members WHERE group_id = ?1",
+                [group.get()],
+            )?;
+            delete_orphan_candidates(&transaction, members)?
+        } else {
+            let mut statement = transaction.prepare(
+                "SELECT id FROM worktrees
+                 WHERE id NOT IN (SELECT worktree_id FROM group_members)
+                   AND id NOT IN (SELECT child_id FROM nested_repos)",
+            )?;
+            let ungrouped = statement
+                .query_map([], |row| read_worktree_id(row, 0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+            drop(statement);
+            expand_and_delete_worktrees(&transaction, ungrouped, true)?
+        };
+        transaction.commit()?;
+        Ok(removed)
+    }
+
     pub fn set_group_expanded(&mut self, group: Option<GroupId>, expanded: bool) -> Result<()> {
         self.update_group_expansion(group, Some(expanded))
     }
@@ -423,6 +476,38 @@ impl Registry {
         self.connection
             .execute("DELETE FROM worktrees WHERE id = ?1", [worktree.get()])?;
         Ok(())
+    }
+
+    /// Unregisters `worktree`. When `remove_nested` is `true`, also removes nested child
+    /// repositories that are not referenced by any other kept parent or group.
+    pub fn unregister_with_nested(
+        &mut self,
+        worktree: WorktreeId,
+        remove_nested: bool,
+    ) -> Result<usize> {
+        if !remove_nested {
+            let rows = self
+                .connection
+                .execute("DELETE FROM worktrees WHERE id = ?1", [worktree.get()])?;
+            return Ok(rows);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let exists: bool = transaction
+            .query_row(
+                "SELECT 1 FROM worktrees WHERE id = ?1",
+                [worktree.get()],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Ok(0);
+        }
+        let removed = expand_and_delete_worktrees(&transaction, BTreeSet::from([worktree]), true)?;
+        transaction.commit()?;
+        Ok(removed)
     }
 
     pub fn add_member(&mut self, worktree: WorktreeId, group: GroupId) -> Result<()> {
@@ -805,6 +890,119 @@ fn delete_member(
         params![group.get(), worktree.get()],
     )?;
     Ok(())
+}
+
+fn group_member_ids(
+    transaction: &rusqlite::Transaction<'_>,
+    group: GroupId,
+) -> rusqlite::Result<Vec<WorktreeId>> {
+    let mut statement =
+        transaction.prepare("SELECT worktree_id FROM group_members WHERE group_id = ?1")?;
+    let ids = statement
+        .query_map([group.get()], |row| read_worktree_id(row, 0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ids)
+}
+
+fn all_grouped_worktrees(
+    transaction: &rusqlite::Transaction<'_>,
+) -> rusqlite::Result<BTreeSet<WorktreeId>> {
+    let mut statement = transaction.prepare("SELECT DISTINCT worktree_id FROM group_members")?;
+    let ids = statement
+        .query_map([], |row| read_worktree_id(row, 0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    Ok(ids)
+}
+
+fn all_nested_edges(
+    transaction: &rusqlite::Transaction<'_>,
+) -> rusqlite::Result<Vec<(WorktreeId, WorktreeId)>> {
+    let mut statement = transaction.prepare("SELECT parent_id, child_id FROM nested_repos")?;
+    let edges = statement
+        .query_map([], |row| {
+            Ok((read_worktree_id(row, 0)?, read_worktree_id(row, 1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(edges)
+}
+
+/// Deletes every candidate that is neither a member of any remaining group nor nested under any
+/// kept repository, then cascades to exclusive nested descendants.
+fn delete_orphan_candidates(
+    transaction: &rusqlite::Transaction<'_>,
+    candidates: Vec<WorktreeId>,
+) -> rusqlite::Result<usize> {
+    if candidates.is_empty() {
+        return Ok(0);
+    }
+    let grouped = all_grouped_worktrees(transaction)?;
+    let mut to_delete: BTreeSet<WorktreeId> = candidates
+        .into_iter()
+        .filter(|id| !grouped.contains(id))
+        .collect();
+    if to_delete.is_empty() {
+        return Ok(0);
+    }
+    let edges = all_nested_edges(transaction)?;
+    // Any candidate still nested under a repository outside `to_delete` must stay registered.
+    loop {
+        let protected: Vec<WorktreeId> = to_delete
+            .iter()
+            .copied()
+            .filter(|id| {
+                edges
+                    .iter()
+                    .any(|(parent, child)| child == id && !to_delete.contains(parent))
+            })
+            .collect();
+        if protected.is_empty() {
+            break;
+        }
+        for id in protected {
+            to_delete.remove(&id);
+        }
+    }
+    expand_and_delete_worktrees(transaction, to_delete, true)
+}
+
+fn expand_and_delete_worktrees(
+    transaction: &rusqlite::Transaction<'_>,
+    mut to_delete: BTreeSet<WorktreeId>,
+    remove_nested: bool,
+) -> rusqlite::Result<usize> {
+    if to_delete.is_empty() {
+        return Ok(0);
+    }
+    if remove_nested {
+        let grouped = all_grouped_worktrees(transaction)?;
+        let edges = all_nested_edges(transaction)?;
+        loop {
+            let mut next = Vec::new();
+            for &(parent, child) in &edges {
+                if !to_delete.contains(&parent)
+                    || to_delete.contains(&child)
+                    || grouped.contains(&child)
+                {
+                    continue;
+                }
+                let referenced_elsewhere = edges
+                    .iter()
+                    .any(|&(other_parent, c)| c == child && !to_delete.contains(&other_parent));
+                if !referenced_elsewhere {
+                    next.push(child);
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            to_delete.extend(next);
+        }
+    }
+    let mut removed = 0usize;
+    for id in to_delete {
+        removed += transaction.execute("DELETE FROM worktrees WHERE id = ?1", [id.get()])?;
+    }
+    Ok(removed)
 }
 
 fn encode_root(root: &Path) -> Result<Cow<'_, [u8]>> {
