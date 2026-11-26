@@ -404,6 +404,7 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) {
         self.commit_diff_expanded = false;
+        self.custom_tabs.active_id = None;
         if self.working_patch_open() {
             self.show_working_patch(false, cx);
         }

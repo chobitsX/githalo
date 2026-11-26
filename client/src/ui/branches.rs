@@ -2931,6 +2931,8 @@ fn menu_item_shortcut(
     + 'static,
 ) -> AnyElement {
     let label = label.into();
+    super::overlay::record_menu_height(27.0);
+    let on_click = std::rc::Rc::new(on_click);
     div()
         .id(id)
         .role(Role::MenuItem)
@@ -2939,7 +2941,7 @@ fn menu_item_shortcut(
         .px(px(8.))
         .py(px(4.))
         .min_h(px(27.))
-        .rounded(px(3.))
+        .rounded(px(4.))
         .flex()
         .items_center()
         .justify_between()
@@ -2956,7 +2958,7 @@ fn menu_item_shortcut(
         )
         .on_click(cx.listener(move |view, event, window, cx| {
             cx.stop_propagation();
-            on_click(view, event, window, cx);
+            view.run_menu_action(event, window, cx, std::rc::Rc::clone(&on_click));
         }))
         .into_any_element()
 }
@@ -2996,106 +2998,110 @@ fn render_branch_row(
             let menu_snap = snapshot.cloned();
             let menu_label = branch_label.clone();
             let is_filtered = active_filter == Some("HEAD");
-            base.when(is_filtered && !is_selected, |el| el.bg(rgb(theme().brand_bg)))
-                .child(icon(Icon::HeadTag, theme().brand))
-                .child(
-                    elide(tr("HEAD (当前分支)", "HEAD (Current Branch)"))
-                        .flex_1()
-                        .text_size(rems(0.8125))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(if is_filtered {
-                            theme().brand_text
-                        } else {
-                            theme().text
-                        })),
-                )
-                .child(
+            base.when(is_filtered && !is_selected, |el| {
+                el.bg(rgb(theme().brand_bg))
+            })
+            .child(icon(Icon::HeadTag, theme().brand))
+            .child(
+                elide(tr("HEAD (当前分支)", "HEAD (Current Branch)"))
+                    .flex_1()
+                    .text_size(rems(0.8125))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(if is_filtered {
+                        theme().brand_text
+                    } else {
+                        theme().text
+                    })),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(rems(0.7))
+                    .text_color(rgb(theme().subtle))
+                    .child(branch_label),
+            )
+            .when(is_filtered, |el| {
+                el.child(
                     div()
+                        .size(px(5.5))
                         .flex_shrink_0()
-                        .text_size(rems(0.7))
-                        .text_color(rgb(theme().subtle))
-                        .child(branch_label),
+                        .rounded(px(999.))
+                        .bg(rgb(theme().brand)),
                 )
-                .when(is_filtered, |el| {
-                    el.child(
-                        div()
-                            .size(px(5.5))
-                            .flex_shrink_0()
-                            .rounded(px(999.))
-                            .bg(rgb(theme().brand)),
-                    )
-                })
-                .on_click(window.listener_for(
+            })
+            .on_click(window.listener_for(
+                entity,
+                move |view, event: &gpui::ClickEvent, window, cx| {
+                    view.handle_branch_row_click(&click_row, event.click_count(), window, cx);
+                },
+            ))
+            .on_mouse_down(
+                MouseButton::Right,
+                window.listener_for(
                     entity,
-                    move |view, event: &gpui::ClickEvent, window, cx| {
-                        view.handle_branch_row_click(&click_row, event.click_count(), window, cx);
+                    move |view, event: &gpui::MouseDownEvent, window, cx| {
+                        view.branches_ui.selected_key = Some("head".to_owned());
+                        if let Some(snap) = &menu_snap {
+                            view.open_menu(
+                                MenuKind::BranchTreeItem(BranchMenuTarget::Head {
+                                    snapshot: snap.clone(),
+                                    current_label: menu_label.clone(),
+                                }),
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        }
+                        cx.stop_propagation();
                     },
-                ))
-                .on_mouse_down(
-                    MouseButton::Right,
-                    window.listener_for(
-                        entity,
-                        move |view, event: &gpui::MouseDownEvent, window, cx| {
-                            view.branches_ui.selected_key = Some("head".to_owned());
-                            if let Some(snap) = &menu_snap {
-                                view.open_menu(
-                                    MenuKind::BranchTreeItem(BranchMenuTarget::Head {
-                                        snapshot: snap.clone(),
-                                        current_label: menu_label.clone(),
-                                    }),
-                                    event.position,
-                                    window,
-                                    cx,
-                                );
-                            }
-                            cx.stop_propagation();
-                        },
-                    ),
-                )
-                .into_any_element()
+                ),
+            )
+            .into_any_element()
         }
         BranchTreeRow::AllBranches { .. } => {
             let is_filtered = active_filter.is_none();
-            base.when(is_filtered && !is_selected, |el| el.bg(rgb(theme().brand_bg)))
-                .child(icon(
-                    Icon::Stack,
-                    if is_filtered {
-                        theme().brand
+            base.when(is_filtered && !is_selected, |el| {
+                el.bg(rgb(theme().brand_bg))
+            })
+            .child(icon(
+                Icon::Stack,
+                if is_filtered {
+                    theme().brand
+                } else {
+                    theme().subtle
+                },
+            ))
+            .child(
+                elide(tr("全部分支", "All Branches"))
+                    .flex_1()
+                    .text_size(rems(0.8125))
+                    .font_weight(if is_filtered {
+                        FontWeight::MEDIUM
                     } else {
-                        theme().subtle
-                    },
-                ))
-                .child(
-                    elide(tr("全部分支", "All Branches"))
-                        .flex_1()
-                        .text_size(rems(0.8125))
-                        .font_weight(if is_filtered {
-                            FontWeight::MEDIUM
-                        } else {
-                            FontWeight::NORMAL
-                        })
-                        .text_color(rgb(if is_filtered {
-                            theme().brand_text
-                        } else {
-                            theme().muted
-                        })),
+                        FontWeight::NORMAL
+                    })
+                    .text_color(rgb(if is_filtered {
+                        theme().brand_text
+                    } else {
+                        theme().muted
+                    })),
+            )
+            .when(is_filtered, |el| {
+                el.child(
+                    div()
+                        .size(px(5.5))
+                        .flex_shrink_0()
+                        .rounded(px(999.))
+                        .bg(rgb(theme().brand)),
                 )
-                .when(is_filtered, |el| {
-                    el.child(
-                        div()
-                            .size(px(5.5))
-                            .flex_shrink_0()
-                            .rounded(px(999.))
-                            .bg(rgb(theme().brand)),
-                    )
-                })
-                .on_click(window.listener_for(
-                    entity,
-                    move |view, event: &gpui::ClickEvent, window, cx| {
-                        view.handle_branch_row_click(&click_row, event.click_count(), window, cx);
-                    },
-                ))
-                .into_any_element()
+            })
+            .on_click(window.listener_for(
+                entity,
+                move |view, event: &gpui::ClickEvent, window, cx| {
+                    view.handle_branch_row_click(&click_row, event.click_count(), window, cx);
+                },
+            ))
+            .into_any_element()
         }
         BranchTreeRow::Section {
             key,

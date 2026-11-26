@@ -1,6 +1,7 @@
 mod admin;
 mod app_menu;
 mod branches;
+mod change_menu;
 mod cherry_pick;
 mod code_editor;
 mod components;
@@ -72,6 +73,8 @@ actions!(
         LogExtendPrev,
         LogExtendNext,
         LogSelectAll,
+        ShowSelectedDiff,
+        EditSelectedSource,
         Quit
     ]
 );
@@ -169,6 +172,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-up", LogExtendPrev, Some("CommitLog")),
         KeyBinding::new("shift-down", LogExtendNext, Some("CommitLog")),
         KeyBinding::new(&format!("{mod_key}-a"), LogSelectAll, Some("CommitLog")),
+        KeyBinding::new(&format!("{mod_key}-d"), ShowSelectedDiff, Some("GitClient")),
+        KeyBinding::new(
+            &format!("{mod_key}-down"),
+            EditSelectedSource,
+            Some("GitClient"),
+        ),
         KeyBinding::new(&format!("{mod_key}-q"), Quit, None),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
@@ -190,6 +199,12 @@ pub struct DesktopView {
     palette_scroll: UniformListScrollHandle,
     adopt_nested_scroll: UniformListScrollHandle,
     overlay: Option<Overlay>,
+    main_window: Option<gpui::AnyWindowHandle>,
+    popup_menu: Option<gpui::WindowHandle<overlay::PopupMenuWindow>>,
+    popup_menu_visible: bool,
+    popup_menu_seq: u64,
+    #[cfg(target_os = "macos")]
+    popup_ns_window: Option<usize>,
     previous_focus: Option<FocusHandle>,
     notice: Option<String>,
     path_prompt_open: bool,
@@ -202,6 +217,7 @@ pub struct DesktopView {
     diff_scroll: UniformListScrollHandle,
     project_scroll: UniformListScrollHandle,
     history_details: HistoryDetails,
+    custom_tabs: change_menu::CustomTabsUi,
     branches_ui: branches::BranchesPanelUi,
     file_viewer_ui: file_viewer::FileViewerUi,
     daily_ui: DailyUi,
@@ -263,7 +279,8 @@ impl DesktopView {
         app_theme::set_theme(resolved_theme);
         let ui_scale = normalize_ui_scale(prefs.ui_scale);
         window.set_rem_size(px(16. * (ui_scale as f32 / 100.)));
-        let (workspace, updates) = Workspace::new(database_path());
+        let (mut workspace, updates) = Workspace::new(database_path());
+        workspace.show_changes_to_parents = prefs.show_changes_to_parents;
         let search = cx.new(|cx| {
             TextField::new(
                 tr("搜索提交说明、哈希…", "Search message or hash…"),
@@ -336,6 +353,13 @@ impl DesktopView {
             }
         })
         .detach();
+        let close_view = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            if let Some(view) = close_view.upgrade() {
+                view.update(cx, |view, cx| view.destroy_popup_menu(cx));
+            }
+            true
+        });
         cx.observe_window_appearance(window, |view, window, cx| {
             if view.theme_pref == ThemePreference::System {
                 let mode = theme_mode_from_appearance(window.appearance());
@@ -363,6 +387,12 @@ impl DesktopView {
             palette_scroll: UniformListScrollHandle::new(),
             adopt_nested_scroll: UniformListScrollHandle::new(),
             overlay: None,
+            main_window: Some(window.window_handle()),
+            popup_menu: None,
+            popup_menu_visible: false,
+            popup_menu_seq: 0,
+            #[cfg(target_os = "macos")]
+            popup_ns_window: None,
             previous_focus: None,
             notice: None,
             path_prompt_open: false,
@@ -375,6 +405,7 @@ impl DesktopView {
             diff_scroll: UniformListScrollHandle::new(),
             project_scroll: UniformListScrollHandle::new(),
             history_details: HistoryDetails::default(),
+            custom_tabs: change_menu::CustomTabsUi::default(),
             branches_ui,
             file_viewer_ui,
             daily_ui: DailyUi::default(),
@@ -461,6 +492,7 @@ impl DesktopView {
             commit_sign_off: self.commit_sign_off,
             commit_no_verify: self.commit_no_verify,
             commit_show_conventional: self.commit_show_conventional,
+            show_changes_to_parents: self.workspace.show_changes_to_parents,
         };
         let _ = prefs.save(&AppPreferences::default_path());
     }
@@ -606,6 +638,7 @@ impl DesktopView {
         }
         app_theme::set_theme(mode);
         self.file_viewer_ui.rehighlight_all(cx);
+        self.rehighlight_custom_tabs(cx);
         self.history_details.invalidate_patch();
         self.sync_history_view(cx);
         self.daily_ui.invalidate_patches();
@@ -682,6 +715,7 @@ impl DesktopView {
         self.preferred_group = group;
         if self.workspace.selected != Some(id) {
             self.commit_diff_expanded = false;
+            self.custom_tabs.clear();
             self.search
                 .update(cx, |search, cx| search.clear(window, cx));
             self.branches_ui
@@ -1329,111 +1363,103 @@ impl DesktopView {
                 let row_h = px(32.);
                 let list_h = (row_h * count as f32).min(max_h);
                 let weak_view = cx.weak_entity();
-                gpui::uniform_list(
-                    "command-palette-list",
-                    count,
-                    move |range, window, _cx| {
-                        let Some(entity) = weak_view.upgrade() else {
-                            return Vec::new();
-                        };
-                        range
-                            .filter_map(|idx| {
-                                let entry = entries.get(idx)?;
-                                let is_sel = idx == clamped_sel;
-                                let cmd = entry.cmd.clone();
-                                Some(
-                                    div()
-                                        .id(("palette-item", idx))
-                                        .role(Role::MenuItem)
-                                        .aria_selected(is_sel)
-                                        .relative()
-                                        .h(row_h)
-                                        .px(px(10.))
-                                        .rounded(px(6.))
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(8.))
-                                        .when(is_sel, |r| {
-                                            r.bg(rgb(theme().active)).child(selection_bar())
-                                        })
-                                        .hover(move |s| {
-                                            s.bg(rgb(if is_sel {
-                                                theme().active
-                                            } else {
-                                                theme().hover
-                                            }))
-                                        })
-                                        .child(icon(
-                                            entry.icon,
-                                            if is_sel {
-                                                theme().brand_text
-                                            } else {
-                                                theme().muted
-                                            },
-                                        ))
-                                        .child(
+                gpui::uniform_list("command-palette-list", count, move |range, window, _cx| {
+                    let Some(entity) = weak_view.upgrade() else {
+                        return Vec::new();
+                    };
+                    range
+                        .filter_map(|idx| {
+                            let entry = entries.get(idx)?;
+                            let is_sel = idx == clamped_sel;
+                            let cmd = entry.cmd.clone();
+                            Some(
+                                div()
+                                    .id(("palette-item", idx))
+                                    .role(Role::MenuItem)
+                                    .aria_selected(is_sel)
+                                    .relative()
+                                    .h(row_h)
+                                    .px(px(10.))
+                                    .rounded(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .when(is_sel, |r| {
+                                        r.bg(rgb(theme().active)).child(selection_bar())
+                                    })
+                                    .hover(move |s| {
+                                        s.bg(rgb(if is_sel {
+                                            theme().active
+                                        } else {
+                                            theme().hover
+                                        }))
+                                    })
+                                    .child(icon(
+                                        entry.icon,
+                                        if is_sel {
+                                            theme().brand_text
+                                        } else {
+                                            theme().muted
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .px(px(5.))
+                                            .py(px(1.))
+                                            .rounded(px(4.))
+                                            .bg(rgb(theme().card))
+                                            .text_size(px(10.5))
+                                            .text_color(rgb(theme().subtle))
+                                            .child(entry.category),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(8.))
+                                            .child(
+                                                elide(entry.title.clone())
+                                                    .text_color(rgb(theme().text))
+                                                    .when(is_sel, |t| {
+                                                        t.font_weight(FontWeight::MEDIUM)
+                                                    }),
+                                            )
+                                            .when_some(entry.subtitle.clone(), |r, sub| {
+                                                r.child(
+                                                    elide(sub)
+                                                        .flex_1()
+                                                        .text_size(px(11.))
+                                                        .text_color(rgb(theme().subtle)),
+                                                )
+                                            }),
+                                    )
+                                    .when_some(entry.shortcut.clone(), |r, sc| {
+                                        r.child(
                                             div()
                                                 .flex_shrink_0()
                                                 .px(px(5.))
                                                 .py(px(1.))
                                                 .rounded(px(4.))
-                                                .bg(rgb(theme().card))
+                                                .border_1()
+                                                .border_color(rgb(theme().border_strong))
                                                 .text_size(px(10.5))
-                                                .text_color(rgb(theme().subtle))
-                                                .child(entry.category),
+                                                .text_color(rgb(theme().muted))
+                                                .child(sc),
                                         )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(8.))
-                                                .child(
-                                                    elide(entry.title.clone())
-                                                        .text_color(rgb(theme().text))
-                                                        .when(is_sel, |t| {
-                                                            t.font_weight(FontWeight::MEDIUM)
-                                                        }),
-                                                )
-                                                .when_some(entry.subtitle.clone(), |r, sub| {
-                                                    r.child(
-                                                        elide(sub)
-                                                            .flex_1()
-                                                            .text_size(px(11.))
-                                                            .text_color(rgb(theme().subtle)),
-                                                    )
-                                                }),
-                                        )
-                                        .when_some(entry.shortcut.clone(), |r, sc| {
-                                            r.child(
-                                                div()
-                                                    .flex_shrink_0()
-                                                    .px(px(5.))
-                                                    .py(px(1.))
-                                                    .rounded(px(4.))
-                                                    .border_1()
-                                                    .border_color(rgb(theme().border_strong))
-                                                    .text_size(px(10.5))
-                                                    .text_color(rgb(theme().muted))
-                                                    .child(sc),
-                                            )
-                                        })
-                                        .on_click(window.listener_for(
-                                            &entity,
-                                            move |view, _, window, cx| {
-                                                view.execute_palette_command(
-                                                    cmd.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            },
-                                        )),
-                                )
-                            })
-                            .collect()
-                    },
-                )
+                                    })
+                                    .on_click(window.listener_for(
+                                        &entity,
+                                        move |view, _, window, cx| {
+                                            view.execute_palette_command(cmd.clone(), window, cx);
+                                        },
+                                    )),
+                            )
+                        })
+                        .collect()
+                })
                 .track_scroll(&self.palette_scroll)
                 .h(list_h)
                 .w_full()
@@ -2284,6 +2310,7 @@ impl Render for DesktopView {
         self.sync_sidebar_board_cache(cx);
         self.sync_container_discovery_dialog(window, cx);
         self.ensure_project_file_editors(window, cx);
+        self.ensure_custom_tab_editors(cx);
         self.ensure_branches_loaded_if_visible(cx);
         let viewport = window.viewport_size().width;
         let sidebar_width = self.sidebar_width_for(viewport);
@@ -2308,10 +2335,16 @@ impl Render for DesktopView {
             .text_size(rems(0.8125))
             .line_height(rems(1.22))
             .on_action(cx.listener(|view, _: &Dismiss, window, cx| {
-                if view.overlay.is_some() {
+                if view.popup_menu_visible {
+                    view.close_popup_menu(cx);
+                    view.focus.focus(window, cx);
+                } else if view.overlay.is_some() {
                     view.close_overlay(window, cx);
                 } else if view.dismiss_editor_bars(window, cx) {
                     // Closed find/replace or go-to-line bar inside the active code editor.
+                } else if let Some(active_id) = view.custom_tabs.active_id {
+                    view.custom_tabs.close(active_id);
+                    cx.notify();
                 } else if view.working_patch_open() {
                     view.dispatch_daily(DailyAction::CloseChange, cx);
                 } else if view.stash_patch_open() {
@@ -2341,6 +2374,16 @@ impl Render for DesktopView {
             }))
             .on_action(cx.listener(|view, _: &FocusPrevious, window, cx| {
                 view.advance_focus(true, window, cx);
+            }))
+            .on_action(cx.listener(|view, _: &ShowSelectedDiff, _, cx| {
+                if view.overlay.is_none() {
+                    view.trigger_selected_change_show_diff(cx);
+                }
+            }))
+            .on_action(cx.listener(|view, _: &EditSelectedSource, window, cx| {
+                if view.overlay.is_none() {
+                    view.trigger_selected_change_edit_source(window, cx);
+                }
             }))
             .on_action(cx.listener(|view, _: &OpenCommandPalette, window, cx| {
                 view.open_command_palette(window, cx);
@@ -2399,6 +2442,14 @@ impl Render for DesktopView {
                     cx.notify();
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _, _, cx| {
+                    if view.popup_menu_visible {
+                        view.close_popup_menu(cx);
+                    }
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|view, _, _, _| {

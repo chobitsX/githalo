@@ -191,6 +191,114 @@ pub fn update_index(
     lock.install(&index)
 }
 
+/// Apply a single diff block (`block_index`) into the Git index:
+/// - For `DiffSide::Unstaged` (`Index` vs `Working Tree`): stages only that block from Working Tree into Index.
+/// - For `DiffSide::Staged` (`HEAD` vs `Index`): unstages only that block by applying HEAD's block into Index.
+pub fn apply_diff_block_to_index(
+    worktree: &WorktreeTarget,
+    preview: &ChangeDiff,
+    block_index: usize,
+    append: bool,
+) -> Result<(), String> {
+    if worktree != &preview.worktree {
+        return Err(STALE_CHECKOUT.into());
+    }
+    if matches!(
+        preview.file.kind,
+        ChangeKind::Conflicted(_) | ChangeKind::TypeChanged | ChangeKind::Untracked
+    ) {
+        return Err("当前文件类型不支持按差异块更新暂存区".into());
+    }
+    let repo = Repo::open(worktree)?;
+    repo.verify_identity(&preview.identity)?;
+    let lock = repo.lock_index()?;
+    let scratch = repo.scratch()?;
+    let index = scratch.path().join("index");
+    repo.copy_index(&index)?;
+    let snapshot = repo.changes_for_file(Some(&index), &preview.file)?;
+    let confirmed = repo.confirm_diff(worktree, Some(&index), &snapshot, preview)?;
+    let before = repo.entries(Some(&index))?;
+
+    let path = &confirmed.file.path;
+    let existing_entry = single_entry(&before, path).cloned();
+    let (base_bytes, mode) = match existing_entry.as_ref() {
+        Some(entry) => {
+            let bytes = checked(
+                repo.command(Some(&index))
+                    .args(["cat-file", "blob", &entry.oid]),
+                "无法读取暂存区文件内容",
+            )?;
+            (bytes, entry.mode.clone())
+        }
+        None if confirmed.side == DiffSide::Staged
+            && matches!(confirmed.file.kind, ChangeKind::Deleted) =>
+        {
+            let paths: BTreeSet<&Path> = [path.as_path()].into_iter().collect();
+            let head_entries = repo.tree_entries(snapshot.head.oid.as_deref(), &paths)?;
+            let head_mode = single_entry(&head_entries, path)
+                .map(|e| e.mode.clone())
+                .unwrap_or_else(|| "100644".to_owned());
+            (Vec::new(), head_mode)
+        }
+        None => return Err("所选差异块缺少对应的暂存区文件".into()),
+    };
+
+    let updated_bytes = match confirmed.side {
+        DiffSide::Staged => crate::diff_apply::apply_diff_block_to_bytes(
+            &base_bytes,
+            &confirmed.text,
+            block_index,
+            append,
+        )?,
+        DiffSide::Unstaged => crate::diff_apply::apply_diff_block_to_left_bytes(
+            &base_bytes,
+            &confirmed.text,
+            block_index,
+        )?,
+    };
+
+    if updated_bytes == base_bytes {
+        return Err("选中的差异块未产生索引变更".into());
+    }
+
+    let blocks_count = crate::diff_apply::parse_diff_blocks(&confirmed.text).len();
+    let remove_from_index = confirmed.side == DiffSide::Staged
+        && matches!(confirmed.file.kind, ChangeKind::Added)
+        && updated_bytes.is_empty()
+        && blocks_count <= 1;
+
+    if remove_from_index {
+        let paths: BTreeSet<&Path> = [path.as_path()].into_iter().collect();
+        repo.set_paths(&index, &Entries::new(), &paths)?;
+    } else {
+        let oid_out = checked_input(
+            repo.command(Some(&index))
+                .args(["hash-object", "-w", "--stdin"]),
+            &updated_bytes,
+            "无法写入更新后的索引对象",
+        )?;
+        let new_oid = object_id(line(&oid_out)?)?;
+        let mut entry_data = Vec::new();
+        write_entry(&mut entry_data, &mode, &new_oid, 0, path);
+        checked_input(
+            repo.command(Some(&index))
+                .args(["update-index", "-z", "--index-info"]),
+            &entry_data,
+            "无法更新所选差异块的索引项",
+        )?;
+    }
+
+    let after = repo.entries(Some(&index))?;
+    check_changed_paths(&before, &after, [path.as_path()])?;
+    if before == after {
+        return Err("选中的差异块未产生索引变更".into());
+    }
+    let current = repo.changes_for_file(None, &preview.file)?;
+    repo.confirm_diff(worktree, None, &current, preview)?;
+    repo.verify_current(&preview.head)?;
+    lock.install(&index)
+}
+
 /// Atomically stage all matching unstaged files in `paths` into the index.
 pub fn batch_stage_paths(
     worktree: &WorktreeTarget,

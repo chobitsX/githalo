@@ -243,20 +243,7 @@ pub fn rollback_file(
 
     match (side, &file.kind) {
         (DiffSide::Unstaged, ChangeKind::Untracked) => {
-            let full = target.root.join(&file.path);
-            let meta = fs::symlink_metadata(&full)
-                .map_err(|e| format!("无法访问未跟踪路径 {}（{e}）", file.path.display()))?;
-            if meta.is_dir() {
-                if full.join(".git").exists() {
-                    return Err("未跟踪目录包含嵌套 Git 仓库，为安全起见拒绝自动删除".into());
-                }
-                fs::remove_dir_all(&full)
-                    .map_err(|e| format!("无法删除未跟踪目录 {}（{e}）", file.path.display()))?;
-            } else {
-                fs::remove_file(&full)
-                    .map_err(|e| format!("无法删除未跟踪文件 {}（{e}）", file.path.display()))?;
-            }
-            Ok(())
+            remove_untracked_path(&target.root, &file.path)
         }
         (DiffSide::Unstaged, _) => {
             let output = run(checkout
@@ -312,6 +299,155 @@ pub fn rollback_file(
             Ok(())
         }
     }
+}
+
+/// Batch rollback multiple uncommitted files in minimal Git subprocesses.
+///
+/// - Staged new files (not in `HEAD`) are removed from index & working tree via `git rm --force`.
+/// - Staged tracked files (in `HEAD`) are restored in both index & working tree to `HEAD`.
+/// - Unstaged tracked files are restored in working tree from index.
+/// - Untracked paths are removed safely from disk (refusing nested `.git` directories).
+pub fn rollback_files(
+    target: &WorktreeTarget,
+    expected_head: &ChangesHead,
+    items: &[(DiffSide, FileChange)],
+) -> Result<usize, String> {
+    if items.is_empty() {
+        return Ok(0);
+    }
+    for (_, file) in items {
+        verify_relative_path(&file.path)?;
+        if let Some(prev) = &file.previous_path {
+            verify_relative_path(prev)?;
+        }
+        if matches!(file.kind, ChangeKind::Conflicted(_)) {
+            return Err(format!(
+                "冲突文件 {} 请使用三方解冲突或中止当前操作，不能直接 Rollback",
+                file.path.display()
+            ));
+        }
+    }
+
+    let checkout = Checkout::read(target)?;
+    checkout.verify_head(expected_head)?;
+
+    let mut staged_paths: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut unstaged_tracked: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut untracked_paths: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut count = 0usize;
+    let mut seen_files: BTreeSet<PathBuf> = BTreeSet::new();
+
+    for (side, file) in items {
+        if seen_files.insert(file.path.clone()) {
+            count += 1;
+        }
+        match (side, &file.kind) {
+            (DiffSide::Staged, _) => {
+                staged_paths.insert(file.path.clone());
+                if let Some(prev) = &file.previous_path
+                    && matches!(file.kind, ChangeKind::Renamed)
+                {
+                    staged_paths.insert(prev.clone());
+                }
+            }
+            (DiffSide::Unstaged, ChangeKind::Untracked) => {
+                untracked_paths.insert(file.path.clone());
+            }
+            (DiffSide::Unstaged, _) => {
+                unstaged_tracked.insert(file.path.clone());
+            }
+        }
+    }
+
+    // Paths already rolled back to HEAD via `Staged` do not need a redundant worktree restore.
+    unstaged_tracked.retain(|p| !staged_paths.contains(p));
+    untracked_paths.retain(|p| !staged_paths.contains(p));
+
+    if !staged_paths.is_empty() {
+        let head_oid = expected_head.oid.as_deref();
+        let existing_in_head: BTreeSet<PathBuf> = if let Some(oid) = head_oid {
+            let output = run(checkout
+                .command()
+                .args(["ls-tree", "-r", "--name-only", "-z", oid, "--"])
+                .args(&staged_paths))?;
+            if !output.status.success() {
+                return Err(operation_failure("无法查询 HEAD 中的文件列表", &output));
+            }
+            let mut set = BTreeSet::new();
+            for raw in output.stdout.split(|&b| b == 0).filter(|s| !s.is_empty()) {
+                set.insert(PathBuf::from(os_string(raw)?));
+            }
+            set
+        } else {
+            BTreeSet::new()
+        };
+
+        let mut paths_in_head = Vec::new();
+        let mut paths_new = Vec::new();
+        for p in &staged_paths {
+            if existing_in_head.contains(p) {
+                paths_in_head.push(p.as_path());
+            } else {
+                paths_new.push(p.as_path());
+            }
+        }
+
+        if !paths_new.is_empty() {
+            let output = run(checkout
+                .write_command()
+                .args(["rm", "--force", "--quiet", "--"])
+                .args(&paths_new))?;
+            if !output.status.success() {
+                return Err(operation_failure("无法移除新暂存文件", &output));
+            }
+        }
+        if !paths_in_head.is_empty()
+            && let Some(oid) = head_oid
+        {
+            let output = run(checkout
+                .write_command()
+                .args(["restore", "--staged", "--worktree"])
+                .arg(format!("--source={oid}"))
+                .arg("--")
+                .args(&paths_in_head))?;
+            if !output.status.success() {
+                return Err(operation_failure("无法将已暂存文件回滚到 HEAD", &output));
+            }
+        }
+    }
+
+    if !unstaged_tracked.is_empty() {
+        let output = run(checkout
+            .write_command()
+            .args(["restore", "--worktree", "--"])
+            .args(&unstaged_tracked))?;
+        if !output.status.success() {
+            return Err(operation_failure("无法回滚工作区改动", &output));
+        }
+    }
+
+    for path in &untracked_paths {
+        remove_untracked_path(&target.root, path)?;
+    }
+
+    Ok(count)
+}
+
+fn remove_untracked_path(root: &Path, path: &Path) -> Result<(), String> {
+    let full = root.join(path);
+    let meta = fs::symlink_metadata(&full)
+        .map_err(|e| format!("无法访问未跟踪路径 {}（{e}）", path.display()))?;
+    if meta.is_dir() {
+        if full.join(".git").exists() {
+            return Err("未跟踪目录包含嵌套 Git 仓库，为安全起见拒绝自动删除".into());
+        }
+        fs::remove_dir_all(&full)
+            .map_err(|e| format!("无法删除未跟踪目录 {}（{e}）", path.display()))?;
+    } else {
+        fs::remove_file(&full)
+            .map_err(|e| format!("无法删除未跟踪文件 {}（{e}）", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Read the full raw commit message of `HEAD` (used to prefill Amend).

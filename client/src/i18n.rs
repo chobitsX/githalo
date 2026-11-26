@@ -216,6 +216,7 @@ pub struct AppPreferences {
     pub commit_sign_off: bool,
     pub commit_no_verify: bool,
     pub commit_show_conventional: bool,
+    pub show_changes_to_parents: bool,
 }
 
 /// Allowed UI zoom percentage presets (90% .. 130%).
@@ -255,6 +256,7 @@ impl Default for AppPreferences {
             commit_sign_off: false,
             commit_no_verify: false,
             commit_show_conventional: false,
+            show_changes_to_parents: false,
         }
     }
 }
@@ -324,6 +326,7 @@ impl AppPreferences {
                 "commit_sign_off" => prefs.commit_sign_off = parse_bool(value),
                 "commit_no_verify" => prefs.commit_no_verify = parse_bool(value),
                 "commit_show_conventional" => prefs.commit_show_conventional = parse_bool(value),
+                "show_changes_to_parents" => prefs.show_changes_to_parents = parse_bool(value),
                 _ => {}
             }
         }
@@ -350,7 +353,7 @@ impl AppPreferences {
             .collect::<Vec<_>>()
             .join(",");
         let content = format!(
-            "language={}\ntheme={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nshow_branches_drawer={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\n",
+            "language={}\ntheme={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nshow_branches_drawer={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\nshow_changes_to_parents={}\n",
             self.language.as_key(),
             self.theme.as_key(),
             normalize_ui_scale(self.ui_scale),
@@ -370,6 +373,7 @@ impl AppPreferences {
             self.commit_sign_off,
             self.commit_no_verify,
             self.commit_show_conventional,
+            self.show_changes_to_parents,
         );
         fs::write(path, content).map_err(|e| e.to_string())
     }
@@ -434,6 +438,7 @@ mod tests {
             commit_sign_off: true,
             commit_no_verify: true,
             commit_show_conventional: true,
+            show_changes_to_parents: true,
         };
         saved.save(&path).unwrap();
         assert_eq!(AppPreferences::load(&path), saved);

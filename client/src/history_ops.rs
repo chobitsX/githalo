@@ -4,8 +4,10 @@ use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
     fs,
-    path::{Path, PathBuf},
-    process::{Command, Output},
+    io::{Read, Write},
+    path::{Component, Path, PathBuf},
+    process::{Command, Output, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::{
@@ -14,6 +16,7 @@ use crate::{
         ref_exists, run, worktree_identity,
     },
     history::{self, ChangedFile, Commit},
+    rebase_ops::{self, RebaseStatus},
     staging::ChangesHead,
     worktree::WorktreeTarget,
 };
@@ -929,4 +932,692 @@ fn operation_failure(task: &str, output: &Output) -> String {
     } else {
         format!("{task}（{details}）")
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplySelectedChangesOutcome {
+    pub had_conflicts: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtractChangesOutcome {
+    pub rewritten_original_oid: String,
+    pub extracted_commit_oid: String,
+    pub new_head_oid: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DropChangesOutcome {
+    Dropped {
+        new_head_oid: String,
+    },
+    RebaseStopped {
+        status: Box<RebaseStatus>,
+        details: String,
+    },
+}
+
+fn validate_relative_path(path: &Path) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("文件路径不能为空".into());
+    }
+    for component in path.components() {
+        let Component::Normal(part) = component else {
+            return Err("文件路径必须位于当前工作树内".into());
+        };
+        if part == ".git" {
+            return Err("不允许操作 .git 内部目录".into());
+        }
+    }
+    Ok(())
+}
+
+fn run_piped(cmd: &mut Command, stdin_bytes: &[u8]) -> Result<Output, String> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().expect("piped Git stdin");
+    let mut stdout = child.stdout.take().expect("piped Git stdout");
+    let mut stderr = child.stderr.take().expect("piped Git stderr");
+    let (status, out, err) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            let _ = stdin.write_all(stdin_bytes);
+        });
+        let err_reader = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        });
+        let mut out = Vec::new();
+        let read_res = stdout.read_to_end(&mut out);
+        let _ = writer.join();
+        let err = err_reader.join().unwrap_or_default();
+        let status = read_res.and_then(|_| child.wait());
+        (status, out, err)
+    });
+    let status = status.map_err(|e| e.to_string())?;
+    Ok(Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
+}
+
+/// Apply (or reverse-apply) only the selected file changes from `oids` into the working tree
+/// without creating a commit, matching Rebased's "Cherry-Pick Selected Changes" (`reverse = false`)
+/// and "Revert Selected Changes" (`reverse = true`).
+pub fn apply_commit_file_changes(
+    target: &WorktreeTarget,
+    oids: &[String],
+    files: &[ChangedFile],
+    reverse: bool,
+    explicit_parent: Option<&str>,
+) -> Result<ApplySelectedChangesOutcome, String> {
+    if oids.is_empty() || files.is_empty() {
+        return Err("未选择提交或文件".into());
+    }
+    for file in files {
+        validate_relative_path(&file.path)?;
+        if let Some(old) = &file.previous_path {
+            validate_relative_path(old)?;
+        }
+    }
+    let checkout = Checkout::read(target)?;
+    checkout.ensure_idle()?;
+    let patch = history::build_files_patch(&target.root, oids, files, true, explicit_parent)?;
+    if patch.trim().is_empty() {
+        return Err("所选文件在此次提交中没有可应用的补丁差异".into());
+    }
+
+    let mut cmd = checkout.write_command();
+    cmd.args(["apply", "--3way"]);
+    if reverse {
+        cmd.arg("--reverse");
+    }
+    let output = run_piped(&mut cmd, patch.as_bytes())?;
+    if output.status.success() {
+        let verb = if reverse {
+            "反向还原"
+        } else {
+            "拣选应用"
+        };
+        let label = if files.len() == 1 {
+            files[0].path.display().to_string()
+        } else {
+            format!("{} 个文件", files.len())
+        };
+        return Ok(ApplySelectedChangesOutcome {
+            had_conflicts: false,
+            message: format!("已将 {label} 的选定更改{verb}到工作区"),
+        });
+    }
+
+    let details = command_details(&output);
+    let conflicts = checkout.unmerged_paths().unwrap_or_default();
+    if !conflicts.is_empty() || details.contains("with conflicts") {
+        let verb = if reverse {
+            "反向还原"
+        } else {
+            "拣选应用"
+        };
+        return Ok(ApplySelectedChangesOutcome {
+            had_conflicts: true,
+            message: format!(
+                "已将选定更改{verb}到工作区，但存在冲突，请在 Commit 页解决（{}）",
+                if conflicts.is_empty() {
+                    details
+                } else {
+                    join_paths(&conflicts)
+                }
+            ),
+        });
+    }
+
+    let task = if reverse {
+        "无法反向还原选定更改到工作区"
+    } else {
+        "无法将选定更改拣选到工作区"
+    };
+    Err(operation_failure(task, &output))
+}
+
+/// Overwrite the working-tree version of `files` with their content at commit `oid`
+/// (or remove the working-tree file if it did not exist at `oid`), matching Rebased's
+/// "Get from Revision".
+pub fn checkout_files_from_revision(
+    target: &WorktreeTarget,
+    oid: &str,
+    files: &[ChangedFile],
+) -> Result<String, String> {
+    if !is_oid(oid.as_bytes()) {
+        return Err("无效的提交 ID".into());
+    }
+    if files.is_empty() {
+        return Err("未选择文件".into());
+    }
+    let checkout = Checkout::read(target)?;
+    checkout.ensure_idle()?;
+
+    let mut restored = 0usize;
+    let mut removed = 0usize;
+    let mut to_restore: Vec<PathBuf> = Vec::new();
+    let mut to_remove: Vec<PathBuf> = Vec::new();
+
+    for file in files {
+        validate_relative_path(&file.path)?;
+        if history::revision_has_file(&target.root, oid, &file.path)? {
+            to_restore.push(file.path.clone());
+        } else {
+            to_remove.push(file.path.clone());
+        }
+    }
+
+    if !to_restore.is_empty() {
+        let mut cmd = checkout.write_command();
+        cmd.args(["restore", &format!("--source={oid}"), "--worktree", "--"]);
+        for path in &to_restore {
+            cmd.arg(path);
+        }
+        let output = run(&mut cmd)?;
+        if !output.status.success() {
+            return Err(operation_failure("无法从此修订恢复文件到工作区", &output));
+        }
+        restored = to_restore.len();
+    }
+
+    for path in &to_remove {
+        let abs = target.root.join(path);
+        if abs.exists() {
+            if abs.is_dir() {
+                return Err(format!("目标路径 {} 是目录，无法覆盖删除", path.display()));
+            }
+            fs::remove_file(&abs)
+                .map_err(|e| format!("无法删除本地文件 {}（{e}）", path.display()))?;
+            removed += 1;
+        }
+    }
+
+    let short = oid.get(..8).unwrap_or(oid);
+    let summary = match (restored, removed) {
+        (1, 0) => format!("已从 {short} 恢复 {} 到本地工作区", to_restore[0].display()),
+        (r, 0) => format!("已从 {short} 恢复 {r} 个文件到本地工作区"),
+        (0, 1) => format!("该修订已删除此文件，已移除本地 {}", to_remove[0].display()),
+        (0, d) => format!("已按修订 {short} 移除本地 {d} 个文件"),
+        (r, d) => format!("已从 {short} 恢复 {r} 个文件并移除 {d} 个本地文件"),
+    };
+    Ok(summary)
+}
+
+static TEMP_INDEX_SEQ: AtomicU64 = AtomicU64::new(1);
+
+struct TempIndexGuard(PathBuf);
+
+impl Drop for TempIndexGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+struct RawCommitMeta {
+    tree_oid: String,
+    author_name: String,
+    author_email: String,
+    author_date: String,
+    committer_name: String,
+    committer_email: String,
+    committer_date: String,
+    message: Vec<u8>,
+}
+
+fn read_raw_commit_meta(checkout: &Checkout, oid: &str) -> Result<RawCommitMeta, String> {
+    let data = checked(
+        checkout.command().args([
+            "log",
+            "-1",
+            "--no-show-signature",
+            "--no-color",
+            "--date=raw",
+            "--format=%T%x00%an%x00%ae%x00%ad%x00%cn%x00%ce%x00%cd%x00%B",
+            oid,
+            "--",
+        ]),
+        "无法读取提交元数据",
+    )?;
+    let mut parts = data.splitn(8, |&b| b == 0);
+    let mut next_str = || -> Result<String, String> {
+        let bytes = parts.next().ok_or("提交元数据不完整")?;
+        Ok(String::from_utf8_lossy(bytes).into_owned())
+    };
+    let tree_oid = next_str()?;
+    let author_name = next_str()?;
+    let author_email = next_str()?;
+    let author_date = next_str()?;
+    let committer_name = next_str()?;
+    let committer_email = next_str()?;
+    let committer_date = next_str()?;
+    let message = parts.next().ok_or("提交说明缺失")?.to_vec();
+    if !is_oid(tree_oid.as_bytes()) {
+        return Err("无效的树对象 ID".into());
+    }
+    Ok(RawCommitMeta {
+        tree_oid,
+        author_name,
+        author_email,
+        author_date,
+        committer_name,
+        committer_email,
+        committer_date,
+        message,
+    })
+}
+
+fn commit_tree_with_meta(
+    checkout: &Checkout,
+    tree_oid: &str,
+    parent_oid: Option<&str>,
+    meta: &RawCommitMeta,
+    message_override: Option<&[u8]>,
+) -> Result<String, String> {
+    let mut cmd = checkout.write_command();
+    cmd.args(["commit-tree", tree_oid]);
+    if let Some(parent) = parent_oid {
+        cmd.args(["-p", parent]);
+    }
+    cmd.env("GIT_AUTHOR_NAME", &meta.author_name)
+        .env("GIT_AUTHOR_EMAIL", &meta.author_email)
+        .env("GIT_AUTHOR_DATE", &meta.author_date)
+        .env("GIT_COMMITTER_NAME", &meta.committer_name)
+        .env("GIT_COMMITTER_EMAIL", &meta.committer_email)
+        .env("GIT_COMMITTER_DATE", &meta.committer_date);
+    let msg = message_override.unwrap_or(&meta.message);
+    let output = run_piped(&mut cmd, msg)?;
+    if !output.status.success() {
+        return Err(operation_failure("无法生成新提交对象", &output));
+    }
+    object_id(line_content(&output.stdout)?)
+}
+
+fn collect_affected_paths(files: &[ChangedFile]) -> Result<Vec<PathBuf>, String> {
+    let mut set = BTreeSet::new();
+    for file in files {
+        validate_relative_path(&file.path)?;
+        set.insert(file.path.clone());
+        if let Some(old) = &file.previous_path {
+            validate_relative_path(old)?;
+            set.insert(old.clone());
+        }
+    }
+    Ok(set.into_iter().collect())
+}
+
+/// Build a Git tree equal to `commit_oid`'s tree except every path in `affected_paths` is restored
+/// to its exact state in `parent_oid` (or removed for root commits / added files), using an
+/// isolated temporary `GIT_INDEX_FILE` without touching the working tree or real index.
+fn build_tree_without_selected_changes(
+    checkout: &Checkout,
+    commit_oid: &str,
+    parent_oid: Option<&str>,
+    affected_paths: &[PathBuf],
+) -> Result<String, String> {
+    let seq = TEMP_INDEX_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_index = std::env::temp_dir().join(format!(
+        "githalo-tree-split-{}-{seq}.idx",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&tmp_index);
+    let _guard = TempIndexGuard(tmp_index.clone());
+
+    let read_out = run(checkout
+        .write_command()
+        .env("GIT_INDEX_FILE", &tmp_index)
+        .args(["read-tree", commit_oid]))?;
+    if !read_out.status.success() {
+        return Err(operation_failure("无法载入提交树到临时索引", &read_out));
+    }
+
+    let mut index_info_lines = Vec::new();
+    let mut to_remove = Vec::new();
+
+    for path in affected_paths {
+        // Guard against submodule gitlink entries in either commit or parent.
+        for check_rev in [Some(commit_oid), parent_oid].into_iter().flatten() {
+            let ls = checked(
+                checkout
+                    .command()
+                    .args(["ls-tree", "--full-tree", "-z", check_rev, "--"])
+                    .arg(path),
+                "无法读取提交树条目",
+            )?;
+            if !ls.is_empty() && ls.starts_with(b"160000 ") {
+                return Err("暂不支持拆分或丢弃子模块（submodule）条目的变更".into());
+            }
+        }
+
+        if let Some(parent) = parent_oid {
+            let ls = checked(
+                checkout
+                    .command()
+                    .args(["ls-tree", "--full-tree", "-z", parent, "--"])
+                    .arg(path),
+                "无法读取父提交树条目",
+            )?;
+            let entry = ls.strip_suffix(b"\0").unwrap_or(&ls);
+            if entry.is_empty() {
+                to_remove.push(path.clone());
+            } else {
+                // `ls-tree` outputs `<mode> <type> <object>\t<path>`.
+                // `update-index --index-info` accepts `<mode> <object>\t<path>\n` (or `-z`).
+                let (header, entry_path) =
+                    git::split_at_byte(entry, b'\t').ok_or("父提交树条目格式无效")?;
+                let mut fields = header.split(|&b| b == b' ');
+                let mode = fields.next().ok_or("父提交树条目缺少权限模式")?;
+                let _kind = fields.next().ok_or("父提交树条目缺少对象类型")?;
+                let oid = fields.next().ok_or("父提交树条目缺少对象 ID")?;
+                index_info_lines.extend_from_slice(mode);
+                index_info_lines.push(b' ');
+                index_info_lines.extend_from_slice(oid);
+                index_info_lines.push(b'\t');
+                index_info_lines.extend_from_slice(entry_path);
+                index_info_lines.push(0);
+            }
+        } else {
+            to_remove.push(path.clone());
+        }
+    }
+
+    if !to_remove.is_empty() {
+        let mut cmd = checkout.write_command();
+        cmd.env("GIT_INDEX_FILE", &tmp_index)
+            .args(["update-index", "--force-remove", "--"]);
+        for path in &to_remove {
+            cmd.arg(path);
+        }
+        let out = run(&mut cmd)?;
+        if !out.status.success() {
+            return Err(operation_failure("无法从临时索引移除选定路径", &out));
+        }
+    }
+
+    if !index_info_lines.is_empty() {
+        let mut cmd = checkout.write_command();
+        cmd.env("GIT_INDEX_FILE", &tmp_index)
+            .args(["update-index", "-z", "--index-info"]);
+        let out = run_piped(&mut cmd, &index_info_lines)?;
+        if !out.status.success() {
+            return Err(operation_failure(
+                "无法在临时索引中恢复父提交文件状态",
+                &out,
+            ));
+        }
+    }
+
+    let write_out = run(checkout
+        .write_command()
+        .env("GIT_INDEX_FILE", &tmp_index)
+        .arg("write-tree"))?;
+    if !write_out.status.success() {
+        return Err(operation_failure("无法写出拆分后的提交树", &write_out));
+    }
+    object_id(line_content(&write_out.stdout)?)
+}
+
+fn validate_editable_ancestor_chain(
+    checkout: &Checkout,
+    commit_oid: &str,
+    head_oid: &str,
+    selected_files: &[ChangedFile],
+) -> Result<(Commit, Vec<String>), String> {
+    if !is_oid(commit_oid.as_bytes()) {
+        return Err("无效的提交 ID".into());
+    }
+    if selected_files.is_empty() {
+        return Err("未选择要操作的文件".into());
+    }
+    let commit = checkout.commit_metadata(commit_oid)?;
+    if commit.parents.len() > 1 {
+        return Err("不支持对合并提交执行部分变更拆分或丢弃".into());
+    }
+    // Check commit_oid is an ancestor of HEAD.
+    let anc = run(checkout
+        .command()
+        .args(["merge-base", "--is-ancestor", commit_oid, head_oid]))?;
+    if !anc.status.success() {
+        return Err("只能对当前分支（HEAD）历史链上的提交执行此操作".into());
+    }
+
+    let all_files = history::changed_files(&checkout.worktree.root, commit_oid)?;
+    let selected_paths: BTreeSet<&Path> = selected_files.iter().map(|f| f.path.as_path()).collect();
+    if all_files.is_empty() || selected_paths.len() >= all_files.len() {
+        return Err("所选更改已包含该提交的全部文件，请改用整条提交操作".into());
+    }
+
+    // List commits in `commit_oid..head_oid` in oldest -> newest order and ensure no merges in between.
+    let mut descendants = Vec::new();
+    if commit_oid != head_oid {
+        let out = checked(
+            checkout.command().args([
+                "rev-list",
+                "--reverse",
+                "--parents",
+                &format!("{commit_oid}..{head_oid}"),
+            ]),
+            "无法读取后续提交链",
+        )?;
+        for line in String::from_utf8_lossy(&out).lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.is_empty() {
+                continue;
+            }
+            if parts.len() > 2 {
+                return Err("该提交与 HEAD 之间存在合并提交，无法安全改写线性历史".into());
+            }
+            descendants.push(parts[0].to_owned());
+        }
+    }
+    Ok((commit, descendants))
+}
+
+/// Extract selected file changes from `commit_oid` into a brand-new commit right after it,
+/// matching Rebased's in-memory `GitExtractSelectedChangesOperation`.
+///
+/// Because `first_commit` + `second_commit` produces the exact same tree as the original
+/// `commit_oid`, every descendant commit up to `HEAD` keeps its tree untouched and the working
+/// tree / index require zero modification and can never conflict.
+pub fn extract_selected_changes(
+    target: &WorktreeTarget,
+    commit_oid: &str,
+    files: &[ChangedFile],
+    new_message: &str,
+) -> Result<ExtractChangesOutcome, String> {
+    let trimmed_msg = new_message.trim();
+    if trimmed_msg.is_empty() {
+        return Err("请输入新提交的说明".into());
+    }
+    let checkout = Checkout::read(target)?;
+    checkout.ensure_idle()?;
+    let head = checkout.head()?;
+    let head_oid = head.oid.as_deref().ok_or("当前分支尚无提交")?;
+    let (commit, descendants) =
+        validate_editable_ancestor_chain(&checkout, commit_oid, head_oid, files)?;
+    let parent_oid = commit.parents.first().map(String::as_str);
+    let affected_paths = collect_affected_paths(files)?;
+
+    let target_meta = read_raw_commit_meta(&checkout, commit_oid)?;
+    let remaining_tree_oid =
+        build_tree_without_selected_changes(&checkout, commit_oid, parent_oid, &affected_paths)?;
+    if remaining_tree_oid == target_meta.tree_oid {
+        return Err("所选文件在该提交中没有可拆分的差异".into());
+    }
+    if let Some(parent) = parent_oid {
+        let parent_meta = read_raw_commit_meta(&checkout, parent)?;
+        if remaining_tree_oid == parent_meta.tree_oid {
+            return Err("拆分后原提交将为空，请选择部分变更".into());
+        }
+    }
+
+    // 1) Rewritten original commit without the selected changes.
+    let first_commit = commit_tree_with_meta(
+        &checkout,
+        &remaining_tree_oid,
+        parent_oid,
+        &target_meta,
+        None,
+    )?;
+    // 2) Extracted commit restoring the original commit's tree on top of `first_commit`.
+    let mut msg_bytes = trimmed_msg.as_bytes().to_vec();
+    msg_bytes.push(b'\n');
+    let second_commit = commit_tree_with_meta(
+        &checkout,
+        &target_meta.tree_oid,
+        Some(&first_commit),
+        &target_meta,
+        Some(&msg_bytes),
+    )?;
+
+    // 3) Re-parent every descendant commit in `commit_oid..HEAD` without modifying any tree.
+    let mut prev = second_commit.clone();
+    for desc_oid in &descendants {
+        let desc_meta = read_raw_commit_meta(&checkout, desc_oid)?;
+        prev = commit_tree_with_meta(
+            &checkout,
+            &desc_meta.tree_oid,
+            Some(&prev),
+            &desc_meta,
+            None,
+        )?;
+    }
+
+    // 4) Atomically advance HEAD via CAS (`old_head` guard).
+    checkout.verify_head(&head)?;
+    let update = run(checkout.write_command().args([
+        "update-ref",
+        "-m",
+        "githalo: extract selected changes",
+        "HEAD",
+        &prev,
+        head_oid,
+    ]))?;
+    if !update.status.success() {
+        return Err(operation_failure("无法更新分支指针", &update));
+    }
+
+    Ok(ExtractChangesOutcome {
+        rewritten_original_oid: first_commit,
+        extracted_commit_oid: second_commit,
+        new_head_oid: prev,
+    })
+}
+
+/// Drop selected file changes from `commit_oid`, matching Rebased's "Drop Selected Changes".
+/// - When `commit_oid == HEAD`: rewrites HEAD cleanly and syncs only the affected paths (refusing
+///   if those paths have uncommitted edits).
+/// - When `commit_oid != HEAD`: requires a clean working tree and replays descendants via
+///   `git rebase --onto`, handing any conflict smoothly to the standard Rebase recovery banner.
+pub fn drop_selected_changes(
+    target: &WorktreeTarget,
+    commit_oid: &str,
+    files: &[ChangedFile],
+) -> Result<DropChangesOutcome, String> {
+    let checkout = Checkout::read(target)?;
+    checkout.ensure_idle()?;
+    let head = checkout.head()?;
+    let head_oid = head.oid.as_deref().ok_or("当前分支尚无提交")?;
+    let (commit, descendants) =
+        validate_editable_ancestor_chain(&checkout, commit_oid, head_oid, files)?;
+    let parent_oid = commit.parents.first().map(String::as_str);
+    let affected_paths = collect_affected_paths(files)?;
+
+    if commit_oid == head_oid {
+        // Verify none of the affected paths have dirty staged/unstaged edits so we never lose work.
+        let mut status_cmd = checkout.command();
+        status_cmd.args(["status", "--porcelain=v1", "-z", "--"]);
+        for path in &affected_paths {
+            status_cmd.arg(path);
+        }
+        let dirty = checked(&mut status_cmd, "无法检查受影响文件的工作区状态")?;
+        if !dirty.is_empty() {
+            return Err(
+                "所选文件在工作区或暂存区有未提交改动，请先暂存、提交或还原后再丢弃".into(),
+            );
+        }
+    } else if checkout.dirty_file_count()? > 0 {
+        return Err("改写较早历史提交前，请先提交或暂存（Stash）当前工作区修改".into());
+    }
+
+    let target_meta = read_raw_commit_meta(&checkout, commit_oid)?;
+    let remaining_tree_oid =
+        build_tree_without_selected_changes(&checkout, commit_oid, parent_oid, &affected_paths)?;
+    if remaining_tree_oid == target_meta.tree_oid {
+        return Err("所选文件在该提交中没有可丢弃的差异".into());
+    }
+    let new_target_commit = commit_tree_with_meta(
+        &checkout,
+        &remaining_tree_oid,
+        parent_oid,
+        &target_meta,
+        None,
+    )?;
+
+    checkout.verify_head(&head)?;
+
+    if descendants.is_empty() {
+        let update = run(checkout.write_command().args([
+            "update-ref",
+            "-m",
+            "githalo: drop selected changes",
+            "HEAD",
+            &new_target_commit,
+            head_oid,
+        ]))?;
+        if !update.status.success() {
+            return Err(operation_failure("无法更新 HEAD 提交", &update));
+        }
+        // Sync only the affected paths in both index and working tree; untouched dirty files stay intact.
+        for path in &affected_paths {
+            if history::revision_has_file(&checkout.worktree.root, &new_target_commit, path)? {
+                let out = run(checkout
+                    .write_command()
+                    .args(["restore", "--source=HEAD", "--staged", "--worktree", "--"])
+                    .arg(path))?;
+                if !out.status.success() {
+                    return Err(operation_failure("已更新提交，但同步工作区文件失败", &out));
+                }
+            } else {
+                let out = run(checkout
+                    .write_command()
+                    .args(["rm", "-f", "--ignore-unmatch", "--"])
+                    .arg(path))?;
+                if !out.status.success() {
+                    return Err(operation_failure("已更新提交，但清理新增文件失败", &out));
+                }
+                let abs = checkout.worktree.root.join(path);
+                if abs.is_file() {
+                    let _ = fs::remove_file(abs);
+                }
+            }
+        }
+        return Ok(DropChangesOutcome::Dropped {
+            new_head_oid: new_target_commit,
+        });
+    }
+
+    // Earlier commit: replay descendants onto `new_target_commit` via `git rebase --onto`.
+    let output =
+        run(checkout
+            .write_command()
+            .args(["rebase", "--onto", &new_target_commit, commit_oid]))?;
+    if output.status.success() {
+        let updated = checkout.head()?;
+        let new_head_oid = updated.oid.ok_or("改写完成后无法读取当前 HEAD")?;
+        return Ok(DropChangesOutcome::Dropped { new_head_oid });
+    }
+    if let Ok(Some(status)) = rebase_ops::read_state(target) {
+        return Ok(DropChangesOutcome::RebaseStopped {
+            status: Box::new(status),
+            details: command_details(&output),
+        });
+    }
+    Err(operation_failure("无法从历史提交中丢弃选定更改", &output))
 }

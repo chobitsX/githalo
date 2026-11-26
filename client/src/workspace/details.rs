@@ -26,6 +26,8 @@ impl Workspace {
         self.history_limit = history::RECENT_LIMIT;
         self.changes.clear();
         self.changes_contiguous = true;
+        self.parent_changes.clear();
+        self.selected_file_parent = None;
         self.history_loading = false;
         self.changes_loading = false;
         self.expanded_dirs.clear();
@@ -130,6 +132,8 @@ impl Workspace {
             self.changes_loading = false;
             self.changes.clear();
             self.changes_contiguous = true;
+            self.parent_changes.clear();
+            self.selected_file_parent = None;
             self.close_diff();
         }
     }
@@ -170,6 +174,7 @@ impl Workspace {
         if !same_selection {
             self.close_diff();
             self.changes.clear();
+            self.parent_changes.clear();
             self.selected_commit_bodies.clear();
             self.selected_commit_refs.clear();
             self.changes_contiguous = true;
@@ -184,6 +189,7 @@ impl Workspace {
         self.changes_loading = !same_selection || self.changes.is_empty();
         let changes_root = root.clone();
         let changes_oids = ordered.clone();
+        let include_parents = self.show_changes_to_parents;
         let latest_changes = self.latest_changes_request.clone();
         self.runtime.detail.run(move || {
             if latest_changes.load(Ordering::Relaxed) != tag {
@@ -191,7 +197,11 @@ impl Workspace {
             }
             Event::Changes(
                 tag,
-                history::changed_files_for_commits(&changes_root, &changes_oids),
+                history::changed_files_for_commits_with_parents(
+                    &changes_root,
+                    &changes_oids,
+                    include_parents,
+                ),
             )
         });
 
@@ -230,13 +240,35 @@ impl Workspace {
                 self.changes = bundle.files;
                 self.selected_commit_bodies = bundle.bodies;
                 self.changes_contiguous = bundle.contiguous;
+                self.parent_changes = bundle.parent_groups;
             }
             Err(e) => {
                 self.changes.clear();
                 self.selected_commit_bodies.clear();
                 self.changes_contiguous = true;
+                self.parent_changes.clear();
                 self.message = Some(format!("无法读取所选提交的变更（{e}）"));
             }
+        }
+    }
+
+    pub(super) fn set_show_changes_to_parents(&mut self, show: bool) {
+        if self.show_changes_to_parents == show {
+            return;
+        }
+        self.show_changes_to_parents = show;
+        if !show {
+            self.parent_changes.clear();
+            if self.selected_file_parent.is_some() {
+                self.close_diff();
+            }
+            return;
+        }
+        if self.selected_commits.len() == 1 {
+            let oid = self.selected_commits[0].clone();
+            let primary = self.selected_commit.clone();
+            let anchor = self.selection_anchor.clone();
+            self.select_commits(&[oid], primary.as_deref(), anchor.as_deref());
         }
     }
 
@@ -255,6 +287,7 @@ impl Workspace {
             return;
         };
         self.selected_file = Some(path.to_owned());
+        self.selected_file_parent = None;
         self.diff = None;
         self.diff_loading = true;
         let tag = self.next_id();
@@ -272,11 +305,48 @@ impl Workspace {
         });
     }
 
+    pub(super) fn select_parent_file(&mut self, parent_oid: &str, path: &Path) {
+        let Some(target) = self.current_target() else {
+            return;
+        };
+        let Some(oid) = self.selected_commit.clone() else {
+            return;
+        };
+        let Some(file) = self
+            .parent_changes
+            .iter()
+            .find(|g| g.parent_oid == parent_oid)
+            .and_then(|g| g.files.iter().find(|f| f.path == path))
+            .cloned()
+        else {
+            return;
+        };
+        self.selected_file = Some(path.to_owned());
+        self.selected_file_parent = Some(parent_oid.to_owned());
+        self.diff = None;
+        self.diff_loading = true;
+        let tag = self.next_id();
+        self.patch_request = tag;
+        self.latest_patch_request.store(tag, Ordering::Relaxed);
+        let latest_patch = self.latest_patch_request.clone();
+        let parent = parent_oid.to_owned();
+        self.runtime.detail.run(move || {
+            if latest_patch.load(Ordering::Relaxed) != tag {
+                return Event::Patch(tag, Ok(String::new()));
+            }
+            Event::Patch(
+                tag,
+                history::file_diff_to_parent(&target.root, &parent, &oid, &file),
+            )
+        });
+    }
+
     pub(super) fn close_diff(&mut self) {
         self.patch_request = self.next_id();
         self.latest_patch_request
             .store(self.patch_request, Ordering::Relaxed);
         self.selected_file = None;
+        self.selected_file_parent = None;
         self.diff = None;
         self.diff_loading = false;
     }

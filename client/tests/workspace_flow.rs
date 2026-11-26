@@ -1391,13 +1391,7 @@ fn group_fetch_fast_path_skips_detached_subrepos_and_batch_imports_many_repos() 
     assert_eq!(fetching_count, 2);
 
     harness.wait("finish group fetch on tracked repos", |ws| {
-        settled(ws)
-            && ws
-                .repos
-                .iter()
-                .filter(|r| r.counts == behind(1))
-                .count()
-                == 2
+        settled(ws) && ws.repos.iter().filter(|r| r.counts == behind(1)).count() == 2
     });
     assert_eq!(harness.workspace.batch_fetch_progress(), None);
 }

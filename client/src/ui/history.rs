@@ -9,7 +9,8 @@ use std::sync::Arc;
 use githalo::i18n::{is_zh, tr};
 use githalo::syntax::{self, SyntaxSpan};
 use githalo::workspace::{
-    Action, ChangedFile, Commit, CommitRef, CommitRefKind, DailyAction, Workspace, WorktreeId,
+    Action, ChangedFile, Commit, CommitRef, CommitRefKind, DailyAction, ParentChangesGroup,
+    Workspace, WorktreeId,
 };
 use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, CursorStyle, DispatchPhase, Div, FontStyle,
@@ -20,6 +21,7 @@ use gpui::{
 
 use super::DesktopView;
 use super::branches::short_branch_display;
+use super::change_menu::{CommitChangeDirTarget, CommitChangeFileTarget};
 use super::components::*;
 use super::file_icons::{file_type_icon, folder_type_icon};
 use super::graph;
@@ -31,20 +33,28 @@ impl DesktopView {
         let working_diff = self.working_patch_open();
         let stash_diff = self.stash_patch_open();
         let shelf_diff = self.shelf_patch_open();
+        let custom_tab_active =
+            self.custom_tabs.active().is_some() && !working_diff && !stash_diff && !shelf_diff;
         let has_commit_file = self.workspace.selected_file.is_some();
         let commit_diff = self.commit_diff_expanded
             && has_commit_file
+            && !custom_tab_active
             && !working_diff
             && !stash_diff
             && !shelf_diff;
         let active_project_file = self.active_open_project_file().cloned();
         let project_file_active = active_project_file.is_some()
+            && !custom_tab_active
             && !working_diff
             && !stash_diff
             && !shelf_diff
             && !commit_diff;
-        let log_active =
-            !working_diff && !stash_diff && !shelf_diff && !commit_diff && !project_file_active;
+        let log_active = !custom_tab_active
+            && !working_diff
+            && !stash_diff
+            && !shelf_diff
+            && !commit_diff
+            && !project_file_active;
         let branches_panel_width = self.branches_ui.panel_width(available);
         let branches_occupied = if self.show_branches_panel {
             branches_panel_width + px(4.)
@@ -107,6 +117,7 @@ impl DesktopView {
                             .when(!log_active, |tab| {
                                 tab.on_click(cx.listener(|view, _, _, cx| {
                                     view.commit_diff_expanded = false;
+                                    view.custom_tabs.active_id = None;
                                     if view.workspace.active_project_file.is_some() {
                                         view.dispatch(Action::ActivateProjectFile(None), cx);
                                     }
@@ -249,6 +260,7 @@ impl DesktopView {
                             .child(elide(tab_label).max_w(px(180.)))
                             .when(!commit_diff, |tab| {
                                 tab.on_click(cx.listener(|view, _, _, cx| {
+                                    view.custom_tabs.active_id = None;
                                     if view.stash_patch_open() {
                                         view.show_stash_patch(false, cx);
                                     }
@@ -363,6 +375,7 @@ impl DesktopView {
                             .on_click(cx.listener(|view, _, _, cx| view.close_shelf_patch(cx))),
                         )
                     })
+                    .children(self.render_custom_main_tab_strip(cx))
                     .child(div().flex_1())
                     .when(log_active, |tabs| {
                         let bcol = self.show_branches_panel;
@@ -465,6 +478,8 @@ impl DesktopView {
                 self.stash_patch(available, cx)
             } else if shelf_diff {
                 self.shelf_patch(available, cx)
+            } else if let Some(tab) = self.custom_tabs.active() {
+                self.render_active_custom_tab(tab, cx)
             } else if commit_diff && let Some(path) = self.workspace.selected_file.as_deref() {
                 self.expanded_commit_patch(path, cx)
             } else if let Some(open) = active_project_file.as_ref() {
@@ -1725,7 +1740,7 @@ impl DesktopView {
     }
 
     fn changed_files(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.workspace.changes.is_empty() {
+        if self.workspace.changes.is_empty() && self.workspace.parent_changes.is_empty() {
             let is_multi = self.workspace.selected_commits.len() > 1;
             return empty(if self.workspace.changes_loading {
                 tr("正在读取变更文件…", "Loading changed files…")
@@ -1779,11 +1794,97 @@ impl DesktopView {
                         depth,
                     } => {
                         let file = self.workspace.changes.get(*source_index)?;
-                        Some(self.change_file(file, *source_index, visible_index, *depth, cx))
+                        Some(self.change_file(file, *source_index, visible_index, *depth, None, cx))
+                    }
+                    ChangeRow::ParentHeader {
+                        group_index,
+                        parent_index,
+                        parent_oid,
+                        file_count,
+                        expanded,
+                    } => Some(self.change_parent_header(
+                        *group_index,
+                        *parent_index,
+                        parent_oid,
+                        *file_count,
+                        *expanded,
+                        cx,
+                    )),
+                    ChangeRow::ParentFile {
+                        group_index,
+                        file_index,
+                        depth,
+                    } => {
+                        let group = self.workspace.parent_changes.get(*group_index)?;
+                        let file = group.files.get(*file_index)?;
+                        Some(self.change_file(
+                            file,
+                            1_000_000 + group_index * 10_000 + file_index,
+                            visible_index,
+                            *depth,
+                            Some(group.parent_oid.clone()),
+                            cx,
+                        ))
                     }
                 }
             })
             .collect()
+    }
+
+    fn active_selected_commit_oids(&self) -> Vec<String> {
+        if !self.workspace.selected_commits.is_empty() {
+            self.workspace.selected_commits.clone()
+        } else {
+            self.workspace.selected_commit.iter().cloned().collect()
+        }
+    }
+
+    fn change_parent_header(
+        &self,
+        group_index: usize,
+        parent_index: usize,
+        parent_oid: &str,
+        file_count: usize,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let short = short_oid(parent_oid);
+        let label = if is_zh() {
+            format!("相对父提交 #{parent_index} ({short}) · {file_count} 个文件")
+        } else {
+            format!("Changes to parent #{parent_index} ({short}) · {file_count}")
+        };
+        let key = parent_oid.to_owned();
+        file_row(0)
+            .id(("change-parent-group", group_index))
+            .role(Role::TreeItem)
+            .aria_label(label.clone())
+            .aria_expanded(expanded)
+            .tab_index(0)
+            .mt(px(4.))
+            .bg(rgb(theme().card))
+            .hover(|style| style.bg(rgb(theme().hover)))
+            .child(icon(
+                if expanded {
+                    Icon::ChevronDown
+                } else {
+                    Icon::ChevronRight
+                },
+                theme().subtle,
+            ))
+            .child(icon(Icon::Branch, theme().brand_text))
+            .child(
+                elide(label)
+                    .flex_1()
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme().muted)),
+            )
+            .on_click(cx.listener(move |view, _, _, cx| {
+                view.history_details.changes.toggle_parent(&key);
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     fn change_directory(
@@ -1794,6 +1895,7 @@ impl DesktopView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let path: Arc<Path> = Arc::from(path);
+        let ctx_path = path.to_path_buf();
         let name = file_name(&path);
         file_row(depth)
             .id(path.clone())
@@ -1820,6 +1922,32 @@ impl DesktopView {
                     cx.notify();
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |view, event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let files: Vec<ChangedFile> = view
+                        .workspace
+                        .changes
+                        .iter()
+                        .filter(|f| f.path.starts_with(&ctx_path))
+                        .cloned()
+                        .collect();
+                    let target = CommitChangeDirTarget {
+                        oids: view.active_selected_commit_oids(),
+                        dir_path: ctx_path.clone(),
+                        files,
+                        parent_oid: None,
+                        total_commit_files: view.workspace.changes.len(),
+                    };
+                    view.open_menu(
+                        MenuKind::CommitChangedDir(target),
+                        event.position,
+                        window,
+                        cx,
+                    );
+                }),
+            )
             .into_any_element()
     }
 
@@ -1829,10 +1957,12 @@ impl DesktopView {
         source_index: usize,
         visible_index: usize,
         depth: usize,
+        parent_oid: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let path = file.path.clone();
-        let selected = self.workspace.selected_file.as_ref() == Some(&path);
+        let selected = self.workspace.selected_file.as_ref() == Some(&path)
+            && self.workspace.selected_file_parent == parent_oid;
         let name = match &file.previous_path {
             Some(old) => format!("{} → {}", file_name(old), file_name(&path)),
             None => file_name(&path),
@@ -1848,6 +1978,10 @@ impl DesktopView {
             |old| format!("{} → {}", old.display(), path.display()),
         );
         let hover_loc = location.clone();
+        let click_path = path.clone();
+        let click_parent = parent_oid.clone();
+        let ctx_file = file.clone();
+        let ctx_parent = parent_oid;
         file_row(depth)
             .id(("change-file", source_index))
             .role(Role::TreeItem)
@@ -1891,17 +2025,47 @@ impl DesktopView {
                     .child(file.status.clone()),
             )
             .on_click(cx.listener(move |view, event: &gpui::ClickEvent, _, cx| {
-                let file_changed = view.workspace.selected_file.as_ref() != Some(&path);
-                view.dispatch(Action::SelectFile(path.clone()), cx);
-                if file_changed && view.workspace.selected_file.as_ref() == Some(&path) {
+                let file_changed = view.workspace.selected_file.as_ref() != Some(&click_path)
+                    || view.workspace.selected_file_parent != click_parent;
+                if let Some(parent) = click_parent.clone() {
+                    view.dispatch(
+                        Action::SelectParentFile {
+                            parent_oid: parent,
+                            path: click_path.clone(),
+                        },
+                        cx,
+                    );
+                } else {
+                    view.dispatch(Action::SelectFile(click_path.clone()), cx);
+                }
+                if file_changed && view.workspace.selected_file.as_ref() == Some(&click_path) {
                     view.change_scroll
                         .scroll_to_item(visible_index, ScrollStrategy::Nearest);
                 }
                 if event.click_count() >= 2 {
+                    view.custom_tabs.active_id = None;
                     view.commit_diff_expanded = true;
                     cx.notify();
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |view, event: &gpui::MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    let target = CommitChangeFileTarget {
+                        oids: view.active_selected_commit_oids(),
+                        file: ctx_file.clone(),
+                        parent_oid: ctx_parent.clone(),
+                        total_commit_files: view.workspace.changes.len(),
+                    };
+                    view.open_menu(
+                        MenuKind::CommitChangedFile(target),
+                        event.position,
+                        window,
+                        cx,
+                    );
+                }),
+            )
             .into_any_element()
     }
 
@@ -2344,10 +2508,12 @@ impl DesktopView {
             .as_deref()
             .and_then(|oid| self.workspace.commits.iter().find(|c| c.oid == oid))
         {
-            let parent = commit
-                .parents
-                .first()
-                .map(|p| short_oid(p))
+            let parent = self
+                .workspace
+                .selected_file_parent
+                .as_deref()
+                .or_else(|| commit.parents.first().map(String::as_str))
+                .map(short_oid)
                 .unwrap_or("root");
             let cur = short_oid(&commit.oid);
             return (
@@ -2599,6 +2765,44 @@ impl DesktopView {
                         )
                     })
                     .child(self.diff_mode_toggle("expanded-commit-diff-mode", cx))
+                    .when_some(self.active_worktree().cloned(), |bar, wt| {
+                        let cmp_oids = self.active_selected_commit_oids();
+                        let cmp_parent = self.workspace.selected_file_parent.clone();
+                        let cmp_file = self
+                            .workspace
+                            .changes
+                            .iter()
+                            .find(|f| f.path == path)
+                            .cloned()
+                            .unwrap_or_else(|| ChangedFile {
+                                path: path.to_path_buf(),
+                                status: "M".to_owned(),
+                                previous_path: None,
+                            });
+                        bar.child(
+                            command_button(
+                                "expanded-compare-local",
+                                tr("与本地比较", "Compare with Local"),
+                                false,
+                                !cmp_oids.is_empty(),
+                            )
+                            .h(px(23.))
+                            .px(px(7.))
+                            .text_size(px(11.))
+                            .when(!cmp_oids.is_empty(), |btn| {
+                                btn.on_click(cx.listener(move |view, _, _, cx| {
+                                    view.open_local_compare_tab(
+                                        wt.clone(),
+                                        cmp_oids.clone(),
+                                        cmp_file.clone(),
+                                        false,
+                                        cmp_parent.clone(),
+                                        cx,
+                                    );
+                                }))
+                            }),
+                        )
+                    })
                     .child(
                         command_button(
                             "expanded-inspect-file",
@@ -2692,10 +2896,49 @@ impl DesktopView {
                             .px(px(7.))
                             .text_size(px(11.))
                             .on_click(cx.listener(|view, _, _, cx| {
+                                view.custom_tabs.active_id = None;
                                 view.commit_diff_expanded = true;
                                 cx.notify();
                             })),
                     )
+                    .when_some(self.active_worktree().cloned(), |bar, wt| {
+                        let cmp_oids = self.active_selected_commit_oids();
+                        let cmp_parent = self.workspace.selected_file_parent.clone();
+                        let cmp_file = self
+                            .workspace
+                            .changes
+                            .iter()
+                            .find(|f| f.path == path)
+                            .cloned()
+                            .unwrap_or_else(|| ChangedFile {
+                                path: path.to_path_buf(),
+                                status: "M".to_owned(),
+                                previous_path: None,
+                            });
+                        bar.child(
+                            command_button(
+                                "inline-compare-local",
+                                tr("与本地比较", "vs Local"),
+                                false,
+                                !cmp_oids.is_empty(),
+                            )
+                            .h(px(22.))
+                            .px(px(6.))
+                            .text_size(px(11.))
+                            .when(!cmp_oids.is_empty(), |btn| {
+                                btn.on_click(cx.listener(move |view, _, _, cx| {
+                                    view.open_local_compare_tab(
+                                        wt.clone(),
+                                        cmp_oids.clone(),
+                                        cmp_file.clone(),
+                                        false,
+                                        cmp_parent.clone(),
+                                        cx,
+                                    );
+                                }))
+                            }),
+                        )
+                    })
                     .child(
                         command_button(
                             "preview-diff-mode",
@@ -3149,6 +3392,8 @@ struct DetailSelection {
     worktree: Option<(WorktreeId, u64)>,
     commits: Vec<String>,
     file: Option<PathBuf>,
+    file_parent: Option<String>,
+    parent_groups_len: usize,
     changes_loading: bool,
     diff_loading: bool,
 }
@@ -3215,10 +3460,13 @@ impl HistoryDetails {
                 worktree,
                 commits,
                 file: workspace.selected_file.clone(),
+                file_parent: workspace.selected_file_parent.clone(),
+                parent_groups_len: workspace.parent_changes.len(),
                 changes_loading: workspace.changes_loading,
                 diff_loading: workspace.diff_loading,
             },
             &workspace.changes,
+            &workspace.parent_changes,
             workspace.diff.as_deref(),
             true,
         )
@@ -3231,27 +3479,34 @@ impl HistoryDetails {
         files: &[ChangedFile],
         diff: Option<&str>,
     ) -> HistoryScrollReset {
-        self.update_details_inner(selection, files, diff, false).0
+        self.update_details_inner(selection, files, &[], diff, false)
+            .0
     }
 
     fn update_details_inner(
         &mut self,
         selection: DetailSelection,
         files: &[ChangedFile],
+        parent_groups: &[ParentChangesGroup],
         diff: Option<&str>,
         async_highlight: bool,
     ) -> (HistoryScrollReset, Option<DiffSyntaxJob>) {
         let worktree = self.selection.worktree != selection.worktree;
         let commit = worktree || self.selection.commits != selection.commits;
-        let file = commit || self.selection.file != selection.file;
+        let file = commit
+            || self.selection.file != selection.file
+            || self.selection.file_parent != selection.file_parent;
         if commit {
             self.changes = ChangeTree::default();
         }
 
         // Workspace clears each prior result when starting a request and ends loading
         // when the matching result arrives, including when a file is opened again.
-        if commit || self.selection.changes_loading != selection.changes_loading {
-            self.changes.replace_files(files);
+        if commit
+            || self.selection.changes_loading != selection.changes_loading
+            || self.selection.parent_groups_len != selection.parent_groups_len
+        {
+            self.changes.replace_files(files, parent_groups);
         }
         let mut pending_job = None;
         if file || self.selection.diff_loading != selection.diff_loading {
@@ -3288,17 +3543,31 @@ enum ChangeRow {
         source_index: usize,
         depth: usize,
     },
+    ParentHeader {
+        group_index: usize,
+        parent_index: usize,
+        parent_oid: String,
+        file_count: usize,
+        expanded: bool,
+    },
+    ParentFile {
+        group_index: usize,
+        file_index: usize,
+        depth: usize,
+    },
 }
 
 #[derive(Default)]
 struct ChangeTree {
     root: ChangeDirectory,
     collapsed: HashSet<PathBuf>,
+    parent_groups: Vec<(usize, String, usize)>,
+    collapsed_parents: HashSet<String>,
     rows: Vec<ChangeRow>,
 }
 
 impl ChangeTree {
-    fn replace_files(&mut self, files: &[ChangedFile]) {
+    fn replace_files(&mut self, files: &[ChangedFile], parent_groups: &[ParentChangesGroup]) {
         let mut root = ChangeDirectory::default();
         for (index, change) in files.iter().enumerate() {
             let mut folder = &mut root;
@@ -3313,6 +3582,10 @@ impl ChangeTree {
             folder.files.push(index);
         }
         self.root = root;
+        self.parent_groups = parent_groups
+            .iter()
+            .map(|g| (g.parent_index, g.parent_oid.clone(), g.files.len()))
+            .collect();
         self.rebuild_rows();
     }
 
@@ -3323,10 +3596,41 @@ impl ChangeTree {
         self.rebuild_rows();
     }
 
+    fn toggle_parent(&mut self, parent_oid: &str) {
+        if !self.collapsed_parents.remove(parent_oid) {
+            self.collapsed_parents.insert(parent_oid.to_owned());
+        }
+        self.rebuild_rows();
+    }
+
     fn rebuild_rows(&mut self) {
         self.rows.clear();
         self.root
             .append_rows(Path::new(""), 0, &self.collapsed, &mut self.rows);
+        for (group_index, (parent_index, parent_oid, file_count)) in
+            self.parent_groups.iter().enumerate()
+        {
+            if *file_count == 0 {
+                continue;
+            }
+            let expanded = !self.collapsed_parents.contains(parent_oid);
+            self.rows.push(ChangeRow::ParentHeader {
+                group_index,
+                parent_index: *parent_index,
+                parent_oid: parent_oid.clone(),
+                file_count: *file_count,
+                expanded,
+            });
+            if expanded {
+                for file_index in 0..*file_count {
+                    self.rows.push(ChangeRow::ParentFile {
+                        group_index,
+                        file_index,
+                        depth: 1,
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -3374,6 +3678,7 @@ const DIFF_ROW_HEIGHT: f32 = 1.375;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct SplitRowMeta {
+    pub(super) block_index: Option<usize>,
     pub(super) block_kind: Option<DiffBlockKind>,
     pub(super) block_offset: usize,
     pub(super) block_len: usize,
@@ -3382,6 +3687,147 @@ pub(super) struct SplitRowMeta {
     pub(super) is_first: bool,
     pub(super) is_last: bool,
     pub(super) omitted_hint: Option<SharedString>,
+}
+
+pub(super) const SPLIT_ACTION_COL_W: f32 = 26.0;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct SplitActionColumns {
+    pub(super) left_to_right: bool,
+    pub(super) right_to_left: bool,
+}
+
+impl SplitActionColumns {
+    pub(super) const NONE: Self = Self {
+        left_to_right: false,
+        right_to_left: false,
+    };
+
+    pub(super) const fn center_width(self) -> f32 {
+        102.0
+            + if self.left_to_right {
+                SPLIT_ACTION_COL_W
+            } else {
+                0.0
+            }
+            + if self.right_to_left {
+                SPLIT_ACTION_COL_W
+            } else {
+                0.0
+            }
+    }
+}
+
+pub(super) type DiffBlockCallback = Rc<dyn Fn(usize, bool, &mut Window, &mut gpui::App)>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DiffActionTone {
+    /// Brand accent on hover; danger accent on hover for Added (removal) blocks.
+    ApplyToLocal,
+    /// Revert / unstage action.
+    Revert,
+    /// Positive stage action (green-tinted chip).
+    Stage,
+}
+
+#[derive(Clone)]
+pub(super) struct DiffBlockActions {
+    pub(super) id_prefix: &'static str,
+    pub(super) disabled: bool,
+    /// Left action button (Left -> Right): accept left block into right, revert unstaged block, or unstage staged block.
+    pub(super) left_to_right: Option<DiffBlockCallback>,
+    pub(super) left_icon: Icon,
+    pub(super) left_tone: DiffActionTone,
+    pub(super) left_tooltip: fn(DiffBlockKind) -> String,
+    /// Right action button (Right -> Left): stage single unstaged block into Index.
+    pub(super) right_to_left: Option<DiffBlockCallback>,
+    pub(super) right_icon: Icon,
+    pub(super) right_tone: DiffActionTone,
+    pub(super) right_tooltip: fn(DiffBlockKind) -> String,
+}
+
+impl DiffBlockActions {
+    pub(super) fn columns(&self) -> SplitActionColumns {
+        SplitActionColumns {
+            left_to_right: self.left_to_right.is_some(),
+            right_to_left: self.right_to_left.is_some(),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn diff_block_action_button(
+    id: (&'static str, usize),
+    icon_kind: Icon,
+    tone: DiffActionTone,
+    block_kind: DiffBlockKind,
+    tip: String,
+    disabled: bool,
+    block_index: usize,
+    callback: DiffBlockCallback,
+) -> AnyElement {
+    let t = theme();
+    let (base_bg, base_border, icon_color, hover_bg, hover_border) = match tone {
+        DiffActionTone::Stage => (
+            t.success_bg,
+            t.success_border,
+            t.success,
+            t.brand_bg,
+            t.brand,
+        ),
+        DiffActionTone::Revert => (
+            t.card,
+            t.border_strong,
+            t.text,
+            t.danger_bg,
+            t.danger_border,
+        ),
+        DiffActionTone::ApplyToLocal => {
+            if block_kind == DiffBlockKind::Added {
+                (
+                    t.card,
+                    t.border_strong,
+                    t.text,
+                    t.danger_bg,
+                    t.danger_border,
+                )
+            } else {
+                (t.card, t.border_strong, t.text, t.brand_bg, t.brand)
+            }
+        }
+    };
+
+    let mut btn = div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(tip.clone())
+        .w(px(20.))
+        .h(px(17.))
+        .rounded(px(4.))
+        .bg(rgb(base_bg))
+        .border_1()
+        .border_color(rgb(base_border))
+        .flex()
+        .items_center()
+        .justify_center()
+        .tooltip(tooltip(tip))
+        .child(icon_sized(icon_kind, icon_color, 11.5));
+    if disabled {
+        btn = btn.opacity(0.42);
+    } else {
+        btn = btn
+            .hover(move |s| s.bg(rgb(hover_bg)).border_color(rgb(hover_border)))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_click(move |event, window, cx| {
+                cx.stop_propagation();
+                let mods = event.modifiers();
+                let append = mods.alt || (cfg!(not(target_os = "macos")) && mods.control);
+                callback(block_index, append, window, cx);
+            });
+    }
+    btn.into_any_element()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3603,6 +4049,9 @@ impl DiffSyntaxJob {
 pub(super) struct ParsedPatch {
     pub(super) lines: Vec<DiffLine>,
     pub(super) longest: Option<usize>,
+    /// For Unified view: maps unified line index -> `Some((block_index, kind))` on the first line
+    /// of each contiguous diff block (`O(1)` lookup during virtualized rendering).
+    pub(super) unified_block_starts: Vec<Option<(usize, DiffBlockKind)>>,
     pub(super) split_rows: Vec<SplitDiffRow>,
     pub(super) split_meta: Vec<SplitRowMeta>,
     /// Indices into `split_rows` for read-only split view (omits redundant `@@ -1,... @@` top banner).
@@ -3980,6 +4429,17 @@ impl SplitDiffRow {
         left_syntax: &[SyntaxSpan],
         right_syntax: &[SyntaxSpan],
     ) -> Div {
+        self.render_modern_with_actions(meta, scroll_x, left_syntax, right_syntax, None)
+    }
+
+    pub(super) fn render_modern_with_actions(
+        &self,
+        meta: Option<&SplitRowMeta>,
+        scroll_x: f32,
+        left_syntax: &[SyntaxSpan],
+        right_syntax: &[SyntaxSpan],
+        actions: Option<&DiffBlockActions>,
+    ) -> Div {
         // CRITICAL: Every item in GPUI's `uniform_list` MUST share the exact same fixed row height (`DIFF_ROW_HEIGHT`),
         // because `uniform_list` measures item 0 to compute stride for all rows.
         let base = div()
@@ -4046,6 +4506,7 @@ impl SplitDiffRow {
             }
             Self::Pair { left, right } => {
                 let block_kind = meta.and_then(|m| m.block_kind);
+                let block_index = meta.and_then(|m| m.block_index);
                 let (left_g_bg, left_g_fg) = left.gutter_colors(block_kind);
                 let (right_g_bg, right_g_fg) = right.gutter_colors(block_kind);
                 let is_first = meta.is_some_and(|m| m.is_first);
@@ -4056,15 +4517,95 @@ impl SplitDiffRow {
                     .then(|| block_border_color(block_kind))
                     .flatten();
 
+                let cols = actions.map_or(SplitActionColumns::NONE, DiffBlockActions::columns);
+                let center_w = cols.center_width();
+
+                let left_action_slot = if cols.left_to_right {
+                    let act = actions.unwrap();
+                    let btn = if is_first
+                        && let Some(b_idx) = block_index
+                        && let Some(kind) = block_kind
+                        && let Some(cb) = act.left_to_right.clone()
+                    {
+                        Some(diff_block_action_button(
+                            (act.id_prefix, b_idx * 2),
+                            act.left_icon,
+                            act.left_tone,
+                            kind,
+                            (act.left_tooltip)(kind),
+                            act.disabled,
+                            b_idx,
+                            cb,
+                        ))
+                    } else {
+                        None
+                    };
+                    Some(
+                        div()
+                            .w(px(SPLIT_ACTION_COL_W))
+                            .h_full()
+                            .relative()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_l_1()
+                            .border_color(rgb(theme().border))
+                            .bg(rgb(theme().diff_gutter_bg))
+                            .children(btn),
+                    )
+                } else {
+                    None
+                };
+
+                let right_action_slot = if cols.right_to_left {
+                    let act = actions.unwrap();
+                    let btn = if is_first
+                        && let Some(b_idx) = block_index
+                        && let Some(kind) = block_kind
+                        && let Some(cb) = act.right_to_left.clone()
+                    {
+                        Some(diff_block_action_button(
+                            (act.id_prefix, b_idx * 2 + 1),
+                            act.right_icon,
+                            act.right_tone,
+                            kind,
+                            (act.right_tooltip)(kind),
+                            act.disabled,
+                            b_idx,
+                            cb,
+                        ))
+                    } else {
+                        None
+                    };
+                    Some(
+                        div()
+                            .w(px(SPLIT_ACTION_COL_W))
+                            .h_full()
+                            .relative()
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .border_r_1()
+                            .border_color(rgb(theme().border))
+                            .bg(rgb(theme().diff_gutter_bg))
+                            .children(btn),
+                    )
+                } else {
+                    None
+                };
+
                 base.child(left.render_code_pane(block_kind, meta, scroll_x, left_syntax))
                     .child(
                         div()
-                            .w(px(102.))
+                            .w(px(center_w))
                             .h_full()
                             .flex_shrink_0()
                             .flex()
                             .items_center()
                             .bg(rgb(theme().diff_gutter_bg))
+                            .children(left_action_slot)
                             .child(
                                 div()
                                     .w(px(40.))
@@ -4121,7 +4662,8 @@ impl SplitDiffRow {
                                     .child(
                                         right.line_no.map_or_else(String::new, |n| n.to_string()),
                                     ),
-                            ),
+                            )
+                            .children(right_action_slot),
                     )
                     .child(right.render_code_pane(block_kind, meta, scroll_x, right_syntax))
             }
@@ -4139,10 +4681,11 @@ fn block_border_color(kind: Option<DiffBlockKind>) -> Option<u32> {
     }
 }
 
-pub(super) fn split_column_header(
+pub(super) fn split_column_header_with_center(
     left_label: &str,
     right_label: &str,
     h_scroll: Option<&SplitHScroll>,
+    center_w: f32,
 ) -> Div {
     let measure = h_scroll.cloned();
     div()
@@ -4163,7 +4706,7 @@ pub(super) fn split_column_header(
                 canvas(
                     move |bounds, window, _| {
                         let pane_w =
-                            ((f32::from(bounds.size.width) - 102.0 - 12.0) * 0.5).max(80.0);
+                            ((f32::from(bounds.size.width) - center_w - 12.0) * 0.5).max(80.0);
                         let prev_max = hs.max_scroll();
                         hs.set_pane_width(pane_w);
                         if (prev_max > 0.5) != (hs.max_scroll() > 0.5) {
@@ -4188,7 +4731,7 @@ pub(super) fn split_column_header(
         )
         .child(
             div()
-                .w(px(102.))
+                .w(px(center_w))
                 .h_full()
                 .flex_shrink_0()
                 .bg(rgb(theme().sidebar_bg)),
@@ -4212,7 +4755,10 @@ pub(super) fn split_column_header(
         )
 }
 
-pub(super) fn split_horizontal_scrollbar(h_scroll: &SplitHScroll) -> Option<Div> {
+pub(super) fn split_horizontal_scrollbar_with_center(
+    h_scroll: &SplitHScroll,
+    center_w: f32,
+) -> Option<Div> {
     let (offset_x, max_scroll, content_w) = h_scroll.metrics();
     if max_scroll <= 0.5 {
         return None;
@@ -4279,7 +4825,7 @@ pub(super) fn split_horizontal_scrollbar(h_scroll: &SplitHScroll) -> Option<Div>
             .border_t_1()
             .border_color(rgb(theme().border))
             .child(make_track("split-hscroll-left", h_scroll.clone()))
-            .child(div().w(px(102.)).h_full().flex_shrink_0())
+            .child(div().w(px(center_w)).h_full().flex_shrink_0())
             .child(make_track("split-hscroll-right", h_scroll.clone()))
             .child(div().w(px(12.)).h_full().flex_shrink_0()),
     )
@@ -4431,12 +4977,36 @@ pub(super) fn render_patch_view(
     left_label: &str,
     right_label: &str,
 ) -> AnyElement {
+    render_patch_view_with_actions(
+        list_id,
+        patch,
+        side_by_side,
+        scroll,
+        left_label,
+        right_label,
+        None,
+    )
+}
+
+pub(super) fn render_patch_view_with_actions(
+    list_id: &'static str,
+    patch: Rc<ParsedPatch>,
+    side_by_side: bool,
+    scroll: &gpui::UniformListScrollHandle,
+    left_label: &str,
+    right_label: &str,
+    actions: Option<DiffBlockActions>,
+) -> AnyElement {
     if side_by_side {
         let count = patch.visible_split_rows.len();
         let ruler_patch = patch.clone();
         let ruler_scroll = scroll.clone();
         let h_scroll = patch.h_scroll.clone();
         let list_h_scroll = h_scroll.clone();
+        let center_w = actions
+            .as_ref()
+            .map_or(SplitActionColumns::NONE, DiffBlockActions::columns)
+            .center_width();
         let container = div()
             .flex()
             .flex_col()
@@ -4444,10 +5014,11 @@ pub(super) fn render_patch_view(
             .min_h_0()
             .min_w_0()
             .bg(rgb(theme().panel))
-            .child(split_column_header(
+            .child(split_column_header_with_center(
                 left_label,
                 right_label,
                 Some(&h_scroll),
+                center_w,
             ))
             .child(
                 div()
@@ -4464,11 +5035,12 @@ pub(super) fn render_patch_view(
                                     let row = patch.split_rows.get(raw_idx)?;
                                     let meta = patch.split_meta.get(raw_idx);
                                     let (left_syntax, right_syntax) = patch.split_syntax(raw_idx);
-                                    Some(row.render_modern(
+                                    Some(row.render_modern_with_actions(
                                         meta,
                                         scroll_x,
                                         left_syntax,
                                         right_syntax,
+                                        actions.as_ref(),
                                     ))
                                 })
                                 .collect::<Vec<_>>()
@@ -4480,7 +5052,7 @@ pub(super) fn render_patch_view(
                     )
                     .child(diff_overview_ruler(&ruler_patch, ruler_scroll, true)),
             )
-            .children(split_horizontal_scrollbar(&h_scroll));
+            .children(split_horizontal_scrollbar_with_center(&h_scroll, center_w));
         attach_split_hscroll_handlers(container, h_scroll).into_any_element()
     } else {
         let count = patch.lines.len();
@@ -4489,7 +5061,12 @@ pub(super) fn render_patch_view(
             range
                 .filter_map(|index| {
                     let line = patch.lines.get(index)?;
-                    Some(line.row(patch.unified_syntax(index)))
+                    let block_start = patch.unified_block_starts.get(index).copied().flatten();
+                    Some(line.row_with_actions(
+                        patch.unified_syntax(index),
+                        block_start,
+                        actions.as_ref(),
+                    ))
                 })
                 .collect::<Vec<_>>()
         })
@@ -4515,6 +5092,15 @@ pub(super) fn mono_font() -> &'static str {
 
 impl DiffLine {
     pub(super) fn row(&self, syntax: &[SyntaxSpan]) -> Div {
+        self.row_with_actions(syntax, None, None)
+    }
+
+    pub(super) fn row_with_actions(
+        &self,
+        syntax: &[SyntaxSpan],
+        block_start: Option<(usize, DiffBlockKind)>,
+        actions: Option<&DiffBlockActions>,
+    ) -> Div {
         let (color, background) = self.tone.colors();
         let number = |value: Option<usize>| {
             div()
@@ -4524,6 +5110,55 @@ impl DiffLine {
                 .text_color(rgb(theme().subtle))
                 .child(value.map_or_else(String::new, |number| number.to_string()))
         };
+        let action_gutter = actions.map(|act| {
+            let cols = act.columns();
+            let width = if cols.left_to_right && cols.right_to_left {
+                SPLIT_ACTION_COL_W * 2.0
+            } else if cols.left_to_right || cols.right_to_left {
+                SPLIT_ACTION_COL_W
+            } else {
+                0.0
+            };
+            let mut slot = div()
+                .w(px(width))
+                .h_full()
+                .px(px(3.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(4.))
+                .border_r_1()
+                .border_color(rgb(theme().border))
+                .bg(rgb(theme().diff_gutter_bg));
+            if let Some((b_idx, kind)) = block_start {
+                if let Some(cb) = act.left_to_right.clone() {
+                    slot = slot.child(diff_block_action_button(
+                        (act.id_prefix, b_idx * 2),
+                        act.left_icon,
+                        act.left_tone,
+                        kind,
+                        (act.left_tooltip)(kind),
+                        act.disabled,
+                        b_idx,
+                        cb,
+                    ));
+                }
+                if let Some(cb) = act.right_to_left.clone() {
+                    slot = slot.child(diff_block_action_button(
+                        (act.id_prefix, b_idx * 2 + 1),
+                        act.right_icon,
+                        act.right_tone,
+                        kind,
+                        (act.right_tooltip)(kind),
+                        act.disabled,
+                        b_idx,
+                        cb,
+                    ));
+                }
+            }
+            slot
+        });
         div()
             .flex()
             .items_center()
@@ -4536,6 +5171,7 @@ impl DiffLine {
             .text_size(rems(0.78))
             .line_height(rems(1.2))
             .whitespace_nowrap()
+            .children(action_gutter)
             .child(number(self.old))
             .child(number(self.new))
             .child(
@@ -4759,27 +5395,19 @@ impl ParsedPatch {
                             DiffLineTone::Added
                         }
                         _ => {
-                            flush_block(
-                                &mut pending_removed,
-                                &mut pending_added,
-                                &mut split_rows,
-                                &mut split_syntax_meta,
-                                &current_path,
-                                current_hunk_id,
-                            );
                             if line.starts_with('\\') {
-                                split_rows.push(SplitDiffRow::Banner {
-                                    text: text.clone().into(),
-                                    tone: DiffLineTone::Subtle,
-                                    hunk_order: None,
-                                });
-                                split_syntax_meta.push(SplitSyntaxRowMeta {
-                                    path: current_path.clone(),
-                                    hunk_id: current_hunk_id,
-                                    left_unified: None,
-                                    right_unified: None,
-                                });
+                                // Do not split a `-` / `+` modified block when `\ No newline at end of file`
+                                // appears immediately after `-` lines before `+` lines in split view.
+                                DiffLineTone::Subtle
                             } else {
+                                flush_block(
+                                    &mut pending_removed,
+                                    &mut pending_added,
+                                    &mut split_rows,
+                                    &mut split_syntax_meta,
+                                    &current_path,
+                                    current_hunk_id,
+                                );
                                 split_rows.push(SplitDiffRow::Pair {
                                     left: SplitCell::plain(
                                         old,
@@ -4794,41 +5422,45 @@ impl ParsedPatch {
                                     left_unified: Some(index),
                                     right_unified: Some(index),
                                 });
+                                DiffLineTone::Context
                             }
-                            DiffLineTone::Context
                         }
                     }
                 } else {
-                    flush_block(
-                        &mut pending_removed,
-                        &mut pending_added,
-                        &mut split_rows,
-                        &mut split_syntax_meta,
-                        &current_path,
-                        current_hunk_id,
-                    );
-                    if let Some(detected) = extract_diff_header_path(line) {
-                        current_path = Some(detected);
-                        current_hunk_id += 1;
+                    if line.starts_with('\\') {
+                        DiffLineTone::Subtle
+                    } else {
+                        flush_block(
+                            &mut pending_removed,
+                            &mut pending_added,
+                            &mut split_rows,
+                            &mut split_syntax_meta,
+                            &current_path,
+                            current_hunk_id,
+                        );
+                        if let Some(detected) = extract_diff_header_path(line) {
+                            current_path = Some(detected);
+                            current_hunk_id += 1;
+                        }
+                        if !line.starts_with("diff --git ")
+                            && !line.starts_with("index ")
+                            && !line.starts_with("--- ")
+                            && !line.starts_with("+++ ")
+                        {
+                            split_rows.push(SplitDiffRow::Banner {
+                                text: text.clone().into(),
+                                tone: DiffLineTone::Meta,
+                                hunk_order: None,
+                            });
+                            split_syntax_meta.push(SplitSyntaxRowMeta {
+                                path: current_path.clone(),
+                                hunk_id: current_hunk_id,
+                                left_unified: None,
+                                right_unified: None,
+                            });
+                        }
+                        DiffLineTone::Meta
                     }
-                    if !line.starts_with("diff --git ")
-                        && !line.starts_with("index ")
-                        && !line.starts_with("--- ")
-                        && !line.starts_with("+++ ")
-                    {
-                        split_rows.push(SplitDiffRow::Banner {
-                            text: text.clone().into(),
-                            tone: DiffLineTone::Meta,
-                            hunk_order: None,
-                        });
-                        split_syntax_meta.push(SplitSyntaxRowMeta {
-                            path: current_path.clone(),
-                            hunk_id: current_hunk_id,
-                            left_unified: None,
-                            right_unified: None,
-                        });
-                    }
-                    DiffLineTone::Meta
                 };
                 let columns = text.chars().count();
                 if columns >= max_columns {
@@ -4855,12 +5487,14 @@ impl ParsedPatch {
         let job = build_diff_syntax_job(&lines, &split_rows, &split_syntax_meta);
         let (split_meta, visible_split_rows, diff_blocks, visible_diff_blocks) =
             compute_split_diff_meta(&split_rows);
+        let unified_block_starts = compute_unified_block_starts(&lines);
         let max_cols = max_split_visual_cols(&split_rows);
         let max_content_px = max_cols as f32 * 8.2 + 36.0;
 
         let patch = Self {
             lines,
             longest,
+            unified_block_starts,
             split_rows,
             split_meta,
             visible_split_rows,
@@ -4891,6 +5525,46 @@ fn max_split_visual_cols(split_rows: &[SplitDiffRow]) -> usize {
         }
     }
     max_cols
+}
+
+fn compute_unified_block_starts(lines: &[DiffLine]) -> Vec<Option<(usize, DiffBlockKind)>> {
+    let mut starts = vec![None; lines.len()];
+    let mut block_idx = 0usize;
+    let mut i = 0usize;
+    while i < lines.len() {
+        if !matches!(lines[i].tone, DiffLineTone::Removed | DiffLineTone::Added) {
+            i += 1;
+            continue;
+        }
+        let first = i;
+        let mut has_removed = false;
+        let mut has_added = false;
+        while i < lines.len() {
+            match lines[i].tone {
+                DiffLineTone::Removed => {
+                    has_removed = true;
+                    i += 1;
+                }
+                DiffLineTone::Added => {
+                    has_added = true;
+                    i += 1;
+                }
+                DiffLineTone::Subtle => {
+                    // `\ No newline at end of file` inside a changed block does not split it.
+                    i += 1;
+                }
+                _ => break,
+            }
+        }
+        let kind = match (has_removed, has_added) {
+            (true, true) => DiffBlockKind::Modified,
+            (false, true) => DiffBlockKind::Added,
+            _ => DiffBlockKind::Removed,
+        };
+        starts[first] = Some((block_idx, kind));
+        block_idx += 1;
+    }
+    starts
 }
 
 fn compute_split_diff_meta(
@@ -4940,6 +5614,7 @@ fn compute_split_diff_meta(
             (false, true) => DiffBlockKind::Added,
             _ => DiffBlockKind::Removed,
         };
+        let block_idx = blocks.len();
         blocks.push(DiffBlockMark {
             start_row: start,
             end_row: end,
@@ -4947,6 +5622,7 @@ fn compute_split_diff_meta(
         });
         let len = end - start + 1;
         for (offset, item) in meta[start..=end].iter_mut().enumerate() {
+            item.block_index = Some(block_idx);
             item.block_kind = Some(kind);
             item.block_offset = offset;
             item.block_len = len;
@@ -5343,7 +6019,7 @@ mod tests {
             file("src/a.rs"),
         ];
         let mut tree = ChangeTree::default();
-        tree.replace_files(&files);
+        tree.replace_files(&files, &[]);
         assert_eq!(
             tree.rows,
             [
@@ -5387,7 +6063,7 @@ mod tests {
             .map(|n| file(format!("bulk/file-{n}.rs")))
             .collect();
         let mut tree = ChangeTree::default();
-        tree.replace_files(&files);
+        tree.replace_files(&files, &[]);
         assert_eq!(tree.rows.len(), files.len() + 1);
         assert_eq!(
             tree.rows[9120..9123],
@@ -5686,5 +6362,60 @@ mod tests {
         let zh = middle_truncate_branch("release_2026_全链路订单优化_最终版", 14);
         assert!(zh.ends_with("订单优化_最终版"));
         assert!(zh.chars().count() <= 14);
+    }
+
+    #[test]
+    fn parsed_patch_block_indices_match_diff_apply_blocks_one_to_one() {
+        let diff = concat!(
+            "diff --git a/sample.js b/sample.js\n",
+            "--- a/sample.js\n",
+            "+++ b/sample.js\n",
+            "@@ -1,5 +1,6 @@\n",
+            " const a = 1;\n",
+            "-const b = 2;\n",
+            "+const b = 20;\n",
+            "+const c = 30;\n",
+            " const d = 4;\n",
+            "-const removed = true;\n",
+            " const e = 5;\n",
+            "@@ -20,2 +21,2 @@\n",
+            " keep();\n",
+            "-oldEnd()\n",
+            "\\ No newline at end of file\n",
+            "+newEnd()\n",
+            "\\ No newline at end of file\n",
+        );
+        let patch = ParsedPatch::for_path(diff, Some(Path::new("sample.js")));
+        let apply_blocks = githalo::diff_apply::parse_diff_blocks(diff);
+        assert_eq!(patch.diff_blocks.len(), apply_blocks.len());
+        assert_eq!(patch.diff_blocks.len(), 3);
+
+        for (idx, (mark, blk)) in patch
+            .diff_blocks
+            .iter()
+            .zip(apply_blocks.iter())
+            .enumerate()
+        {
+            assert_eq!(blk.index, idx);
+            let mapped_kind = match blk.kind {
+                githalo::diff_apply::DiffBlockKind::Modified => DiffBlockKind::Modified,
+                githalo::diff_apply::DiffBlockKind::Added => DiffBlockKind::Added,
+                githalo::diff_apply::DiffBlockKind::Removed => DiffBlockKind::Removed,
+            };
+            assert_eq!(mark.kind, mapped_kind);
+            assert_eq!(patch.split_meta[mark.start_row].block_index, Some(idx));
+            assert!(patch.split_meta[mark.start_row].is_first);
+        }
+
+        let unified_blocks: Vec<_> = patch
+            .unified_block_starts
+            .iter()
+            .filter_map(|entry| *entry)
+            .collect();
+        assert_eq!(unified_blocks.len(), apply_blocks.len());
+        for (idx, (u_idx, u_kind)) in unified_blocks.iter().enumerate() {
+            assert_eq!(*u_idx, idx);
+            assert_eq!(*u_kind, patch.diff_blocks[idx].kind);
+        }
     }
 }

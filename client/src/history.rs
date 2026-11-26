@@ -1,12 +1,15 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
+    fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::git::{is_oid, os_string, read_command};
+use crate::project_files::{MAX_PREVIEW_BYTES, ProjectFileContent};
 
 pub const RECENT_LIMIT: usize = 200;
 const PATCH_LIMIT: u64 = 512 * 1024;
@@ -47,6 +50,25 @@ pub struct CommitChangesBundle {
     pub files: Vec<ChangedFile>,
     pub bodies: BTreeMap<String, String>,
     pub contiguous: bool,
+    pub parent_groups: Vec<ParentChangesGroup>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParentChangesGroup {
+    pub parent_oid: String,
+    pub parent_index: usize,
+    pub files: Vec<ChangedFile>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalCompareDiff {
+    pub left_oid: Option<String>,
+    pub left_label: String,
+    pub right_label: String,
+    pub local_path: PathBuf,
+    pub diff: String,
+    pub left_exists: bool,
+    pub right_exists: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +76,7 @@ pub struct BlameLine {
     pub oid: String,
     pub author: String,
     pub date: String,
+    pub summary: String,
     pub line_number: usize,
     pub content: String,
 }
@@ -645,6 +668,7 @@ pub fn changed_files_for_commits(
             files,
             bodies: meta.bodies,
             contiguous: true,
+            parent_groups: Vec::new(),
         });
     }
     let oldest = oids.last().expect("at least two oids");
@@ -657,6 +681,7 @@ pub fn changed_files_for_commits(
             files,
             bodies: meta.bodies,
             contiguous: true,
+            parent_groups: Vec::new(),
         });
     }
     // Single-process batch diff-tree across all non-contiguous commits in oldest -> newest order.
@@ -675,6 +700,7 @@ pub fn changed_files_for_commits(
         files: merge_changed_files_flat(flat_files),
         bodies: meta.bodies,
         contiguous: false,
+        parent_groups: Vec::new(),
     })
 }
 
@@ -865,8 +891,16 @@ fn verify_worktree_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// List commits touching `path` (following renames).
+/// List commits touching `path` (following renames) reachable from `HEAD`.
 pub fn file_history(root: &Path, path: &Path) -> Result<Vec<Commit>, String> {
+    file_history_at(root, "HEAD", path)
+}
+
+/// List commits touching `path` (following renames) reachable from `revision` (`"HEAD"` or commit OID).
+pub fn file_history_at(root: &Path, revision: &str, path: &Path) -> Result<Vec<Commit>, String> {
+    if revision != "HEAD" && !is_oid(revision.as_bytes()) {
+        return Err("无效的提交修订".into());
+    }
     verify_worktree_path(path)?;
     let mut cmd = read_command(root);
     cmd.args([
@@ -877,6 +911,7 @@ pub fn file_history(root: &Path, path: &Path) -> Result<Vec<Commit>, String> {
         "-z",
         "--max-count=150",
         "--format=%H%x00%P%x00%an%x00%as%x00%s",
+        revision,
         "--",
     ])
     .arg(path);
@@ -905,41 +940,51 @@ pub fn file_history(root: &Path, path: &Path) -> Result<Vec<Commit>, String> {
 }
 
 /// Annotate (blame) a file at `revision` (e.g. a commit OID or `"HEAD"`).
+/// Uses `--porcelain` (not `--line-porcelain`) so commit headers are emitted once per unique OID,
+/// reducing output size by ~80% and dramatically speeding up large multi-thousand-line files.
 pub fn file_blame(root: &Path, revision: &str, path: &Path) -> Result<Vec<BlameLine>, String> {
     if revision != "HEAD" && !is_oid(revision.as_bytes()) {
         return Err("无效的提交修订".into());
     }
     verify_worktree_path(path)?;
     let mut cmd = read_command(root);
-    cmd.args(["blame", "--line-porcelain", revision, "--"])
-        .arg(path);
+    cmd.args(["blame", "--porcelain", revision, "--"]).arg(path);
     let data = run(&mut cmd)?;
     let text = String::from_utf8_lossy(&data);
-    let mut lines = Vec::new();
+
+    // Cache commit metadata (`oid -> (author, date, summary)`) emitted on first occurrence.
+    let mut commit_meta: HashMap<String, (String, String, String)> = HashMap::new();
+    let mut lines = Vec::with_capacity(text.len() / 64);
     let mut cur_oid = String::new();
-    let mut cur_author = String::new();
-    let mut cur_date = String::new();
     let mut cur_line: usize = 0;
 
     for raw in text.lines() {
         if let Some(content) = raw.strip_prefix('\t') {
+            let (author, date, summary) = commit_meta
+                .get(&cur_oid)
+                .cloned()
+                .unwrap_or_else(|| (String::new(), String::new(), String::new()));
             lines.push(BlameLine {
                 oid: cur_oid.clone(),
-                author: cur_author.clone(),
-                date: cur_date.clone(),
+                author,
+                date,
+                summary,
                 line_number: cur_line,
                 content: content.to_owned(),
             });
             continue;
         }
         if let Some(author) = raw.strip_prefix("author ") {
-            cur_author = author.to_owned();
+            commit_meta.entry(cur_oid.clone()).or_default().0 = author.to_owned();
         } else if let Some(ts) = raw.strip_prefix("author-time ") {
             if let Ok(secs) = ts.trim().parse::<i64>() {
-                cur_date = chrono::DateTime::from_timestamp(secs, 0)
+                let date = chrono::DateTime::from_timestamp(secs, 0)
                     .map(|dt| dt.format("%Y-%m-%d").to_string())
                     .unwrap_or_default();
+                commit_meta.entry(cur_oid.clone()).or_default().1 = date;
             }
+        } else if let Some(summary) = raw.strip_prefix("summary ") {
+            commit_meta.entry(cur_oid.clone()).or_default().2 = summary.to_owned();
         } else {
             let mut parts = raw.split_whitespace();
             if let Some(first) = parts.next()
@@ -1016,4 +1061,494 @@ pub fn compare_working_tree_file_diff(
 ) -> Result<String, String> {
     let mut cmd = diff_working_tree_cmd(root, from_oid)?;
     file_diff_from(&mut cmd, file)
+}
+
+/// Return all parents of `oid` in stored commit header order.
+pub(crate) fn commit_parents(root: &Path, oid: &str) -> Result<Vec<String>, String> {
+    if !is_oid(oid.as_bytes()) {
+        return Err("无效的提交 ID".into());
+    }
+    let object = run(read_command(root).args(["cat-file", "commit", oid]))?;
+    let mut parents = Vec::new();
+    for line in object
+        .split(|&b| b == b'\n')
+        .take_while(|line| !line.is_empty())
+    {
+        if let Some(raw) = line.strip_prefix(b"parent ") {
+            let parent = std::str::from_utf8(raw).map_err(|_| "父提交 ID 无效")?;
+            if !is_oid(parent.as_bytes()) {
+                return Err("父提交 ID 无效".into());
+            }
+            parents.push(parent.to_owned());
+        }
+    }
+    Ok(parents)
+}
+
+/// List changed files relative to every parent of a merge commit (`parents.len() > 1`).
+pub fn changed_files_to_parents(root: &Path, oid: &str) -> Result<Vec<ParentChangesGroup>, String> {
+    let parents = commit_parents(root, oid)?;
+    if parents.len() <= 1 {
+        return Ok(Vec::new());
+    }
+    let mut groups = Vec::with_capacity(parents.len());
+    for (idx, parent_oid) in parents.into_iter().enumerate() {
+        let mut cmd = diff_tree(root);
+        cmd.args([&parent_oid, oid]);
+        let files = changed_files_from(&mut cmd)?;
+        groups.push(ParentChangesGroup {
+            parent_oid,
+            parent_index: idx + 1,
+            files,
+        });
+    }
+    Ok(groups)
+}
+
+/// Read the unified diff for `file` between a specific `parent_oid` and `oid`.
+pub fn file_diff_to_parent(
+    root: &Path,
+    parent_oid: &str,
+    oid: &str,
+    file: &ChangedFile,
+) -> Result<String, String> {
+    if !is_oid(parent_oid.as_bytes()) || !is_oid(oid.as_bytes()) {
+        return Err("无效的提交 ID".into());
+    }
+    let mut cmd = diff_tree(root);
+    cmd.args([parent_oid, oid]);
+    file_diff_from(&mut cmd, file)
+}
+
+/// Load aggregated changed files with optional per-parent groups for merge commits.
+pub fn changed_files_for_commits_with_parents(
+    root: &Path,
+    oids: &[String],
+    include_parents: bool,
+) -> Result<CommitChangesBundle, String> {
+    let mut bundle = changed_files_for_commits(root, oids)?;
+    if include_parents && oids.len() == 1 {
+        bundle.parent_groups = changed_files_to_parents(root, &oids[0]).unwrap_or_default();
+    }
+    Ok(bundle)
+}
+
+fn git_path_spec_arg(oid: &str, path: &Path) -> Result<OsString, String> {
+    verify_worktree_path(path)?;
+    let mut spec = OsString::from(oid);
+    spec.push(":");
+    let mut first = true;
+    for component in path.components() {
+        if let Component::Normal(part) = component {
+            if !first {
+                spec.push("/");
+            }
+            first = false;
+            spec.push(part);
+        }
+    }
+    Ok(spec)
+}
+
+pub(crate) fn revision_has_file(root: &Path, oid: &str, path: &Path) -> Result<bool, String> {
+    let spec = git_path_spec_arg(oid, path)?;
+    let out = read_command(root)
+        .args(["cat-file", "-e"])
+        .arg(spec)
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(out.status.success())
+}
+
+/// Read a file's snapshot content at a specific commit OID (read-only, capped at `MAX_PREVIEW_BYTES`).
+pub fn file_content_at_revision(
+    root: &Path,
+    oid: &str,
+    path: &Path,
+) -> Result<ProjectFileContent, String> {
+    if !is_oid(oid.as_bytes()) {
+        return Err("无效的提交 ID".into());
+    }
+    let spec = git_path_spec_arg(oid, path)?;
+    // Check object size first to avoid buffering gigantic blobs.
+    let size_out = read_command(root)
+        .args(["cat-file", "-s"])
+        .arg(&spec)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !size_out.status.success() {
+        return Err(format!(
+            "修订 {} 中不存在文件 {}",
+            oid.get(..8).unwrap_or(oid),
+            path.display()
+        ));
+    }
+    let total_bytes: u64 = String::from_utf8_lossy(&size_out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+
+    let mut cmd = read_command(root);
+    cmd.args(["cat-file", "blob"])
+        .arg(&spec)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().expect("piped Git stdout");
+    let mut stderr = child.stderr.take().expect("piped Git stderr");
+    let (read_res, err_bytes) = std::thread::scope(|scope| {
+        let err_handle = scope.spawn(move || {
+            let mut err = Vec::new();
+            let _ = stderr.read_to_end(&mut err);
+            err
+        });
+        let mut buf = Vec::new();
+        let cap = (MAX_PREVIEW_BYTES as u64).saturating_add(1);
+        let res = stdout.take(cap).read_to_end(&mut buf);
+        let truncated = buf.len() > MAX_PREVIEW_BYTES;
+        if truncated || res.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait();
+        let err = err_handle.join().unwrap_or_default();
+        (res.and(status).map(|s| (s, truncated, buf)), err)
+    });
+    let (status, truncated, mut buf) = read_res.map_err(|e| e.to_string())?;
+    if !truncated && !status.success() {
+        return Err(String::from_utf8_lossy(&err_bytes).trim().to_owned());
+    }
+    if truncated {
+        buf.truncate(MAX_PREVIEW_BYTES);
+    }
+    let sample_len = buf.len().min(8192);
+    if buf[..sample_len].contains(&0) {
+        return Ok(ProjectFileContent::Binary {
+            total_bytes: total_bytes.max(buf.len() as u64),
+        });
+    }
+    let content = String::from_utf8_lossy(&buf).into_owned();
+    Ok(ProjectFileContent::Text {
+        content,
+        total_bytes: total_bytes.max(buf.len() as u64),
+        truncated,
+    })
+}
+
+static TEMP_DIFF_SEQ: AtomicU64 = AtomicU64::new(1);
+
+struct TempFileGuard(PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn run_no_index_diff(
+    root: &Path,
+    left: &Path,
+    right: &Path,
+    display_left: &str,
+    display_right: &str,
+) -> Result<String, String> {
+    let mut cmd = read_command(root);
+    cmd.args([
+        "diff",
+        "--no-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--",
+    ])
+    .arg(left)
+    .arg(right)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().expect("piped Git stdout");
+    let mut stderr = child.stderr.take().expect("piped Git stderr");
+    let (res, err) = std::thread::scope(|scope| {
+        let err_handle = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        });
+        let mut out = Vec::new();
+        let read = stdout.take(PATCH_LIMIT + 1).read_to_end(&mut out);
+        let truncated = out.len() as u64 > PATCH_LIMIT;
+        if truncated || read.is_err() {
+            let _ = child.kill();
+        }
+        let status = child.wait();
+        let err = err_handle.join().unwrap_or_default();
+        (read.and(status).map(|s| (s, truncated, out)), err)
+    });
+    let (status, truncated, mut data) = res.map_err(|e| e.to_string())?;
+    // `git diff --no-index` exits 0 when identical and 1 when differences exist.
+    if truncated {
+        data.truncate(PATCH_LIMIT as usize);
+        data.extend_from_slice("\n… 差异较大，仅预览前 512 KiB …".as_bytes());
+    } else if !matches!(status.code(), Some(0 | 1)) {
+        return Err(String::from_utf8_lossy(&err).trim().to_owned());
+    }
+    let raw = String::from_utf8_lossy(&data).into_owned();
+    if raw.trim().is_empty() {
+        return Ok(String::new());
+    }
+    // Normalize temporary file paths in header lines (`diff --git`, `---`, `+++`) for clean display.
+    let mut normalized = String::with_capacity(raw.len());
+    for line in raw.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            normalized.push_str(&format!("diff --git a/{display_left} b/{display_right}\n"));
+        } else if line.starts_with("--- ") {
+            let target = if left == Path::new("/dev/null") {
+                "/dev/null".to_owned()
+            } else {
+                format!("a/{display_left}")
+            };
+            normalized.push_str(&format!("--- {target}\n"));
+        } else if line.starts_with("+++ ") {
+            let target = if right == Path::new("/dev/null") {
+                "/dev/null".to_owned()
+            } else {
+                format!("b/{display_right}")
+            };
+            normalized.push_str(&format!("+++ {target}\n"));
+        } else {
+            normalized.push_str(line);
+        }
+    }
+    Ok(normalized)
+}
+
+/// Compare a changed file from selected commit(s) (either After or Before revision) against the
+/// current local working-tree file on disk, matching Rebased's "Compare with Local" and
+/// "Compare Before with Local".
+pub fn diff_commit_file_with_local(
+    root: &Path,
+    oids: &[String],
+    file: &ChangedFile,
+    use_before: bool,
+    explicit_parent: Option<&str>,
+) -> Result<LocalCompareDiff, String> {
+    if oids.is_empty() {
+        return Err("未选择提交".into());
+    }
+    for oid in oids {
+        if !is_oid(oid.as_bytes()) {
+            return Err("无效的提交 ID".into());
+        }
+    }
+    verify_worktree_path(&file.path)?;
+    if let Some(old) = &file.previous_path {
+        verify_worktree_path(old)?;
+    }
+
+    let (left_oid, left_path, fallback_path) = if use_before {
+        let before_oid = if let Some(parent) = explicit_parent {
+            if !is_oid(parent.as_bytes()) {
+                return Err("无效的父提交 ID".into());
+            }
+            Some(parent.to_owned())
+        } else if oids.len() == 1 {
+            commit_parents(root, &oids[0])?.into_iter().next()
+        } else {
+            let meta = read_commit_meta_batch(root, oids, false)?;
+            let oldest = oids.last().expect("non-empty");
+            meta.first_parents.get(oldest).cloned().flatten()
+        };
+        let primary = file
+            .previous_path
+            .clone()
+            .unwrap_or_else(|| file.path.clone());
+        (before_oid, primary, file.path.clone())
+    } else {
+        let primary = file.path.clone();
+        let fallback = file
+            .previous_path
+            .clone()
+            .unwrap_or_else(|| file.path.clone());
+        (Some(oids[0].clone()), primary, fallback)
+    };
+
+    let left_exists = match left_oid.as_deref() {
+        Some(oid) => revision_has_file(root, oid, &left_path)?,
+        None => false,
+    };
+
+    // Match Rebased's ShowDiffWithLocalAction: prefer primary path on disk, gracefully fall back on rename.
+    let local_path = if root.join(&left_path).is_file() {
+        left_path.clone()
+    } else if root.join(&fallback_path).is_file() {
+        fallback_path.clone()
+    } else {
+        file.path.clone()
+    };
+    let abs_local = root.join(&local_path);
+    let right_exists = abs_local.is_file();
+
+    let rev_tag = match left_oid.as_deref() {
+        Some(oid) => oid.get(..8).unwrap_or(oid).to_owned(),
+        None => "empty".to_owned(),
+    };
+    let left_label = if use_before {
+        format!("{rev_tag} (Before)  {}", left_path.display())
+    } else {
+        format!("{rev_tag}  {}", left_path.display())
+    };
+    let right_label = format!("Local  {}", local_path.display());
+
+    if !left_exists && !right_exists {
+        return Ok(LocalCompareDiff {
+            left_oid,
+            left_label,
+            right_label,
+            local_path,
+            diff: String::new(),
+            left_exists: false,
+            right_exists: false,
+        });
+    }
+
+    let diff = if left_exists && left_path == local_path {
+        // Fast path: direct `git diff <rev> -- <path>` with zero temp files.
+        let oid = left_oid.as_deref().expect("left exists");
+        let mut cmd = diff_working_tree_cmd(root, oid)?;
+        let probe = ChangedFile {
+            path: left_path.clone(),
+            status: "M".to_owned(),
+            previous_path: None,
+        };
+        file_diff_from(&mut cmd, &probe)?
+    } else if !left_exists && right_exists {
+        run_no_index_diff(
+            root,
+            Path::new("/dev/null"),
+            &abs_local,
+            &left_path.display().to_string(),
+            &local_path.display().to_string(),
+        )?
+    } else {
+        // Rename where disk only has the other path: materialize the blob to a temporary file.
+        let oid = left_oid.as_deref().expect("left exists");
+        let spec = git_path_spec_arg(oid, &left_path)?;
+        let blob = run(read_command(root).args(["cat-file", "blob"]).arg(&spec))?;
+        let seq = TEMP_DIFF_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = std::env::temp_dir().join(format!(
+            "githalo-local-cmp-{}-{seq}.tmp",
+            std::process::id()
+        ));
+        fs::write(&tmp_path, &blob).map_err(|e| format!("无法写入临时比较文件（{e}）"))?;
+        let _guard = TempFileGuard(tmp_path.clone());
+        let right_arg = if right_exists {
+            abs_local.as_path()
+        } else {
+            Path::new("/dev/null")
+        };
+        run_no_index_diff(
+            root,
+            &tmp_path,
+            right_arg,
+            &left_path.display().to_string(),
+            &local_path.display().to_string(),
+        )?
+    };
+
+    Ok(LocalCompareDiff {
+        left_oid,
+        left_label,
+        right_label,
+        local_path,
+        diff,
+        left_exists,
+        right_exists,
+    })
+}
+
+/// Build a unified patch for one or more selected `files` from `oids` (ordered newest -> oldest).
+/// When `binary` is true, passes `--binary` so patches can be faithfully applied with `git apply`.
+pub fn build_files_patch(
+    root: &Path,
+    oids: &[String],
+    files: &[ChangedFile],
+    binary: bool,
+    explicit_parent: Option<&str>,
+) -> Result<String, String> {
+    if oids.is_empty() || files.is_empty() {
+        return Err("未选择提交或文件".into());
+    }
+    let mut specs = Vec::new();
+    let mut seen = HashSet::new();
+    for file in files {
+        if let Some(old) = &file.previous_path
+            && seen.insert(old.clone())
+        {
+            specs.push(file_pathspec(old)?);
+        }
+        if seen.insert(file.path.clone()) {
+            specs.push(file_pathspec(&file.path)?);
+        }
+    }
+
+    let run_patch = |cmd: &mut Command| -> Result<String, String> {
+        cmd.env_remove("GIT_LITERAL_PATHSPECS").arg("--patch");
+        if binary {
+            cmd.arg("--binary");
+        }
+        cmd.arg("--");
+        for spec in &specs {
+            cmd.arg(spec);
+        }
+        let data = run(cmd)?;
+        Ok(String::from_utf8_lossy(&data).into_owned())
+    };
+
+    if oids.len() == 1 {
+        let mut cmd = if let Some(parent) = explicit_parent {
+            if !is_oid(parent.as_bytes()) {
+                return Err("无效的父提交 ID".into());
+            }
+            let mut c = diff_tree(root);
+            c.args([parent, &oids[0]]);
+            c
+        } else {
+            comparison(root, &oids[0])?
+        };
+        return run_patch(&mut cmd);
+    }
+
+    let meta = read_commit_meta_batch(root, oids, false)?;
+    let oldest = oids.last().expect("at least two oids");
+    let oldest_parent = meta.first_parents.get(oldest).and_then(|p| p.as_deref());
+    if let Some(base) = contiguous_range_base(root, oids, oldest_parent)? {
+        let mut cmd = diff_tree(root);
+        cmd.args([&base, &oids[0]]);
+        return run_patch(&mut cmd);
+    }
+
+    // Non-contiguous commits: emit patches oldest -> newest in one `diff-tree --stdin` process.
+    let stdin_data = build_diff_tree_stdin(oids, &meta.first_parents);
+    let mut cmd = read_command(root);
+    cmd.args([
+        "diff-tree",
+        "--root",
+        "--no-commit-id",
+        "-r",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        "--find-renames",
+        "--patch",
+        "--stdin",
+    ]);
+    if binary {
+        cmd.arg("--binary");
+    }
+    cmd.env_remove("GIT_LITERAL_PATHSPECS").arg("--");
+    for spec in &specs {
+        cmd.arg(spec);
+    }
+    let data = run_with_stdin(&mut cmd, &stdin_data)?;
+    Ok(String::from_utf8_lossy(&data).into_owned())
 }

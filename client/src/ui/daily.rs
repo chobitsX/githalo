@@ -5,25 +5,73 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use githalo::branch_ops::RemoteOperation;
+use githalo::diff_apply;
 use githalo::i18n::{is_zh, tr};
 use githalo::staging::{
-    ChangeDiff, ChangeKind, ChangesSnapshot, CommitOptions, DiffSide, FileChange,
+    self, ChangeDiff, ChangeKind, ChangesSnapshot, CommitOptions, DiffSide, FileChange,
 };
 use githalo::workspace::{Action, DailyAction, Panel, RepoOpAction, ReviewKind, WorktreeId};
 use githalo::worktree::WorktreeTarget;
 use gpui::{
     AnyElement, ClipboardItem, Context, CursorStyle, Div, Entity, FontWeight,
-    ListHorizontalSizingBehavior, MouseButton, Pixels, Role, Toggled, UniformListScrollHandle,
-    Window, div, prelude::*, px, rems, rgb, uniform_list,
+    ListHorizontalSizingBehavior, MouseButton, Pixels, Role, ScrollStrategy, Toggled,
+    UniformListScrollHandle, Window, div, prelude::*, px, rems, rgb, uniform_list,
 };
 
 use super::components::*;
 use super::file_icons::{file_type_icon, folder_type_icon};
 use super::file_viewer::reveal_in_file_manager;
 use super::history::{
-    ParsedPatch, SplitDiffRow, attach_split_hscroll_handlers, diff_overview_ruler,
-    split_column_header, split_horizontal_scrollbar,
+    DiffActionTone, DiffBlockActions, DiffBlockKind, ParsedPatch, SplitActionColumns, SplitDiffRow,
+    attach_split_hscroll_handlers, diff_overview_ruler, split_column_header_with_center,
+    split_horizontal_scrollbar_with_center,
 };
+
+const MAX_WORKING_UNDO_STEPS: usize = 20;
+const MAX_WORKING_UNDO_BYTES: usize = 5 * 1024 * 1024;
+
+fn working_unstaged_revert_tooltip(kind: DiffBlockKind) -> String {
+    let mod_key = if cfg!(target_os = "macos") {
+        "⌥"
+    } else {
+        "Ctrl"
+    };
+    match kind {
+        DiffBlockKind::Modified => {
+            if is_zh() {
+                format!("还原此块修改到本地（按住 {mod_key} 追加暂存区内容）")
+            } else {
+                format!("Revert this block to Index (Hold {mod_key} to append)")
+            }
+        }
+        DiffBlockKind::Added => tr(
+            "移除此块新增内容（还原到暂存区）",
+            "Revert added lines to Index",
+        )
+        .to_owned(),
+        DiffBlockKind::Removed => tr(
+            "恢复此块已删除内容到本地",
+            "Restore deleted lines from Index",
+        )
+        .to_owned(),
+    }
+}
+
+fn working_unstaged_stage_tooltip(_kind: DiffBlockKind) -> String {
+    tr("仅暂存此差异块", "Stage this diff block").to_owned()
+}
+
+fn working_staged_unstage_tooltip(_kind: DiffBlockKind) -> String {
+    tr(
+        "取消暂存此差异块（恢复暂存区至 HEAD）",
+        "Unstage this diff block (restore Index to HEAD)",
+    )
+    .to_owned()
+}
+
+fn working_empty_tooltip(_kind: DiffBlockKind) -> String {
+    String::new()
+}
 use super::operations::ReviewDialog;
 use super::overlay::{Dialog, MenuKind, Overlay, menu_item, menu_rule};
 use super::{CommitAndPushNow, CommitNow, DesktopView, TextField, text_field};
@@ -463,6 +511,10 @@ pub(super) struct DailyUi {
     files_scroll: UniformListScrollHandle,
     patch_scroll: UniformListScrollHandle,
     patch: Option<WorkingPatch>,
+    diff_block_idx: usize,
+    applying_block: bool,
+    local_undo_target: Option<(WorktreeTarget, PathBuf)>,
+    local_undo_stack: Vec<Option<Vec<u8>>>,
     pub(super) draft_height: Pixels,
     pub(super) draft_drag: Option<(Pixels, Pixels)>,
     pub(super) review_patch: Option<(u64, Rc<ParsedPatch>)>,
@@ -489,6 +541,10 @@ impl Default for DailyUi {
             files_scroll: UniformListScrollHandle::new(),
             patch_scroll: UniformListScrollHandle::new(),
             patch: None,
+            diff_block_idx: 0,
+            applying_block: false,
+            local_undo_target: None,
+            local_undo_stack: Vec::new(),
             draft_height: px(DEFAULT_DRAFT_HEIGHT),
             draft_drag: None,
             review_patch: None,
@@ -596,6 +652,9 @@ impl DesktopView {
             self.daily_ui.amend = false;
             self.daily_ui.collapsed.clear();
             self.daily_ui.files_scroll = UniformListScrollHandle::new();
+            self.daily_ui.local_undo_target = None;
+            self.daily_ui.local_undo_stack.clear();
+            self.daily_ui.applying_block = false;
         }
         self.daily_ui.drafts.retain(|(id, revision), _| {
             self.workspace
@@ -675,6 +734,14 @@ impl DesktopView {
         }
         let previous = self.daily_ui.patch.as_ref().map(|patch| &patch.diff);
         if !same_arc(previous, diff) {
+            let same_file_and_side = match (previous, diff) {
+                (Some(prev), Some(next)) => {
+                    prev.worktree == next.worktree
+                        && prev.side == next.side
+                        && prev.file.path == next.file.path
+                }
+                _ => false,
+            };
             if let Some(diff) = diff.cloned() {
                 let (working, job) = WorkingPatch::new_async(diff);
                 self.schedule_patch_highlight(&working.patch, job, cx);
@@ -683,7 +750,24 @@ impl DesktopView {
                 self.daily_ui.patch = None;
             }
             self.daily_ui.selected_hunks.clear();
-            self.daily_ui.patch_scroll = UniformListScrollHandle::new();
+            if !same_file_and_side {
+                self.daily_ui.diff_block_idx = 0;
+                self.daily_ui.patch_scroll = UniformListScrollHandle::new();
+            }
+            // Clear undo stack when switching to a different file or repository.
+            if let Some((undo_wt, undo_path)) = &self.daily_ui.local_undo_target {
+                let matches_current = self
+                    .workspace
+                    .daily
+                    .selection
+                    .as_ref()
+                    .is_some_and(|(_, sel_path)| sel_path == undo_path)
+                    && self.active_worktree() == Some(undo_wt);
+                if !matches_current {
+                    self.daily_ui.local_undo_target = None;
+                    self.daily_ui.local_undo_stack.clear();
+                }
+            }
         }
         let review = self.workspace.daily.review.as_ref();
         if self.daily_ui.review_patch.as_ref().map(|(id, _)| *id) != review.map(|review| review.id)
@@ -833,7 +917,90 @@ impl DesktopView {
                     .map(|f| (*side, f))
             });
         let has_selected_file = selected_file_info.is_some();
-        let can_rollback_selected = self.daily_can_write() && has_selected_file;
+        // Priority for Commit toolbar Rollback button (Rebased parity):
+        // 1. All checked (staged) non-conflicted files (e.g. checked group/folder of 19 files)
+        // 2. Currently highlighted file if non-conflicted
+        // 3. All tracked unstaged files (or untracked files if no tracked changes exist)
+        let (rollback_targets, rollback_tooltip): (Vec<(DiffSide, FileChange)>, String) = state
+            .changes
+            .as_ref()
+            .map(|snap| {
+                let staged: Vec<(DiffSide, FileChange)> = snap
+                    .staged
+                    .iter()
+                    .filter(|f| !matches!(f.kind, ChangeKind::Conflicted(_)))
+                    .cloned()
+                    .map(|f| (DiffSide::Staged, f))
+                    .collect();
+                if !staged.is_empty() {
+                    let n = staged.len();
+                    let tip = if is_zh() {
+                        format!("回滚已勾选的 {n} 个文件改动…")
+                    } else if n == 1 {
+                        "Rollback 1 checked file…".to_owned()
+                    } else {
+                        format!("Rollback {n} checked files…")
+                    };
+                    return (staged, tip);
+                }
+                if let Some((side, file)) = selected_file_info.as_ref()
+                    && !matches!(file.kind, ChangeKind::Conflicted(_))
+                {
+                    return (
+                        vec![(*side, file.clone())],
+                        tr("回滚选中文件改动…", "Rollback selected file…").to_owned(),
+                    );
+                }
+                let tracked_unstaged: Vec<(DiffSide, FileChange)> = snap
+                    .unstaged
+                    .iter()
+                    .filter(|f| {
+                        !matches!(f.kind, ChangeKind::Conflicted(_) | ChangeKind::Untracked)
+                    })
+                    .cloned()
+                    .map(|f| (DiffSide::Unstaged, f))
+                    .collect();
+                if !tracked_unstaged.is_empty() {
+                    let n = tracked_unstaged.len();
+                    let tip = if is_zh() {
+                        format!("回滚全部 {n} 个未暂存修改…")
+                    } else if n == 1 {
+                        "Rollback 1 modified file…".to_owned()
+                    } else {
+                        format!("Rollback all {n} modified files…")
+                    };
+                    return (tracked_unstaged, tip);
+                }
+                let untracked: Vec<(DiffSide, FileChange)> = snap
+                    .unstaged
+                    .iter()
+                    .filter(|f| matches!(f.kind, ChangeKind::Untracked))
+                    .cloned()
+                    .map(|f| (DiffSide::Unstaged, f))
+                    .collect();
+                if !untracked.is_empty() {
+                    let n = untracked.len();
+                    let tip = if is_zh() {
+                        format!("删除全部 {n} 个未跟踪文件…")
+                    } else if n == 1 {
+                        "Delete 1 untracked file…".to_owned()
+                    } else {
+                        format!("Delete all {n} untracked files…")
+                    };
+                    return (untracked, tip);
+                }
+                (
+                    Vec::new(),
+                    tr("回滚选中文件改动", "Rollback changes").to_owned(),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    Vec::new(),
+                    tr("回滚选中文件改动", "Rollback changes").to_owned(),
+                )
+            });
+        let can_rollback = self.daily_can_write() && !rollback_targets.is_empty();
         let shelve_paths: Vec<PathBuf> = state
             .changes
             .as_ref()
@@ -876,29 +1043,22 @@ impl DesktopView {
                     })),
                 )
                 .child(
-                    icon_button(
-                        "commit-toolbar-rollback",
-                        Icon::Rollback,
-                        tr("回滚选中文件改动", "Rollback selected file"),
-                    )
-                    .size(px(24.))
-                    .when(!can_rollback_selected, |b| b.opacity(0.35))
-                    .when(can_rollback_selected, |b| {
-                        let info = selected_file_info.clone();
-                        b.on_click(cx.listener(move |view, _, window, cx| {
-                            if let Some((side, file)) = &info
-                                && let Some(snap) = view.workspace.daily.changes.as_ref()
-                            {
-                                view.open_rollback_dialog(
-                                    snap.head.clone(),
-                                    *side,
-                                    file.clone(),
-                                    window,
-                                    cx,
-                                );
-                            }
-                        }))
-                    }),
+                    icon_button("commit-toolbar-rollback", Icon::Rollback, &rollback_tooltip)
+                        .size(px(24.))
+                        .when(!can_rollback, |b| b.opacity(0.35))
+                        .when(can_rollback, |b| {
+                            let targets = rollback_targets.clone();
+                            b.on_click(cx.listener(move |view, _, window, cx| {
+                                if let Some(snap) = view.workspace.daily.changes.as_ref() {
+                                    view.open_rollback_files_dialog(
+                                        snap.head.clone(),
+                                        targets.clone(),
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }))
+                        }),
                 )
                 .child(
                     icon_button(
@@ -2082,6 +2242,52 @@ impl DesktopView {
                 }
                 items.push(menu_rule());
                 {
+                    let path_set: HashSet<&PathBuf> = paths.iter().collect();
+                    let mut group_rollback: Vec<(DiffSide, FileChange)> = Vec::new();
+                    let mut seen: HashSet<PathBuf> = HashSet::new();
+                    for f in &snapshot.staged {
+                        if path_set.contains(&f.path)
+                            && !matches!(f.kind, ChangeKind::Conflicted(_))
+                            && seen.insert(f.path.clone())
+                        {
+                            group_rollback.push((DiffSide::Staged, f.clone()));
+                        }
+                    }
+                    for f in &snapshot.unstaged {
+                        if path_set.contains(&f.path)
+                            && !matches!(f.kind, ChangeKind::Conflicted(_))
+                            && seen.insert(f.path.clone())
+                        {
+                            group_rollback.push((DiffSide::Unstaged, f.clone()));
+                        }
+                    }
+                    if !group_rollback.is_empty() {
+                        let head = snapshot.head.clone();
+                        let count = group_rollback.len();
+                        let label = if is_zh() {
+                            format!("回滚这 {count} 个文件改动…")
+                        } else if count == 1 {
+                            "Rollback 1 file…".to_owned()
+                        } else {
+                            format!("Rollback {count} files…")
+                        };
+                        items.push(menu_item(
+                            "wcg-rollback-all",
+                            label,
+                            Some(title.clone()),
+                            cx,
+                            move |view, _, window, cx| {
+                                view.open_rollback_files_dialog(
+                                    head.clone(),
+                                    group_rollback.clone(),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ));
+                    }
+                }
+                {
                     let ps = paths.clone();
                     items.push(menu_item(
                         "wcg-shelve-all",
@@ -2348,16 +2554,77 @@ impl DesktopView {
         let path = path.to_string_lossy().into_owned();
         let state = &self.workspace.daily;
         let patch = self.daily_ui.patch.as_ref();
-        let path = patch.map_or(path, |patch| path_label(&patch.diff.file));
+        let path_display = patch.map_or_else(|| path.clone(), |patch| path_label(&patch.diff.file));
+        let diff_count = patch.map_or(0, |p| p.patch.diff_blocks.len());
+        let diff_count_label = (diff_count > 0).then(|| {
+            if is_zh() {
+                format!("{diff_count} 处差异")
+            } else if diff_count == 1 {
+                "1 difference".to_owned()
+            } else {
+                format!("{diff_count} differences")
+            }
+        });
+        let undo_count = self
+            .daily_ui
+            .local_undo_target
+            .as_ref()
+            .filter(|(wt, p)| {
+                self.active_worktree() == Some(wt)
+                    && self
+                        .workspace
+                        .daily
+                        .selection
+                        .as_ref()
+                        .is_some_and(|(_, sel)| sel == p)
+            })
+            .map_or(0, |_| self.daily_ui.local_undo_stack.len());
+        let undo_enabled = undo_count > 0
+            && self.daily_can_write()
+            && !self.daily_ui.applying_block
+            && !state.diff_loading;
+
         let toolbar = div()
             .flex()
             .h(px(39.))
             .flex_shrink_0()
             .items_center()
-            .gap(px(7.))
+            .gap(px(6.))
             .px(px(8.))
             .border_b_1()
             .border_color(rgb(theme().border))
+            .child(
+                command_button(
+                    "working-diff-prev",
+                    "↑",
+                    false,
+                    diff_count > 0 && self.diff_side_by_side,
+                )
+                .h(px(23.))
+                .px(px(6.))
+                .tooltip(tooltip(tr("上一处差异", "Previous difference").to_owned()))
+                .when(diff_count > 0 && self.diff_side_by_side, |btn| {
+                    btn.on_click(cx.listener(|view, _, _, cx| {
+                        view.jump_working_diff_block(-1, cx);
+                    }))
+                }),
+            )
+            .child(
+                command_button(
+                    "working-diff-next",
+                    "↓",
+                    false,
+                    diff_count > 0 && self.diff_side_by_side,
+                )
+                .h(px(23.))
+                .px(px(6.))
+                .tooltip(tooltip(tr("下一处差异", "Next difference").to_owned()))
+                .when(diff_count > 0 && self.diff_side_by_side, |btn| {
+                    btn.on_click(cx.listener(|view, _, _, cx| {
+                        view.jump_working_diff_block(1, cx);
+                    }))
+                }),
+            )
             .child(
                 div()
                     .flex_shrink_0()
@@ -2369,8 +2636,44 @@ impl DesktopView {
                     .id("working-diff-path")
                     .flex_1()
                     .min_w_0()
-                    .child(elide(path)),
+                    .child(elide(path_display)),
             )
+            .children(diff_count_label.map(|lbl| {
+                div()
+                    .flex_shrink_0()
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(4.))
+                    .bg(rgb(theme().card))
+                    .border_1()
+                    .border_color(rgb(theme().border))
+                    .text_size(px(11.))
+                    .text_color(rgb(theme().muted))
+                    .child(lbl)
+            }))
+            .when(undo_count > 0, |bar| {
+                let undo_label = if is_zh() {
+                    format!("撤销 ({undo_count})")
+                } else {
+                    format!("Undo ({undo_count})")
+                };
+                bar.child(
+                    command_button("working-diff-undo", undo_label, false, undo_enabled)
+                        .h(px(23.))
+                        .tooltip(tooltip(
+                            tr(
+                                "撤销上一次还原的本地差异块",
+                                "Undo last reverted local diff block",
+                            )
+                            .to_owned(),
+                        ))
+                        .when(undo_enabled, |btn| {
+                            btn.on_click(cx.listener(|view, _, _, cx| {
+                                view.undo_working_diff_block(cx);
+                            }))
+                        }),
+                )
+            })
             .child(self.diff_mode_toggle("working-diff-mode", cx))
             .children(patch.map(|patch| self.working_patch_commands(patch, cx)));
         let content = match patch {
@@ -2522,7 +2825,315 @@ impl DesktopView {
             )
     }
 
+    fn working_diff_block_actions(
+        &self,
+        patch: &WorkingPatch,
+        cx: &mut Context<Self>,
+    ) -> Option<DiffBlockActions> {
+        let diff = &patch.diff;
+        if matches!(
+            diff.file.kind,
+            ChangeKind::Conflicted(_) | ChangeKind::TypeChanged | ChangeKind::Untracked
+        ) {
+            return None;
+        }
+        if !diff_apply::is_diff_applicable(&diff.text) {
+            return None;
+        }
+        let disabled = !self.daily_can_write()
+            || self.daily_ui.applying_block
+            || self.workspace.daily.diff_loading
+            || self.workspace.daily.changes_loading;
+
+        match diff.side {
+            DiffSide::Unstaged => {
+                let weak_revert = cx.entity().downgrade();
+                let revert_diff = diff.clone();
+                let on_revert = Rc::new(
+                    move |block_idx: usize,
+                          append: bool,
+                          _window: &mut Window,
+                          cx: &mut gpui::App| {
+                        let _ = weak_revert.update(cx, |view, cx| {
+                            view.revert_working_diff_block(
+                                revert_diff.clone(),
+                                block_idx,
+                                append,
+                                cx,
+                            );
+                        });
+                    },
+                );
+                let weak_stage = cx.entity().downgrade();
+                let stage_diff = diff.clone();
+                let on_stage = Rc::new(
+                    move |block_idx: usize,
+                          _append: bool,
+                          _window: &mut Window,
+                          cx: &mut gpui::App| {
+                        let _ = weak_stage.update(cx, |view, cx| {
+                            view.apply_working_diff_block_to_index(
+                                stage_diff.clone(),
+                                block_idx,
+                                false,
+                                cx,
+                            );
+                        });
+                    },
+                );
+                Some(DiffBlockActions {
+                    id_prefix: "work-unstaged-blk",
+                    disabled,
+                    left_to_right: Some(on_revert),
+                    left_icon: Icon::DiffRevert,
+                    left_tone: DiffActionTone::Revert,
+                    left_tooltip: working_unstaged_revert_tooltip,
+                    right_to_left: Some(on_stage),
+                    right_icon: Icon::DiffApplyLeft,
+                    right_tone: DiffActionTone::Stage,
+                    right_tooltip: working_unstaged_stage_tooltip,
+                })
+            }
+            DiffSide::Staged => {
+                let weak_unstage = cx.entity().downgrade();
+                let unstage_diff = diff.clone();
+                let on_unstage = Rc::new(
+                    move |block_idx: usize,
+                          append: bool,
+                          _window: &mut Window,
+                          cx: &mut gpui::App| {
+                        let _ = weak_unstage.update(cx, |view, cx| {
+                            view.apply_working_diff_block_to_index(
+                                unstage_diff.clone(),
+                                block_idx,
+                                append,
+                                cx,
+                            );
+                        });
+                    },
+                );
+                Some(DiffBlockActions {
+                    id_prefix: "work-staged-blk",
+                    disabled,
+                    left_to_right: Some(on_unstage),
+                    left_icon: Icon::DiffRevert,
+                    left_tone: DiffActionTone::Revert,
+                    left_tooltip: working_staged_unstage_tooltip,
+                    right_to_left: None,
+                    right_icon: Icon::DiffApplyLeft,
+                    right_tone: DiffActionTone::Stage,
+                    right_tooltip: working_empty_tooltip,
+                })
+            }
+        }
+    }
+
+    fn jump_working_diff_block(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(patch) = self.daily_ui.patch.as_ref() else {
+            return;
+        };
+        let total = patch.patch.diff_blocks.len();
+        if total == 0 {
+            return;
+        }
+        let next = if delta >= 0 {
+            (self.daily_ui.diff_block_idx + delta as usize) % total
+        } else {
+            (self.daily_ui.diff_block_idx + total - ((-delta) as usize % total)) % total
+        };
+        self.daily_ui.diff_block_idx = next;
+        if let Some(block) = patch.patch.diff_blocks.get(next) {
+            self.daily_ui
+                .patch_scroll
+                .scroll_to_item(block.start_row, ScrollStrategy::Center);
+        }
+        cx.notify();
+    }
+
+    fn revert_working_diff_block(
+        &mut self,
+        diff: Arc<ChangeDiff>,
+        block_index: usize,
+        append: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.daily_can_write()
+            || self.daily_ui.applying_block
+            || !same_arc(self.workspace.daily.diff.as_ref(), Some(&diff))
+        {
+            return;
+        }
+        self.daily_ui.applying_block = true;
+        cx.notify();
+
+        let target = diff.worktree.clone();
+        let root = target.root.clone();
+        let path = diff.file.path.clone();
+        let raw_diff = diff.text.clone();
+        cx.spawn(async move |this, cx| {
+            let write_path = path.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    diff_apply::apply_diff_block_to_local_file(
+                        &root,
+                        &write_path,
+                        &raw_diff,
+                        block_index,
+                        append,
+                    )
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                view.daily_ui.applying_block = false;
+                match result {
+                    Ok(outcome) => {
+                        let key = (target.clone(), path.clone());
+                        if view.daily_ui.local_undo_target.as_ref() != Some(&key) {
+                            view.daily_ui.local_undo_target = Some(key);
+                            view.daily_ui.local_undo_stack.clear();
+                        }
+                        let cacheable = outcome
+                            .previous_bytes
+                            .as_ref()
+                            .is_none_or(|b| b.len() <= MAX_WORKING_UNDO_BYTES);
+                        if cacheable {
+                            view.daily_ui.local_undo_stack.push(outcome.previous_bytes);
+                            if view.daily_ui.local_undo_stack.len() > MAX_WORKING_UNDO_STEPS {
+                                view.daily_ui.local_undo_stack.remove(0);
+                            }
+                        }
+                        view.notice = Some(if append {
+                            if is_zh() {
+                                format!("已将暂存区差异块追加到本地 {}", path.display())
+                            } else {
+                                format!("Appended Index block to {}", path.display())
+                            }
+                        } else if is_zh() {
+                            format!("已还原差异块到本地 {}", path.display())
+                        } else {
+                            format!("Reverted diff block in {}", path.display())
+                        });
+                        view.dispatch_daily(DailyAction::ReloadChanges, cx);
+                    }
+                    Err(err) => {
+                        view.notice = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn undo_working_diff_block(&mut self, cx: &mut Context<Self>) {
+        if !self.daily_can_write() || self.daily_ui.applying_block {
+            return;
+        }
+        let Some((target, path)) = self.daily_ui.local_undo_target.clone() else {
+            return;
+        };
+        let Some(snapshot) = self.daily_ui.local_undo_stack.pop() else {
+            return;
+        };
+        self.daily_ui.applying_block = true;
+        cx.notify();
+
+        let root = target.root.clone();
+        let write_path = path.clone();
+        cx.spawn(async move |this, cx| {
+            let res = cx
+                .background_executor()
+                .spawn(async move {
+                    diff_apply::restore_local_file_bytes(&root, &write_path, snapshot.as_deref())
+                        .map_err(|err| (err, snapshot))
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                view.daily_ui.applying_block = false;
+                match res {
+                    Ok(()) => {
+                        view.notice = Some(if is_zh() {
+                            format!("已撤销对 {} 的差异块还原", path.display())
+                        } else {
+                            format!("Undid block revert on {}", path.display())
+                        });
+                        view.dispatch_daily(DailyAction::ReloadChanges, cx);
+                    }
+                    Err((err, snapshot)) => {
+                        view.daily_ui.local_undo_stack.push(snapshot);
+                        view.notice = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_working_diff_block_to_index(
+        &mut self,
+        diff: Arc<ChangeDiff>,
+        block_index: usize,
+        append: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.daily_can_write()
+            || self.daily_ui.applying_block
+            || !same_arc(self.workspace.daily.diff.as_ref(), Some(&diff))
+        {
+            return;
+        }
+        self.daily_ui.applying_block = true;
+        cx.notify();
+
+        let target = diff.worktree.clone();
+        let side = diff.side;
+        let path = diff.file.path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    staging::apply_diff_block_to_index(&target, &diff, block_index, append)
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                view.daily_ui.applying_block = false;
+                match result {
+                    Ok(()) => {
+                        view.notice = Some(match side {
+                            DiffSide::Unstaged => {
+                                if is_zh() {
+                                    format!("已暂存 {} 中的选定差异块", path.display())
+                                } else {
+                                    format!("Staged selected diff block in {}", path.display())
+                                }
+                            }
+                            DiffSide::Staged => {
+                                if is_zh() {
+                                    format!("已取消暂存 {} 中的选定差异块", path.display())
+                                } else {
+                                    format!("Unstaged selected diff block in {}", path.display())
+                                }
+                            }
+                        });
+                        view.dispatch_daily(DailyAction::ReloadChanges, cx);
+                    }
+                    Err(err) => {
+                        view.notice = Some(err);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn working_patch_list(&self, patch: &WorkingPatch, cx: &mut Context<Self>) -> AnyElement {
+        let block_actions = self.working_diff_block_actions(patch, cx);
         if self.diff_side_by_side {
             let (left_label, right_label) = match patch.diff.side {
                 DiffSide::Staged => (
@@ -2536,6 +3147,11 @@ impl DesktopView {
             };
             let ruler_scroll = self.daily_ui.patch_scroll.clone();
             let h_scroll = patch.patch.h_scroll.clone();
+            let center_w = block_actions
+                .as_ref()
+                .map_or(SplitActionColumns::NONE, DiffBlockActions::columns)
+                .center_width();
+            let list_actions = block_actions.clone();
             let container = div()
                 .flex()
                 .flex_col()
@@ -2543,10 +3159,11 @@ impl DesktopView {
                 .min_h_0()
                 .min_w_0()
                 .bg(rgb(theme().panel))
-                .child(split_column_header(
+                .child(split_column_header_with_center(
                     left_label,
                     right_label,
                     Some(&h_scroll),
+                    center_w,
                 ))
                 .child(
                     div()
@@ -2558,7 +3175,7 @@ impl DesktopView {
                             uniform_list(
                                 "working-patch-split-lines",
                                 patch.patch.split_rows.len(),
-                                cx.processor(|view, range: Range<usize>, _, cx| {
+                                cx.processor(move |view, range: Range<usize>, _, cx| {
                                     let Some(patch) = view.daily_ui.patch.as_ref() else {
                                         return Vec::new();
                                     };
@@ -2575,11 +3192,12 @@ impl DesktopView {
                                                 let (left_syntax, right_syntax) =
                                                     patch.patch.split_syntax(index);
                                                 Some(
-                                                    row.render_modern(
+                                                    row.render_modern_with_actions(
                                                         meta,
                                                         scroll_x,
                                                         left_syntax,
                                                         right_syntax,
+                                                        list_actions.as_ref(),
                                                     )
                                                     .into_any_element(),
                                                 )
@@ -2595,13 +3213,13 @@ impl DesktopView {
                         )
                         .child(diff_overview_ruler(&patch.patch, ruler_scroll, false)),
                 )
-                .children(split_horizontal_scrollbar(&h_scroll));
+                .children(split_horizontal_scrollbar_with_center(&h_scroll, center_w));
             return attach_split_hscroll_handlers(container, h_scroll).into_any_element();
         }
         uniform_list(
             "working-patch-lines",
             patch.patch.lines.len(),
-            cx.processor(|view, range: Range<usize>, _, cx| {
+            cx.processor(move |view, range: Range<usize>, _, cx| {
                 let Some(patch) = view.daily_ui.patch.as_ref() else {
                     return Vec::new();
                 };
@@ -2611,8 +3229,18 @@ impl DesktopView {
                         Some(if let Some(id) = patch.headers.get(&index) {
                             view.hunk_row(patch, *id, line.text.as_ref(), cx)
                         } else {
-                            line.row(patch.patch.unified_syntax(index))
-                                .into_any_element()
+                            let block_start = patch
+                                .patch
+                                .unified_block_starts
+                                .get(index)
+                                .copied()
+                                .flatten();
+                            line.row_with_actions(
+                                patch.patch.unified_syntax(index),
+                                block_start,
+                                block_actions.as_ref(),
+                            )
+                            .into_any_element()
                         })
                     })
                     .collect::<Vec<_>>()

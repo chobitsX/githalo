@@ -264,3 +264,61 @@ fn amend_commit_updates_message_and_staged_tree_preserving_parent() {
     // Stale expected_head_oid must be rejected.
     assert!(conflict_ops::amend_commit(&target, &second, "stale").is_err());
 }
+
+#[test]
+fn rollback_files_batch_handles_staged_added_modified_unstaged_and_untracked() {
+    let dir = tempfile::tempdir().unwrap();
+    let (target, root) = init_repo(&dir, "repo");
+    commit_file(&root, "tracked_staged.txt", "base-1\n", "base1");
+    commit_file(&root, "tracked_unstaged.txt", "base-2\n", "base2");
+
+    // Create staged brand-new nested files (like `skills/...` with `A` status),
+    // a staged modification, an unstaged modification, and an untracked file.
+    fs::create_dir_all(root.join("skills/a/agents")).unwrap();
+    fs::create_dir_all(root.join("skills/b")).unwrap();
+    fs::write(root.join("skills/a/agents/openai.yaml"), "name: a\n").unwrap();
+    fs::write(root.join("skills/b/SKILL.md"), "# Skill B\n").unwrap();
+    fs::write(root.join("tracked_staged.txt"), "edited-staged\n").unwrap();
+    git(
+        &root,
+        &[
+            "add",
+            "skills/a/agents/openai.yaml",
+            "skills/b/SKILL.md",
+            "tracked_staged.txt",
+        ],
+    );
+    fs::write(root.join("tracked_unstaged.txt"), "edited-unstaged\n").unwrap();
+    fs::write(root.join("scratch.tmp"), "untracked\n").unwrap();
+
+    let snap = staging::changes(&target).unwrap();
+    let mut items: Vec<(DiffSide, staging::FileChange)> = snap
+        .staged
+        .iter()
+        .cloned()
+        .map(|f| (DiffSide::Staged, f))
+        .collect();
+    items.extend(
+        snap.unstaged
+            .iter()
+            .cloned()
+            .map(|f| (DiffSide::Unstaged, f)),
+    );
+    assert_eq!(items.len(), 5);
+
+    let count = conflict_ops::rollback_files(&target, &snap.head, &items).unwrap();
+    assert_eq!(count, 5);
+
+    assert!(!root.join("skills/a/agents/openai.yaml").exists());
+    assert!(!root.join("skills/b/SKILL.md").exists());
+    assert!(!root.join("scratch.tmp").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("tracked_staged.txt")).unwrap(),
+        "base-1\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("tracked_unstaged.txt")).unwrap(),
+        "base-2\n"
+    );
+    assert!(git(&root, &["status", "--porcelain"]).is_empty());
+}

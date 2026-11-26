@@ -5,14 +5,14 @@ use std::sync::Arc;
 use githalo::branch_ops::BranchSnapshot;
 use githalo::conflict_ops::{ConflictSide, ConflictStrategy};
 use githalo::history_ops::{ResetMode, RevertOptions, RevertStatus};
-use githalo::i18n::tr;
+use githalo::i18n::{is_zh, tr};
 use githalo::merge_ops::{MergeMode, MergeRelation, MergeStatus};
-use githalo::staging::{ChangesHead, DiffSide, FileChange};
+use githalo::staging::{ChangeKind, ChangesHead, DiffSide, FileChange};
 use githalo::workspace::{Action, Panel, RepoOpAction, RepoOpPreview};
 use githalo::worktree::WorktreeTarget;
 use gpui::{
-    Context, Div, Entity, Focusable, FontWeight, Pixels, Role, SharedString, Stateful, Toggled,
-    Window, div, prelude::*, px, rgb,
+    AnyElement, Context, Div, Entity, Focusable, FontWeight, Pixels, Role, SharedString, Stateful,
+    Toggled, Window, div, prelude::*, px, rgb,
 };
 
 use super::components::*;
@@ -87,8 +87,7 @@ pub(super) struct ResolveConflictDialog {
 pub(super) struct RollbackDialog {
     pub(super) target: WorktreeTarget,
     pub(super) head: ChangesHead,
-    pub(super) side: DiffSide,
-    pub(super) file: FileChange,
+    pub(super) files: Vec<(DiffSide, FileChange)>,
 }
 
 pub(super) struct AmendDialog {
@@ -2098,7 +2097,17 @@ impl DesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.daily_can_write() {
+        self.open_rollback_files_dialog(head, vec![(side, file)], window, cx);
+    }
+
+    pub(super) fn open_rollback_files_dialog(
+        &mut self,
+        head: ChangesHead,
+        files: Vec<(DiffSide, FileChange)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.daily_can_write() || files.is_empty() {
             return;
         }
         let Some(target) = self.active_worktree().cloned() else {
@@ -2108,8 +2117,7 @@ impl DesktopView {
             Dialog::RollbackFile(RollbackDialog {
                 target,
                 head,
-                side,
-                file,
+                files,
             }),
             window,
             cx,
@@ -2524,36 +2532,197 @@ impl DesktopView {
     }
 
     pub(super) fn rollback_dialog(&self, dialog: &RollbackDialog, cx: &mut Context<Self>) -> Div {
-        let enabled = self.daily_can_write() && self.active_worktree() == Some(&dialog.target);
+        let enabled = self.daily_can_write()
+            && self.active_worktree() == Some(&dialog.target)
+            && !dialog.files.is_empty();
         let target = dialog.target.clone();
         let head = dialog.head.clone();
-        let side = dialog.side;
-        let file = dialog.file.clone();
-        let desc = match side {
-            DiffSide::Unstaged => {
-                if matches!(file.kind, githalo::staging::ChangeKind::Untracked) {
-                    "该未跟踪文件将被从工作区磁盘永久删除，操作不可撤销。"
-                } else {
-                    "将丢弃该文件在工作区中的未暂存修改，恢复到当前暂存区内容。"
+        let files = dialog.files.clone();
+        let count = files.len();
+
+        let has_staged = files.iter().any(|(side, _)| *side == DiffSide::Staged);
+        let has_untracked = files.iter().any(|(side, f)| {
+            *side == DiffSide::Unstaged && matches!(f.kind, ChangeKind::Untracked)
+        });
+        let has_staged_added = files
+            .iter()
+            .any(|(side, f)| *side == DiffSide::Staged && matches!(f.kind, ChangeKind::Added));
+
+        let desc: String = if count == 1 {
+            let (side, file) = &files[0];
+            match side {
+                DiffSide::Unstaged => {
+                    if matches!(file.kind, ChangeKind::Untracked) {
+                        tr(
+                            "该未跟踪文件将被从工作区磁盘永久删除，操作不可撤销。",
+                            "This untracked file will be permanently deleted from disk.",
+                        )
+                        .to_owned()
+                    } else {
+                        tr(
+                            "将丢弃该文件在工作区中的未暂存修改，恢复到当前暂存区内容。",
+                            "Unstaged changes in this file will be discarded and restored from Index.",
+                        )
+                        .to_owned()
+                    }
                 }
+                DiffSide::Staged => tr(
+                    "将重置该文件的暂存区与工作区改动，恢复到当前 HEAD 状态（新增文件将被移除）。",
+                    "Both staged and working-tree changes for this file will be reset to HEAD (newly added files will be removed).",
+                )
+                .to_owned(),
             }
-            DiffSide::Staged => {
-                "将重置该文件的暂存区与工作区改动，恢复到当前 HEAD 状态（新增文件将被移除）。"
+        } else if has_staged && (has_staged_added || has_untracked) {
+            if is_zh() {
+                format!(
+                    "将回滚这 {count} 个文件的改动至 HEAD 状态；其中新暂存或未跟踪文件将被从磁盘移除，操作不可撤销。"
+                )
+            } else {
+                format!(
+                    "Rollback {count} files to HEAD; newly staged or untracked files will be permanently removed from disk."
+                )
             }
+        } else if has_staged {
+            if is_zh() {
+                format!("将重置这 {count} 个文件的暂存区与工作区改动，恢复到当前 HEAD 状态。")
+            } else {
+                format!(
+                    "Reset both staged and working-tree changes for {count} files back to HEAD."
+                )
+            }
+        } else if has_untracked {
+            if is_zh() {
+                format!("将回滚这 {count} 个文件，其中未跟踪文件将被从磁盘永久删除，操作不可撤销。")
+            } else {
+                format!(
+                    "Rollback {count} files; untracked files will be permanently deleted from disk."
+                )
+            }
+        } else if is_zh() {
+            format!("将丢弃这 {count} 个文件在工作区中的未暂存修改，恢复到当前暂存区内容。")
+        } else {
+            format!("Discard unstaged working-tree edits in {count} files and restore from Index.")
         };
+
+        let confirm_label = if count <= 1 {
+            tr("确认回滚", "Rollback").to_owned()
+        } else if is_zh() {
+            format!("确认回滚 ({count})")
+        } else {
+            format!("Rollback ({count})")
+        };
+
+        let target_block: AnyElement = if count == 1 {
+            review_detail(
+                tr("目标文件", "Target file"),
+                files[0].1.path.display().to_string(),
+            )
+            .into_any_element()
+        } else {
+            let preview_cap = 120usize;
+            let mut list = div()
+                .id("rollback-files-list")
+                .max_h(px(196.))
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .p(px(6.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(rgb(theme().border))
+                .bg(rgb(theme().card));
+            for (side, file) in files.iter().take(preview_cap) {
+                let (badge, badge_color) = match &file.kind {
+                    ChangeKind::Added => ("A", theme().success),
+                    ChangeKind::Deleted => ("D", theme().error),
+                    ChangeKind::Modified => ("M", theme().link),
+                    ChangeKind::Renamed => ("R", theme().remote_text),
+                    ChangeKind::Copied => ("C", theme().remote_text),
+                    ChangeKind::TypeChanged => ("T", theme().warning),
+                    ChangeKind::Untracked => ("?", theme().untracked_fg),
+                    ChangeKind::Conflicted(_) => ("!", theme().error),
+                };
+                let side_tag = match side {
+                    DiffSide::Staged => tr("已暂存", "Staged"),
+                    DiffSide::Unstaged => tr("未暂存", "Unstaged"),
+                };
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(4.))
+                        .py(px(1.5))
+                        .text_size(px(11.5))
+                        .child(
+                            div()
+                                .w(px(14.))
+                                .flex_shrink_0()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(badge_color))
+                                .child(badge),
+                        )
+                        .child(
+                            elide(file.path.display().to_string())
+                                .flex_1()
+                                .text_color(rgb(theme().text)),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(10.5))
+                                .text_color(rgb(theme().subtle))
+                                .child(side_tag),
+                        ),
+                );
+            }
+            if count > preview_cap {
+                let rest = count - preview_cap;
+                list = list.child(
+                    div()
+                        .px(px(4.))
+                        .py(px(2.))
+                        .text_size(px(11.))
+                        .text_color(rgb(theme().subtle))
+                        .child(if is_zh() {
+                            format!("… 以及其余 {rest} 个文件")
+                        } else {
+                            format!("… and {rest} more files")
+                        }),
+                );
+            }
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(rgb(theme().muted))
+                        .child(if is_zh() {
+                            format!("目标文件（共 {count} 个）")
+                        } else {
+                            format!("Target files ({count})")
+                        }),
+                )
+                .child(list)
+                .into_any_element()
+        };
+
         div()
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(dialog_heading("回滚本地改动（Rollback）"))
+            .child(dialog_heading(tr(
+                "回滚本地改动（Rollback）",
+                "Rollback Changes",
+            )))
             .child(review_detail(
                 tr("仓库", "Repository"),
                 dialog.target.root.display().to_string(),
             ))
-            .child(review_detail(
-                "目标文件",
-                dialog.file.path.display().to_string(),
-            ))
+            .child(target_block)
             .child(
                 div()
                     .px(px(10.))
@@ -2572,26 +2741,42 @@ impl DesktopView {
                     .justify_end()
                     .items_center()
                     .gap(px(8.))
-                    .child(text_button("cancel-rollback", "取消", false).on_click(
-                        cx.listener(|view, _, window, cx| view.close_overlay(window, cx)),
-                    ))
-                    .child(danger_button("confirm-rollback", "确认回滚", enabled).when(
-                        enabled,
-                        |btn| {
-                            btn.on_click(cx.listener(move |view, _, window, cx| {
-                                view.close_overlay(window, cx);
-                                view.dispatch_repo_op(
-                                    RepoOpAction::RollbackFile {
-                                        target: target.clone(),
-                                        head: head.clone(),
-                                        side,
-                                        file: file.clone(),
-                                    },
-                                    cx,
-                                );
-                            }))
-                        },
-                    )),
+                    .child(
+                        text_button("cancel-rollback", tr("取消", "Cancel"), false).on_click(
+                            cx.listener(|view, _, window, cx| view.close_overlay(window, cx)),
+                        ),
+                    )
+                    .child(
+                        danger_button("confirm-rollback", confirm_label, enabled).when(
+                            enabled,
+                            |btn| {
+                                btn.on_click(cx.listener(move |view, _, window, cx| {
+                                    view.close_overlay(window, cx);
+                                    if files.len() == 1 {
+                                        let (side, file) = files[0].clone();
+                                        view.dispatch_repo_op(
+                                            RepoOpAction::RollbackFile {
+                                                target: target.clone(),
+                                                head: head.clone(),
+                                                side,
+                                                file,
+                                            },
+                                            cx,
+                                        );
+                                    } else {
+                                        view.dispatch_repo_op(
+                                            RepoOpAction::RollbackFiles {
+                                                target: target.clone(),
+                                                head: head.clone(),
+                                                files: files.clone(),
+                                            },
+                                            cx,
+                                        );
+                                    }
+                                }))
+                            },
+                        ),
+                    ),
             )
     }
 

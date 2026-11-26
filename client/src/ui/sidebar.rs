@@ -368,7 +368,10 @@ impl DesktopView {
                     .filter(|&member_id| {
                         repo_matches(member_id)
                             || self.workspace.nested.get(&member_id).is_some_and(|nested| {
-                                nested.children.iter().any(|&child_id| repo_matches(child_id))
+                                nested
+                                    .children
+                                    .iter()
+                                    .any(|&child_id| repo_matches(child_id))
                             })
                     })
                     .collect()
@@ -1326,9 +1329,11 @@ impl DesktopView {
                                             .border_color(rgb(theme().error))
                                             .text_color(rgb(theme().error))
                                     })
-                                    .on_click(cx.listener(|view, _, _, cx| {
-                                        view.dispatch(Action::CancelBatchFetch, cx);
-                                    }))
+                                    .on_click(cx.listener(
+                                        |view, _, _, cx| {
+                                            view.dispatch(Action::CancelBatchFetch, cx);
+                                        },
+                                    ))
                                 })
                                 .child(if cancel_disabled {
                                     tr("取消中", "Stopping")
@@ -1575,11 +1580,13 @@ impl DesktopView {
                     .text_size(rems(0.64)),
                 )
             })
-            .on_click(window.listener_for(entity, move |view, event: &gpui::ClickEvent, _, cx| {
-                if event.click_count() == 1 {
-                    view.dispatch(Action::ToggleGroup(id), cx);
-                }
-            }));
+            .on_click(
+                window.listener_for(entity, move |view, event: &gpui::ClickEvent, _, cx| {
+                    if event.click_count() == 1 {
+                        view.dispatch(Action::ToggleGroup(id), cx);
+                    }
+                }),
+            );
 
         div()
             .id(("repo-group", group_key))
@@ -1892,8 +1899,7 @@ impl DesktopView {
                         .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
                         .on_click(window.listener_for(entity, move |view, _, _, cx| {
                             view.nested_visible_limits.insert(parent_id, total_children);
-                            view.nested_limits_version =
-                                view.nested_limits_version.wrapping_add(1);
+                            view.nested_limits_version = view.nested_limits_version.wrapping_add(1);
                             cx.notify();
                         }))
                         .child(all_label),
@@ -1916,8 +1922,7 @@ impl DesktopView {
                         .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
                         .on_click(window.listener_for(entity, move |view, _, _, cx| {
                             view.nested_visible_limits.remove(&parent_id);
-                            view.nested_limits_version =
-                                view.nested_limits_version.wrapping_add(1);
+                            view.nested_limits_version = view.nested_limits_version.wrapping_add(1);
                             cx.notify();
                         }))
                         .child(tr("收起", "Less")),
@@ -2174,7 +2179,10 @@ impl DesktopView {
         };
 
         let more_btn = icon_button(
-            ("repo-options", (id.get() as usize) * 4 + usize::from(nested_parent.is_some())),
+            (
+                "repo-options",
+                (id.get() as usize) * 4 + usize::from(nested_parent.is_some()),
+            ),
             Icon::More,
             tr("仓库操作", "Repository actions"),
         )
@@ -2231,12 +2239,14 @@ impl DesktopView {
                     view.drop_repo_to_group(dragged, group, cx);
                 },
             ))
-            .on_hover(window.listener_for(entity, move |view, hovered: &bool, _, cx| {
-                let hint = hovered
-                    .then(|| view.workspace.repo(id).map(repo_hover_summary))
-                    .flatten();
-                view.set_hovered_hint(hint, cx);
-            }))
+            .on_hover(
+                window.listener_for(entity, move |view, hovered: &bool, _, cx| {
+                    let hint = hovered
+                        .then(|| view.workspace.repo(id).map(repo_hover_summary))
+                        .flatten();
+                    view.set_hovered_hint(hint, cx);
+                }),
+            )
             .on_drag(
                 DraggedRepo {
                     id,
@@ -2447,26 +2457,31 @@ impl DesktopView {
             .items_center()
             .gap(px(4.))
             .child(name)
-            .children(nested_summary.as_ref().map(|(_, has_diverged, badge_text)| {
-                let (bg, border, fg) = if *has_diverged {
-                    (theme().warn_bg, theme().warn_border, theme().warning)
-                } else {
-                    (theme().card, theme().border_strong, theme().muted)
-                };
-                div()
-                    .id(("nested-pill", id.get() as usize))
-                    .flex_shrink_0()
-                    .px(px(5.5))
-                    .py(px(0.5))
-                    .rounded(px(4.))
-                    .bg(rgb(bg))
-                    .border_1()
-                    .border_color(rgb(border))
-                    .text_size(rems(0.66))
-                    .line_height(rems(0.92))
-                    .text_color(rgb(fg))
-                    .on_hover(window.listener_for(entity, move |view, hovered: &bool, _, cx| {
-                        let tip = hovered.then(|| {
+            .children(
+                nested_summary
+                    .as_ref()
+                    .map(|(_, has_diverged, badge_text)| {
+                        let (bg, border, fg) = if *has_diverged {
+                            (theme().warn_bg, theme().warn_border, theme().warning)
+                        } else {
+                            (theme().card, theme().border_strong, theme().muted)
+                        };
+                        div()
+                            .id(("nested-pill", id.get() as usize))
+                            .flex_shrink_0()
+                            .px(px(5.5))
+                            .py(px(0.5))
+                            .rounded(px(4.))
+                            .bg(rgb(bg))
+                            .border_1()
+                            .border_color(rgb(border))
+                            .text_size(rems(0.66))
+                            .line_height(rems(0.92))
+                            .text_color(rgb(fg))
+                            .on_hover(window.listener_for(
+                                entity,
+                                move |view, hovered: &bool, _, cx| {
+                                    let tip = hovered.then(|| {
                             if nested_diverged > 0 {
                                 if is_zh() {
                                     format!("{nested_total} 个子仓库 · {nested_diverged} 个待同步")
@@ -2479,15 +2494,17 @@ impl DesktopView {
                                 format!("{nested_total} sub-repos · synced")
                             }
                         });
-                        view.set_hovered_hint(tip, cx);
-                    }))
-                    .hover(|s| s.border_color(rgb(theme().brand)))
-                    .child(badge_text.clone())
-                    .on_click(window.listener_for(entity, move |view, _, _, cx| {
-                        cx.stop_propagation();
-                        view.dispatch(Action::ToggleNested(id), cx);
-                    }))
-            }))
+                                    view.set_hovered_hint(tip, cx);
+                                },
+                            ))
+                            .hover(|s| s.border_color(rgb(theme().brand)))
+                            .child(badge_text.clone())
+                            .on_click(window.listener_for(entity, move |view, _, _, cx| {
+                                cx.stop_propagation();
+                                view.dispatch(Action::ToggleNested(id), cx);
+                            }))
+                    }),
+            )
             .when_some(active_remote_pill, |row, pill| {
                 row.child(render_active_pill(pill))
             })

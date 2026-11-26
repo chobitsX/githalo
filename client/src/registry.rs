@@ -1043,8 +1043,7 @@ fn expand_and_delete_worktrees(
         let grouped = all_grouped_worktrees(transaction)?;
         let edges = all_nested_edges(transaction)?;
         let (children_by_parent, parents_by_child) = build_nested_adjacency(&edges);
-        let mut queue: std::collections::VecDeque<WorktreeId> =
-            to_delete.iter().copied().collect();
+        let mut queue: std::collections::VecDeque<WorktreeId> = to_delete.iter().copied().collect();
         while let Some(parent) = queue.pop_front() {
             let Some(children) = children_by_parent.get(&parent) else {
                 continue;

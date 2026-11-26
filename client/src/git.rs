@@ -213,7 +213,12 @@ pub fn read_sync_with_common(target: &WorktreeTarget) -> SyncReadResult {
     };
     let status = read_status_fast(&target.root, &resolved.git_dir, &resolved.common_dir)
         .unwrap_or_else(|reason| SyncStatus::ReadFailed { reason });
-    let stamp = capture_state_stamp(&target.root, &resolved.git_dir, &resolved.common_dir, &status);
+    let stamp = capture_state_stamp(
+        &target.root,
+        &resolved.git_dir,
+        &resolved.common_dir,
+        &status,
+    );
     SyncReadResult {
         snapshot: SyncSnapshot {
             worktree: target.clone(),
@@ -516,11 +521,7 @@ fn try_read_loose_ref_oid(
     None
 }
 
-fn read_status_fast(
-    root: &Path,
-    git_dir: &Path,
-    common_dir: &Path,
-) -> Result<SyncStatus, String> {
+fn read_status_fast(root: &Path, git_dir: &Path, common_dir: &Path) -> Result<SyncStatus, String> {
     let is_reftable = common_dir.join("reftable").exists();
     let branch_ref = match try_read_head_file(git_dir, is_reftable) {
         Some(FastHead::Detached(head_oid)) => {

@@ -443,8 +443,13 @@ impl DesktopView {
             }
         }))
         .on_action(cx.listener(|view, _: &CloseActiveTab, window, cx| {
-            if view.overlay.is_some() {
+            if view.popup_menu_visible {
+                view.close_popup_menu(cx);
+            } else if view.overlay.is_some() {
                 view.close_overlay(window, cx);
+            } else if let Some(active_id) = view.custom_tabs.active_id {
+                view.custom_tabs.close(active_id);
+                cx.notify();
             } else if view.working_patch_open() {
                 view.dispatch_daily(DailyAction::CloseChange, cx);
             } else if view.stash_patch_open() {

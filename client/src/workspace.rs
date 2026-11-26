@@ -20,6 +20,7 @@ use std::time::SystemTime;
 use crate::git::{self, FetchOutcome};
 pub use crate::history::{
     BlameLine, ChangedFile, Commit, CommitChangesBundle, CommitRef, CommitRefKind,
+    LocalCompareDiff, ParentChangesGroup,
 };
 pub use crate::nested::{
     DEFAULT_MAX_DEPTH, DEFAULT_MAX_DIRS, DiscoveredNestedRepo, NestedScanOutcome,
@@ -36,7 +37,7 @@ pub use cherry_pick::{CherryPickAction, CherryPickState};
 pub use daily::{
     ActiveWrite, CommitReceipt, DailyAction, DailyReview, DailyState, ReviewKind, WriteKind,
 };
-pub use repo_ops::{RepoOpAction, RepoOpPreview, RepoOpsState};
+pub use repo_ops::{FileInspectData, RepoOpAction, RepoOpPreview, RepoOpsState};
 use runtime::Runtime;
 pub use shelves::{ShelfAction, ShelfState};
 pub use stashes::{StashAction, StashState};
@@ -169,8 +170,13 @@ pub enum Action {
         anchor: Option<String>,
     },
     SetBranchFilter(Option<String>),
+    SetShowChangesToParents(bool),
     LoadMoreHistory,
     SelectFile(PathBuf),
+    SelectParentFile {
+        parent_oid: String,
+        path: PathBuf,
+    },
     CloseDiff,
     ToggleDir(PathBuf),
     ReloadProjectTree,
@@ -334,7 +340,10 @@ pub struct Workspace {
     pub commit_refs_loading: bool,
     pub changes: Vec<ChangedFile>,
     pub changes_contiguous: bool,
+    pub show_changes_to_parents: bool,
+    pub parent_changes: Vec<ParentChangesGroup>,
     pub selected_file: Option<PathBuf>,
+    pub selected_file_parent: Option<String>,
     pub diff: Option<String>,
     pub tree: Vec<ProjectEntry>,
     pub project_git_status: BTreeMap<PathBuf, FileGitStatus>,
@@ -417,7 +426,10 @@ impl Workspace {
                 commit_refs_loading: false,
                 changes: vec![],
                 changes_contiguous: true,
+                show_changes_to_parents: false,
+                parent_changes: vec![],
                 selected_file: None,
+                selected_file_parent: None,
                 diff: None,
                 tree: vec![],
                 project_git_status: BTreeMap::new(),
@@ -583,8 +595,7 @@ impl Workspace {
             return;
         }
         let (children_by_parent, parents_by_child) = self.nested_adjacency();
-        let mut queue: std::collections::VecDeque<WorktreeId> =
-            to_delete.iter().copied().collect();
+        let mut queue: std::collections::VecDeque<WorktreeId> = to_delete.iter().copied().collect();
         while let Some(parent) = queue.pop_front() {
             let Some(children) = children_by_parent.get(&parent) else {
                 continue;
@@ -981,6 +992,7 @@ impl Workspace {
                     self.load_history();
                 }
             }
+            Action::SetShowChangesToParents(show) => self.set_show_changes_to_parents(show),
             Action::LoadMoreHistory => {
                 self.history_limit = self
                     .history_limit
@@ -988,6 +1000,9 @@ impl Workspace {
                 self.load_history();
             }
             Action::SelectFile(path) => self.select_file(&path),
+            Action::SelectParentFile { parent_oid, path } => {
+                self.select_parent_file(&parent_oid, &path);
+            }
             Action::CloseDiff => self.close_diff(),
             Action::ToggleDir(path) => self.toggle_dir(&path),
             Action::ReloadProjectTree => self.reload_tree(),

@@ -6,8 +6,8 @@ use crate::{
     conflict_ops::{self, ConflictStrategy, ThreeWayConflict},
     history::{self, BlameLine, ChangedFile, Commit},
     history_ops::{
-        self, ResetMode, ResetPreview, RevertAbortOutcome, RevertOptions, RevertOutcome,
-        RevertPreview, RevertStatus, TagInfo,
+        self, DropChangesOutcome, ResetMode, ResetPreview, RevertAbortOutcome, RevertOptions,
+        RevertOutcome, RevertPreview, RevertStatus, TagInfo,
     },
     merge_ops::{self, MergeAbortOutcome, MergeMode, MergeOutcome, MergePreview, MergeStatus},
     rebase_ops::{
@@ -138,6 +138,11 @@ pub enum RepoOpAction {
         side: DiffSide,
         file: FileChange,
     },
+    RollbackFiles {
+        target: WorktreeTarget,
+        head: ChangesHead,
+        files: Vec<(DiffSide, FileChange)>,
+    },
     LoadHeadMessage {
         target: WorktreeTarget,
     },
@@ -267,6 +272,29 @@ pub enum RepoOpAction {
         snapshot: Arc<BranchSnapshot>,
         reference: OsString,
         upstream: Option<String>,
+    },
+    ApplySelectedFileChanges {
+        target: WorktreeTarget,
+        oids: Vec<String>,
+        files: Vec<ChangedFile>,
+        reverse: bool,
+        explicit_parent: Option<String>,
+    },
+    GetFilesFromRevision {
+        target: WorktreeTarget,
+        oid: String,
+        files: Vec<ChangedFile>,
+    },
+    ExtractSelectedChanges {
+        target: WorktreeTarget,
+        commit_oid: String,
+        files: Vec<ChangedFile>,
+        new_message: String,
+    },
+    DropSelectedChanges {
+        target: WorktreeTarget,
+        commit_oid: String,
+        files: Vec<ChangedFile>,
     },
 }
 
@@ -946,6 +974,16 @@ impl Workspace {
                     Ok(Effect::IndexChanged(format!("已回滚文件改动：{label}")))
                 });
             }
+            RepoOpAction::RollbackFiles {
+                target,
+                head,
+                files,
+            } => {
+                self.write(target.clone(), move || {
+                    let count = conflict_ops::rollback_files(&target, &head, &files)?;
+                    Ok(Effect::IndexChanged(format!("已回滚 {count} 个文件的改动")))
+                });
+            }
             RepoOpAction::LoadHeadMessage { target } => {
                 if self.current_target().as_ref() != Some(&target) {
                     return;
@@ -1305,9 +1343,18 @@ impl Workspace {
                 self.repo_ops.file_inspect_loading = true;
                 self.repo_ops.file_inspect = None;
                 self.runtime.detail.run(move || {
-                    let result = history::file_history(&target.root, &path).map(|commits| {
-                        let blame =
-                            history::file_blame(&target.root, &revision, &path).unwrap_or_default();
+                    let (history_res, blame_res) = std::thread::scope(|scope| {
+                        let root_ref = target.root.as_path();
+                        let rev_ref = revision.as_str();
+                        let path_ref = path.as_path();
+                        let blame_handle =
+                            scope.spawn(move || history::file_blame(root_ref, rev_ref, path_ref));
+                        let history_res = history::file_history_at(root_ref, rev_ref, path_ref);
+                        let blame_res = blame_handle.join().unwrap_or_else(|_| Ok(Vec::new()));
+                        (history_res, blame_res)
+                    });
+                    let result = history_res.map(|commits| {
+                        let blame = blame_res.unwrap_or_default();
                         Box::new(FileInspectData {
                             target,
                             path,
@@ -1455,6 +1502,93 @@ impl Workspace {
                         None => format!("已解除分支 {branch_name} 的上游跟踪"),
                     };
                     Ok(Effect::Changed(msg))
+                });
+            }
+            RepoOpAction::ApplySelectedFileChanges {
+                target,
+                oids,
+                files,
+                reverse,
+                explicit_parent,
+            } => {
+                if !self.check_prepare_target(&target) {
+                    return;
+                }
+                self.write(target.clone(), move || {
+                    let outcome = history_ops::apply_commit_file_changes(
+                        &target,
+                        &oids,
+                        &files,
+                        reverse,
+                        explicit_parent.as_deref(),
+                    )?;
+                    Ok(Effect::IndexChanged(outcome.message))
+                });
+            }
+            RepoOpAction::GetFilesFromRevision { target, oid, files } => {
+                if !self.check_prepare_target(&target) {
+                    return;
+                }
+                self.write(target.clone(), move || {
+                    let msg = history_ops::checkout_files_from_revision(&target, &oid, &files)?;
+                    Ok(Effect::IndexChanged(msg))
+                });
+            }
+            RepoOpAction::ExtractSelectedChanges {
+                target,
+                commit_oid,
+                files,
+                new_message,
+            } => {
+                if !self.check_prepare_target(&target) {
+                    return;
+                }
+                self.write(target.clone(), move || {
+                    let outcome = history_ops::extract_selected_changes(
+                        &target,
+                        &commit_oid,
+                        &files,
+                        &new_message,
+                    )?;
+                    let short = outcome
+                        .extracted_commit_oid
+                        .get(..8)
+                        .unwrap_or(&outcome.extracted_commit_oid);
+                    Ok(Effect::Changed(format!(
+                        "已将选定更改提取为独立提交 {short}"
+                    )))
+                });
+            }
+            RepoOpAction::DropSelectedChanges {
+                target,
+                commit_oid,
+                files,
+            } => {
+                if !self.check_prepare_target(&target) {
+                    return;
+                }
+                self.write(target.clone(), move || {
+                    match history_ops::drop_selected_changes(&target, &commit_oid, &files)? {
+                        DropChangesOutcome::Dropped { new_head_oid } => {
+                            let short = new_head_oid.get(..8).unwrap_or(&new_head_oid);
+                            Ok(Effect::Changed(format!(
+                                "已从提交中丢弃选定更改（当前 HEAD {short}）"
+                            )))
+                        }
+                        DropChangesOutcome::RebaseStopped { status, details } => {
+                            let count = status.conflicts().len();
+                            let msg = if count > 0 {
+                                format!(
+                                    "丢弃选定更改重放后续提交时产生 {count} 个冲突，请解决后继续或中止 Rebase"
+                                )
+                            } else if !details.is_empty() {
+                                format!("丢弃选定更改重放暂停：{details}")
+                            } else {
+                                "丢弃选定更改重放已暂停，请解决冲突后继续或中止 Rebase".to_owned()
+                            };
+                            Ok(Effect::Changed(msg))
+                        }
+                    }
                 });
             }
         }

@@ -392,6 +392,9 @@ pub(super) enum Icon {
     CollapseAll,
     Compare,
     Copy,
+    DiffApplyLeft,
+    DiffApplyRight,
+    DiffRevert,
     Download,
     ExpandAll,
     Eye,
@@ -420,6 +423,14 @@ pub(super) enum Icon {
 }
 
 pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
+    icon_canvas(kind, color, 1.25).size(rems(1.0))
+}
+
+pub(super) fn icon_sized(kind: Icon, color: u32, size_px: f32) -> impl IntoElement {
+    icon_canvas(kind, color, 1.55).size(px(size_px))
+}
+
+fn icon_canvas(kind: Icon, color: u32, base_stroke: f32) -> gpui::Canvas<()> {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -428,7 +439,7 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
             let s = (bounds.size.width / px(16.)).max(0.5);
             let at = |x, y| origin + point(px(x * s), px(y * s));
             let rad = |r| point(px(r * s), px(r * s));
-            let mut stroke = PathBuilder::stroke(px(1.25 * s));
+            let mut stroke = PathBuilder::stroke(px(base_stroke * s));
             let mut fill_path: Option<PathBuilder> = None;
             let mut draw = |vertices: &[(f32, f32)]| {
                 if let Some((&(x, y), rest)) = vertices.split_first() {
@@ -505,6 +516,27 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
                         (10.5, 2.8),
                         (10.5, 4.),
                     ]);
+                    &[]
+                }
+                Icon::DiffApplyRight => {
+                    // Matches JetBrains expui/diff/arrowRight@14x14.svg crisp double chevron `»`
+                    draw(&[(2.8, 3.0), (7.8, 8.0), (2.8, 13.0)]);
+                    draw(&[(8.2, 3.0), (13.2, 8.0), (8.2, 13.0)]);
+                    &[]
+                }
+                Icon::DiffApplyLeft => {
+                    // Matches JetBrains expui/diff/arrow@14x14.svg crisp double chevron `«`
+                    draw(&[(13.2, 3.0), (8.2, 8.0), (13.2, 13.0)]);
+                    draw(&[(7.8, 3.0), (2.8, 8.0), (7.8, 13.0)]);
+                    &[]
+                }
+                Icon::DiffRevert => {
+                    // Matches JetBrains expui/diff/revert@14x14.svg clean curved undo arrow
+                    draw(&[(6.0, 2.8), (2.4, 6.2), (6.0, 9.6)]);
+                    stroke.move_to(at(2.6, 6.2));
+                    stroke.line_to(at(9.8, 6.2));
+                    stroke.arc_to(rad(3.4), px(0.), false, true, at(9.8, 13.0));
+                    stroke.line_to(at(5.2, 13.0));
                     &[]
                 }
                 Icon::Download => {
@@ -776,7 +808,6 @@ pub(super) fn icon(kind: Icon, color: u32) -> impl IntoElement {
             }
         },
     )
-    .size(rems(1.0))
     .flex_shrink_0()
 }
 

@@ -3,6 +3,7 @@
 pub mod branch_ops;
 pub mod cherry_pick;
 pub mod conflict_ops;
+pub mod diff_apply;
 pub mod git;
 pub mod history;
 pub mod history_ops;
