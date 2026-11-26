@@ -142,6 +142,9 @@ pub(super) enum BranchTreeRow {
         head_oid: Option<String>,
         is_detached: bool,
     },
+    AllBranches {
+        key: String,
+    },
     Section {
         key: String,
         title: String,
@@ -198,6 +201,7 @@ impl BranchTreeRow {
     fn key(&self) -> &str {
         match self {
             Self::Head { key, .. }
+            | Self::AllBranches { key }
             | Self::Section { key, .. }
             | Self::Folder { key, .. }
             | Self::LocalBranch { key, .. }
@@ -319,6 +323,12 @@ pub(super) fn build_branch_tree_rows(
             branch_label: head_label,
             head_oid: snapshot.head_oid().map(ToOwned::to_owned),
             is_detached,
+        });
+    }
+    let all_matches = !filtering || "all".contains(&query) || "全部".contains(&query);
+    if all_matches && !opts.only_favorites {
+        rows.push(BranchTreeRow::AllBranches {
+            key: "all".to_owned(),
         });
     }
 
@@ -728,7 +738,7 @@ impl DesktopView {
         let worktree = self.active_worktree().cloned();
         if self.branches_ui.worktree != worktree {
             self.branches_ui.worktree = worktree;
-            self.branches_ui.selected_key = None;
+            self.branches_ui.selected_key = Some("head".to_owned());
             self.branches_ui.collapsed.clear();
             self.branches_ui.scroll = UniformListScrollHandle::new();
             if let Some(window) = window {
@@ -815,8 +825,8 @@ impl DesktopView {
                 self.branches_ui.selected_key = Some(key.clone());
                 match self.branches_click_mode {
                     BranchClickMode::Filter => {
-                        if self.workspace.branch_filter.is_some() {
-                            self.dispatch(Action::SetBranchFilter(None), cx);
+                        if self.workspace.branch_filter.as_deref() != Some("HEAD") {
+                            self.dispatch(Action::SetBranchFilter(Some("HEAD".to_owned())), cx);
                         } else if let Some(oid) = head_oid {
                             self.jump_to_commit_oid(oid, cx);
                         }
@@ -826,6 +836,13 @@ impl DesktopView {
                             self.jump_to_commit_oid(oid, cx);
                         }
                     }
+                }
+                cx.notify();
+            }
+            BranchTreeRow::AllBranches { key } => {
+                self.branches_ui.selected_key = Some(key.clone());
+                if self.workspace.branch_filter.is_some() {
+                    self.dispatch(Action::SetBranchFilter(None), cx);
                 }
                 cx.notify();
             }
@@ -2978,13 +2995,19 @@ fn render_branch_row(
         BranchTreeRow::Head { branch_label, .. } => {
             let menu_snap = snapshot.cloned();
             let menu_label = branch_label.clone();
-            base.child(icon(Icon::HeadTag, theme().brand))
+            let is_filtered = active_filter == Some("HEAD");
+            base.when(is_filtered && !is_selected, |el| el.bg(rgb(theme().brand_bg)))
+                .child(icon(Icon::HeadTag, theme().brand))
                 .child(
                     elide(tr("HEAD (当前分支)", "HEAD (Current Branch)"))
                         .flex_1()
                         .text_size(rems(0.8125))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(theme().text)),
+                        .text_color(rgb(if is_filtered {
+                            theme().brand_text
+                        } else {
+                            theme().text
+                        })),
                 )
                 .child(
                     div()
@@ -2993,6 +3016,15 @@ fn render_branch_row(
                         .text_color(rgb(theme().subtle))
                         .child(branch_label),
                 )
+                .when(is_filtered, |el| {
+                    el.child(
+                        div()
+                            .size(px(5.5))
+                            .flex_shrink_0()
+                            .rounded(px(999.))
+                            .bg(rgb(theme().brand)),
+                    )
+                })
                 .on_click(window.listener_for(
                     entity,
                     move |view, event: &gpui::ClickEvent, window, cx| {
@@ -3020,6 +3052,49 @@ fn render_branch_row(
                         },
                     ),
                 )
+                .into_any_element()
+        }
+        BranchTreeRow::AllBranches { .. } => {
+            let is_filtered = active_filter.is_none();
+            base.when(is_filtered && !is_selected, |el| el.bg(rgb(theme().brand_bg)))
+                .child(icon(
+                    Icon::Stack,
+                    if is_filtered {
+                        theme().brand
+                    } else {
+                        theme().subtle
+                    },
+                ))
+                .child(
+                    elide(tr("全部分支", "All Branches"))
+                        .flex_1()
+                        .text_size(rems(0.8125))
+                        .font_weight(if is_filtered {
+                            FontWeight::MEDIUM
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .text_color(rgb(if is_filtered {
+                            theme().brand_text
+                        } else {
+                            theme().muted
+                        })),
+                )
+                .when(is_filtered, |el| {
+                    el.child(
+                        div()
+                            .size(px(5.5))
+                            .flex_shrink_0()
+                            .rounded(px(999.))
+                            .bg(rgb(theme().brand)),
+                    )
+                })
+                .on_click(window.listener_for(
+                    entity,
+                    move |view, event: &gpui::ClickEvent, window, cx| {
+                        view.handle_branch_row_click(&click_row, event.click_count(), window, cx);
+                    },
+                ))
                 .into_any_element()
         }
         BranchTreeRow::Section {

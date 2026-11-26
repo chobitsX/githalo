@@ -34,8 +34,8 @@ use githalo::workspace::{
 use githalo::worktree::WorktreeTarget;
 use gpui::{
     AnyElement, App, Context, CursorStyle, Div, Entity, FocusHandle, Focusable, FontWeight,
-    KeyBinding, MouseButton, Pixels, Role, UniformListScrollHandle, Window, WindowAppearance,
-    actions, div, prelude::*, px, rems, rgb,
+    KeyBinding, ListAlignment, ListState, MouseButton, Pixels, Role, UniformListScrollHandle,
+    Window, WindowAppearance, actions, div, prelude::*, px, rems, rgb,
 };
 
 use components::*;
@@ -184,6 +184,11 @@ pub struct DesktopView {
     repo_filter: Entity<TextField>,
     repo_filter_diverged_only: bool,
     nested_visible_limits: BTreeMap<WorktreeId, usize>,
+    nested_limits_version: u64,
+    sidebar_board_cache: sidebar::SidebarBoardCache,
+    sidebar_list_state: ListState,
+    palette_scroll: UniformListScrollHandle,
+    adopt_nested_scroll: UniformListScrollHandle,
     overlay: Option<Overlay>,
     previous_focus: Option<FocusHandle>,
     notice: Option<String>,
@@ -285,10 +290,22 @@ impl DesktopView {
         })
         .detach();
         cx.spawn(async move |view, cx| {
-            while let Ok(update) = updates.recv().await {
+            while let Ok(first) = updates.recv().await {
                 if view
                     .update(cx, |view, cx| {
-                        view.workspace.apply(update);
+                        view.workspace.apply(first);
+                        // Drain already-queued updates in one batch so bursty background status
+                        // completions coalesce into a single UI sync + repaint frame.
+                        let mut drained = 1usize;
+                        while drained < 128 {
+                            match updates.try_recv() {
+                                Ok(next) => {
+                                    view.workspace.apply(next);
+                                    drained += 1;
+                                }
+                                Err(_) => break,
+                            }
+                        }
                         view.sync_history_view(cx);
                         view.sync_branches_panel(None, cx);
                         view.ensure_branches_loaded_if_visible(cx);
@@ -314,7 +331,7 @@ impl DesktopView {
                     .is_none_or(|prev| now.duration_since(prev) >= Duration::from_secs(3));
                 if should_reload {
                     view.last_activation_reload = Some(now);
-                    view.dispatch(Action::Reload, cx);
+                    view.dispatch(Action::RefreshActive, cx);
                 }
             }
         })
@@ -340,6 +357,11 @@ impl DesktopView {
             repo_filter,
             repo_filter_diverged_only: false,
             nested_visible_limits: BTreeMap::new(),
+            nested_limits_version: 0,
+            sidebar_board_cache: sidebar::SidebarBoardCache::default(),
+            sidebar_list_state: ListState::new(0, ListAlignment::Top, px(240.)),
+            palette_scroll: UniformListScrollHandle::new(),
+            adopt_nested_scroll: UniformListScrollHandle::new(),
             overlay: None,
             previous_focus: None,
             notice: None,
@@ -448,6 +470,7 @@ impl DesktopView {
         if self.ui_scale != normalized {
             self.ui_scale = normalized;
             window.set_rem_size(px(16. * (normalized as f32 / 100.)));
+            self.sidebar_list_state.remeasure();
             self.save_preferences();
             self.refresh_app_menus(cx);
             cx.notify();
@@ -709,9 +732,12 @@ impl DesktopView {
             {
                 *selected_idx = 0;
             }
+            view.palette_scroll
+                .scroll_to_item(0, gpui::ScrollStrategy::Top);
             cx.notify();
         })
         .detach();
+        self.palette_scroll = UniformListScrollHandle::new();
         self.open_confirmation(
             Dialog::CommandPalette {
                 input: input.clone(),
@@ -863,8 +889,24 @@ impl DesktopView {
             ]);
         }
 
-        // 2. 仓库快速跳转
+        // 2. 仓库快速跳转（先用预存小写键过滤，再构造展示字符串，避免千仓规模下每按键全量 format）
+        let q_trimmed = query.trim().to_lowercase();
+        let q_tokens: Vec<&str> = q_trimmed.split_whitespace().collect();
+        let repo_category = tr("跳转仓库", "Switch Repo");
+        let repo_category_lower = repo_category.to_lowercase();
         for repo in &self.workspace.repos {
+            if !q_tokens.is_empty() {
+                let branch_lower = repo.branch.to_lowercase();
+                let matches = q_tokens.iter().all(|tok| {
+                    repo_category_lower.contains(tok)
+                        || repo.name_lower.contains(tok)
+                        || repo.path_lower.contains(tok)
+                        || branch_lower.contains(tok)
+                });
+                if !matches {
+                    continue;
+                }
+            }
             let is_current = self.workspace.selected == Some(repo.target.id);
             let sub = format!(
                 "{} · {}",
@@ -876,7 +918,7 @@ impl DesktopView {
                 abbreviate_home_path(&repo.target.root.to_string_lossy())
             );
             list.push(PaletteEntry {
-                category: tr("跳转仓库", "Switch Repo"),
+                category: repo_category,
                 title: if is_current {
                     format!("{}  ✓", repo.name)
                 } else {
@@ -1230,6 +1272,8 @@ impl DesktopView {
                     } else {
                         *selected_idx - 1
                     };
+                    view.palette_scroll
+                        .scroll_to_item(*selected_idx, gpui::ScrollStrategy::Top);
                     cx.notify();
                 }
             }))
@@ -1239,6 +1283,8 @@ impl DesktopView {
                     && count > 0
                 {
                     *selected_idx = (*selected_idx + 1) % count;
+                    view.palette_scroll
+                        .scroll_to_item(*selected_idx, gpui::ScrollStrategy::Bottom);
                     cx.notify();
                 }
             }))
@@ -1280,93 +1326,118 @@ impl DesktopView {
                 .h(px(120.))
                 .into_any_element()
             } else {
-                div()
-                    .id("command-palette-list")
-                    .max_h(max_h)
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .children(entries.into_iter().enumerate().map(|(idx, entry)| {
-                        let is_sel = idx == clamped_sel;
-                        let cmd = entry.cmd;
-                        div()
-                            .id(("palette-item", idx))
-                            .role(Role::MenuItem)
-                            .aria_selected(is_sel)
-                            .relative()
-                            .px(px(10.))
-                            .py(px(6.))
-                            .rounded(px(6.))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .when(is_sel, |r| r.bg(rgb(theme().active)).child(selection_bar()))
-                            .hover(move |s| {
-                                s.bg(rgb(if is_sel {
-                                    theme().active
-                                } else {
-                                    theme().hover
-                                }))
-                            })
-                            .child(icon(
-                                entry.icon,
-                                if is_sel {
-                                    theme().brand_text
-                                } else {
-                                    theme().muted
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .px(px(5.))
-                                    .py(px(1.))
-                                    .rounded(px(4.))
-                                    .bg(rgb(theme().card))
-                                    .text_size(px(10.5))
-                                    .text_color(rgb(theme().subtle))
-                                    .child(entry.category),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        elide(entry.title)
-                                            .text_color(rgb(theme().text))
-                                            .when(is_sel, |t| t.font_weight(FontWeight::MEDIUM)),
-                                    )
-                                    .when_some(entry.subtitle, |r, sub| {
-                                        r.child(
-                                            elide(sub)
-                                                .flex_1()
-                                                .text_size(px(11.))
-                                                .text_color(rgb(theme().subtle)),
-                                        )
-                                    }),
-                            )
-                            .when_some(entry.shortcut, |r, sc| {
-                                r.child(
+                let row_h = px(32.);
+                let list_h = (row_h * count as f32).min(max_h);
+                let weak_view = cx.weak_entity();
+                gpui::uniform_list(
+                    "command-palette-list",
+                    count,
+                    move |range, window, _cx| {
+                        let Some(entity) = weak_view.upgrade() else {
+                            return Vec::new();
+                        };
+                        range
+                            .filter_map(|idx| {
+                                let entry = entries.get(idx)?;
+                                let is_sel = idx == clamped_sel;
+                                let cmd = entry.cmd.clone();
+                                Some(
                                     div()
-                                        .flex_shrink_0()
-                                        .px(px(5.))
-                                        .py(px(1.))
-                                        .rounded(px(4.))
-                                        .border_1()
-                                        .border_color(rgb(theme().border_strong))
-                                        .text_size(px(10.5))
-                                        .text_color(rgb(theme().muted))
-                                        .child(sc),
+                                        .id(("palette-item", idx))
+                                        .role(Role::MenuItem)
+                                        .aria_selected(is_sel)
+                                        .relative()
+                                        .h(row_h)
+                                        .px(px(10.))
+                                        .rounded(px(6.))
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .when(is_sel, |r| {
+                                            r.bg(rgb(theme().active)).child(selection_bar())
+                                        })
+                                        .hover(move |s| {
+                                            s.bg(rgb(if is_sel {
+                                                theme().active
+                                            } else {
+                                                theme().hover
+                                            }))
+                                        })
+                                        .child(icon(
+                                            entry.icon,
+                                            if is_sel {
+                                                theme().brand_text
+                                            } else {
+                                                theme().muted
+                                            },
+                                        ))
+                                        .child(
+                                            div()
+                                                .flex_shrink_0()
+                                                .px(px(5.))
+                                                .py(px(1.))
+                                                .rounded(px(4.))
+                                                .bg(rgb(theme().card))
+                                                .text_size(px(10.5))
+                                                .text_color(rgb(theme().subtle))
+                                                .child(entry.category),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(8.))
+                                                .child(
+                                                    elide(entry.title.clone())
+                                                        .text_color(rgb(theme().text))
+                                                        .when(is_sel, |t| {
+                                                            t.font_weight(FontWeight::MEDIUM)
+                                                        }),
+                                                )
+                                                .when_some(entry.subtitle.clone(), |r, sub| {
+                                                    r.child(
+                                                        elide(sub)
+                                                            .flex_1()
+                                                            .text_size(px(11.))
+                                                            .text_color(rgb(theme().subtle)),
+                                                    )
+                                                }),
+                                        )
+                                        .when_some(entry.shortcut.clone(), |r, sc| {
+                                            r.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .px(px(5.))
+                                                    .py(px(1.))
+                                                    .rounded(px(4.))
+                                                    .border_1()
+                                                    .border_color(rgb(theme().border_strong))
+                                                    .text_size(px(10.5))
+                                                    .text_color(rgb(theme().muted))
+                                                    .child(sc),
+                                            )
+                                        })
+                                        .on_click(window.listener_for(
+                                            &entity,
+                                            move |view, _, window, cx| {
+                                                view.execute_palette_command(
+                                                    cmd.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        )),
                                 )
                             })
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                view.execute_palette_command(cmd.clone(), window, cx);
-                            }))
-                    }))
-                    .into_any_element()
+                            .collect()
+                    },
+                )
+                .track_scroll(&self.palette_scroll)
+                .h(list_h)
+                .w_full()
+                .into_any_element()
             })
     }
 
@@ -2186,17 +2257,21 @@ impl DesktopView {
 }
 
 pub(super) fn abbreviate_home_path(raw: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        let home = home.trim_end_matches('/');
-        if !home.is_empty()
-            && let Some(rest) = raw.strip_prefix(home)
-        {
-            if rest.is_empty() {
-                return "~".to_owned();
-            }
-            if rest.starts_with('/') {
-                return format!("~{rest}");
-            }
+    static HOME_PREFIX: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let home = HOME_PREFIX.get_or_init(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| h.trim_end_matches('/').to_owned())
+            .filter(|h| !h.is_empty())
+    });
+    if let Some(home) = home.as_deref()
+        && let Some(rest) = raw.strip_prefix(home)
+    {
+        if rest.is_empty() {
+            return "~".to_owned();
+        }
+        if rest.starts_with('/') {
+            return format!("~{rest}");
         }
     }
     raw.to_owned()
@@ -2206,6 +2281,7 @@ impl Render for DesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.ui_scale as f32 / 100.;
         window.set_rem_size(px(16. * scale));
+        self.sync_sidebar_board_cache(cx);
         self.sync_container_discovery_dialog(window, cx);
         self.ensure_project_file_editors(window, cx);
         self.ensure_branches_loaded_if_visible(cx);

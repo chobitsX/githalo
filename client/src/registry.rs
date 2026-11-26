@@ -194,6 +194,10 @@ impl Registry {
         let mut connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.pragma_update(None, "foreign_keys", true)?;
+        // WAL + NORMAL significantly reduces fsync overhead on frequent status/preference writes.
+        let _ = connection.pragma_update(None, "journal_mode", "WAL");
+        let _ = connection.pragma_update(None, "synchronous", "NORMAL");
+        let _ = connection.pragma_update(None, "temp_store", "MEMORY");
 
         match schema_version(&connection)? {
             SCHEMA_VERSION => {}
@@ -584,6 +588,48 @@ impl Registry {
         Ok(())
     }
 
+    /// Registers multiple normalized worktree roots in one SQLite transaction.
+    pub fn register_batch(
+        &mut self,
+        roots: &[PathBuf],
+        group: Option<GroupId>,
+    ) -> Result<Vec<WorktreeId>> {
+        if roots.is_empty() {
+            return Ok(Vec::new());
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut ids = Vec::with_capacity(roots.len());
+        for root in roots {
+            let encoded_root = encode_root(root)?;
+            let id = match worktree_id_at(&transaction, &encoded_root)? {
+                Some(id) => id,
+                None => transaction.query_row(
+                    "INSERT INTO worktrees (root) VALUES (?1) RETURNING id",
+                    [encoded_root],
+                    |row| read_worktree_id(row, 0),
+                )?,
+            };
+            if let Some(group) = group {
+                insert_member(&transaction, id, group)?;
+            }
+            ids.push(id);
+        }
+        transaction.commit()?;
+        Ok(ids)
+    }
+
+    /// Sets the expansion state of a parent repository's nested sub-tree.
+    pub fn set_nested_expanded(&mut self, parent: WorktreeId, expanded: bool) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO nested_preferences (parent_id, expanded) VALUES (?1, ?2)
+             ON CONFLICT(parent_id) DO UPDATE SET expanded = excluded.expanded",
+            params![parent.get(), expanded],
+        )?;
+        Ok(())
+    }
+
     pub fn toggle_nested_expanded(&mut self, parent: WorktreeId) -> Result<()> {
         let transaction = self
             .connection
@@ -926,6 +972,21 @@ fn all_nested_edges(
     Ok(edges)
 }
 
+fn build_nested_adjacency(
+    edges: &[(WorktreeId, WorktreeId)],
+) -> (
+    BTreeMap<WorktreeId, Vec<WorktreeId>>,
+    BTreeMap<WorktreeId, Vec<WorktreeId>>,
+) {
+    let mut children_by_parent: BTreeMap<WorktreeId, Vec<WorktreeId>> = BTreeMap::new();
+    let mut parents_by_child: BTreeMap<WorktreeId, Vec<WorktreeId>> = BTreeMap::new();
+    for &(parent, child) in edges {
+        children_by_parent.entry(parent).or_default().push(child);
+        parents_by_child.entry(child).or_default().push(parent);
+    }
+    (children_by_parent, parents_by_child)
+}
+
 /// Deletes every candidate that is neither a member of any remaining group nor nested under any
 /// kept repository, then cascades to exclusive nested descendants.
 fn delete_orphan_candidates(
@@ -944,22 +1005,27 @@ fn delete_orphan_candidates(
         return Ok(0);
     }
     let edges = all_nested_edges(transaction)?;
+    let (children_by_parent, parents_by_child) = build_nested_adjacency(&edges);
     // Any candidate still nested under a repository outside `to_delete` must stay registered.
-    loop {
-        let protected: Vec<WorktreeId> = to_delete
-            .iter()
-            .copied()
-            .filter(|id| {
-                edges
-                    .iter()
-                    .any(|(parent, child)| child == id && !to_delete.contains(parent))
-            })
-            .collect();
-        if protected.is_empty() {
-            break;
+    let mut protected_queue = std::collections::VecDeque::new();
+    for &id in &to_delete {
+        if parents_by_child
+            .get(&id)
+            .is_some_and(|parents| parents.iter().any(|p| !to_delete.contains(p)))
+        {
+            protected_queue.push_back(id);
         }
-        for id in protected {
-            to_delete.remove(&id);
+    }
+    while let Some(id) = protected_queue.pop_front() {
+        if !to_delete.remove(&id) {
+            continue;
+        }
+        if let Some(children) = children_by_parent.get(&id) {
+            for &child in children {
+                if to_delete.contains(&child) {
+                    protected_queue.push_back(child);
+                }
+            }
         }
     }
     expand_and_delete_worktrees(transaction, to_delete, true)
@@ -976,26 +1042,24 @@ fn expand_and_delete_worktrees(
     if remove_nested {
         let grouped = all_grouped_worktrees(transaction)?;
         let edges = all_nested_edges(transaction)?;
-        loop {
-            let mut next = Vec::new();
-            for &(parent, child) in &edges {
-                if !to_delete.contains(&parent)
-                    || to_delete.contains(&child)
-                    || grouped.contains(&child)
-                {
+        let (children_by_parent, parents_by_child) = build_nested_adjacency(&edges);
+        let mut queue: std::collections::VecDeque<WorktreeId> =
+            to_delete.iter().copied().collect();
+        while let Some(parent) = queue.pop_front() {
+            let Some(children) = children_by_parent.get(&parent) else {
+                continue;
+            };
+            for &child in children {
+                if to_delete.contains(&child) || grouped.contains(&child) {
                     continue;
                 }
-                let referenced_elsewhere = edges
-                    .iter()
-                    .any(|&(other_parent, c)| c == child && !to_delete.contains(&other_parent));
-                if !referenced_elsewhere {
-                    next.push(child);
+                let referenced_elsewhere = parents_by_child
+                    .get(&child)
+                    .is_some_and(|parents| parents.iter().any(|p| !to_delete.contains(p)));
+                if !referenced_elsewhere && to_delete.insert(child) {
+                    queue.push_back(child);
                 }
             }
-            if next.is_empty() {
-                break;
-            }
-            to_delete.extend(next);
         }
     }
     let mut removed = 0usize;

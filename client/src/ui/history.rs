@@ -57,9 +57,22 @@ impl DesktopView {
         } else {
             (log_and_details_width * 0.33).clamp(px(240.), px(368.))
         };
+        let current_head_label = self
+            .workspace
+            .selected
+            .and_then(|id| self.workspace.repo(id))
+            .map(|r| r.branch.as_str())
+            .filter(|b| !b.is_empty() && *b != "—");
         let log_tab_title = match self.workspace.branch_filter.as_deref() {
-            Some(reference) => format!("Log: {}", short_branch_display(reference)),
-            None => "Log".to_owned(),
+            Some("HEAD") => match current_head_label {
+                Some(branch) => format!("Log · {}", middle_truncate_branch(branch, 26)),
+                None => tr("Log · 当前分支", "Log · HEAD").to_owned(),
+            },
+            Some(reference) => format!(
+                "Log · {}",
+                middle_truncate_branch(short_branch_display(reference), 26)
+            ),
+            None => tr("Log · 全部分支", "Log · All").to_owned(),
         };
         div()
             .flex()
@@ -769,10 +782,16 @@ impl DesktopView {
                         .child("author: · branch: · after:"),
                 )
             })
-            .when_some(self.workspace.branch_filter.clone(), |row, active_ref| {
-                let display = short_branch_display(&active_ref).to_owned();
-                row.child(
-                    div()
+            .child({
+                let current_head_label = self
+                    .workspace
+                    .selected
+                    .and_then(|id| self.workspace.repo(id))
+                    .map(|r| r.branch.clone())
+                    .filter(|b| !b.is_empty() && b != "—")
+                    .unwrap_or_else(|| "HEAD".to_owned());
+                match self.workspace.branch_filter.as_deref() {
+                    Some("HEAD") => div()
                         .flex()
                         .flex_shrink_0()
                         .items_center()
@@ -785,36 +804,147 @@ impl DesktopView {
                         .border_1()
                         .border_color(rgb(theme().brand_border))
                         .text_size(px(11.5))
-                        .child(div().text_color(rgb(theme().subtle)).child(tr("分支:", "Branch:")))
                         .child(
-                            elide(display.clone())
-                                .max_w(px(150.))
+                            div()
+                                .text_color(rgb(theme().subtle))
+                                .child(tr("当前:", "HEAD:")),
+                        )
+                        .child(
+                            elide(middle_truncate_branch(&current_head_label, 22))
+                                .max_w(px(175.))
                                 .text_color(rgb(theme().brand_text))
                                 .font_weight(FontWeight::MEDIUM),
                         )
                         .child(
                             div()
-                                .id("clear-branch-filter-chip")
+                                .id("switch-to-all-branches-chip")
                                 .role(Role::Button)
-                                .aria_label(tr("清除分支筛选", "Clear branch filter"))
                                 .tab_index(0)
                                 .tooltip(tooltip(
-                                    tr("清除分支筛选，显示全部分支", "Clear branch filter")
+                                    tr("切换为显示全部分支提交图谱", "Show all branches")
                                         .to_owned(),
                                 ))
-                                .size(px(16.))
+                                .px(px(5.))
+                                .h(px(17.))
                                 .rounded(px(3.))
+                                .bg(rgb(theme().card))
+                                .border_1()
+                                .border_color(rgb(theme().border))
                                 .flex()
                                 .items_center()
-                                .justify_center()
+                                .text_size(px(10.5))
                                 .text_color(rgb(theme().muted))
                                 .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
-                                .child("×")
+                                .child(tr("全部", "All"))
                                 .on_click(cx.listener(|view, _, _, cx| {
+                                    view.branches_ui.selected_key = Some("all".to_owned());
                                     view.dispatch(Action::SetBranchFilter(None), cx);
                                 })),
                         ),
-                )
+                    None => div()
+                        .flex()
+                        .flex_shrink_0()
+                        .items_center()
+                        .gap(px(5.))
+                        .h(px(24.))
+                        .pl(px(8.))
+                        .pr(px(4.))
+                        .rounded(px(5.))
+                        .bg(rgb(theme().card))
+                        .border_1()
+                        .border_color(rgb(theme().border))
+                        .text_size(px(11.5))
+                        .child(
+                            div()
+                                .text_color(rgb(theme().muted))
+                                .child(tr("全部分支", "All Branches")),
+                        )
+                        .child(
+                            div()
+                                .id("switch-to-head-branch-chip")
+                                .role(Role::Button)
+                                .tab_index(0)
+                                .tooltip(tooltip(
+                                    tr("仅显示当前分支 (HEAD) 的提交", "Filter to current HEAD")
+                                        .to_owned(),
+                                ))
+                                .px(px(5.))
+                                .h(px(17.))
+                                .rounded(px(3.))
+                                .bg(rgb(theme().brand_bg))
+                                .border_1()
+                                .border_color(rgb(theme().brand_border))
+                                .flex()
+                                .items_center()
+                                .text_size(px(10.5))
+                                .text_color(rgb(theme().brand_text))
+                                .hover(|s| s.bg(rgb(theme().active)))
+                                .child(tr("仅当前", "HEAD"))
+                                .on_click(cx.listener(|view, _, _, cx| {
+                                    view.branches_ui.selected_key = Some("head".to_owned());
+                                    view.dispatch(
+                                        Action::SetBranchFilter(Some("HEAD".to_owned())),
+                                        cx,
+                                    );
+                                })),
+                        ),
+                    Some(active_ref) => {
+                        let display =
+                            middle_truncate_branch(short_branch_display(active_ref), 24);
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(5.))
+                            .h(px(24.))
+                            .pl(px(8.))
+                            .pr(px(4.))
+                            .rounded(px(5.))
+                            .bg(rgb(theme().brand_bg))
+                            .border_1()
+                            .border_color(rgb(theme().brand_border))
+                            .text_size(px(11.5))
+                            .child(
+                                div()
+                                    .text_color(rgb(theme().subtle))
+                                    .child(tr("分支:", "Branch:")),
+                            )
+                            .child(
+                                elide(display)
+                                    .max_w(px(195.))
+                                    .text_color(rgb(theme().brand_text))
+                                    .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(
+                                div()
+                                    .id("clear-branch-filter-chip")
+                                    .role(Role::Button)
+                                    .aria_label(tr("回到当前分支", "Back to current branch"))
+                                    .tab_index(0)
+                                    .tooltip(tooltip(
+                                        tr("回到当前分支 (HEAD)", "Back to current branch (HEAD)")
+                                            .to_owned(),
+                                    ))
+                                    .size(px(16.))
+                                    .rounded(px(3.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_color(rgb(theme().muted))
+                                    .hover(|s| {
+                                        s.bg(rgb(theme().hover)).text_color(rgb(theme().text))
+                                    })
+                                    .child("×")
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.branches_ui.selected_key = Some("head".to_owned());
+                                        view.dispatch(
+                                            Action::SetBranchFilter(Some("HEAD".to_owned())),
+                                            cx,
+                                        );
+                                    })),
+                            )
+                    }
+                }
             })
             .child(div().flex_1().min_w_0())
             .when(selected_count > 1, |row| {
@@ -1488,7 +1618,7 @@ impl DesktopView {
                                         .flex_wrap()
                                         .items_center()
                                         .gap(px(4.))
-                                        .children(commit.refs.iter().map(ref_pill)),
+                                        .children(commit.refs.iter().map(ref_pill_full)),
                                 )
                             })
                             .child(
@@ -1822,7 +1952,7 @@ impl DesktopView {
                         .flex_wrap()
                         .items_center()
                         .gap(px(4.))
-                        .children(commit.refs.iter().map(ref_pill)),
+                        .children(commit.refs.iter().map(ref_pill_full)),
                 )
             })
             .child(
@@ -2115,7 +2245,7 @@ impl DesktopView {
                                 .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
                                     view.set_hovered_hint(hovered.then(|| hover_label.clone()), cx);
                                 }))
-                                .child(ref_pill(r))
+                                .child(ref_pill_full(r))
                                 .on_click(cx.listener(move |view, _, _, cx| {
                                     let next = if view.workspace.branch_filter.as_deref()
                                         == Some(full_ref.as_str())
@@ -2676,7 +2806,7 @@ fn commit_columns(commit: &Commit, width: Pixels, today_days: Option<i64>) -> im
                 .min_w_0()
                 .gap(px(5.))
                 .when(!commit.refs.is_empty(), |row| {
-                    row.children(commit.refs.iter().take(max_refs).map(ref_pill))
+                    row.children(commit.refs.iter().take(max_refs).map(ref_pill_compact))
                         .when(extra_refs > 0, |row| {
                             row.child(pill(
                                 format!("+{extra_refs}"),
@@ -2852,40 +2982,121 @@ fn format_relative_date(date: &str, today_days: Option<i64>) -> String {
     }
 }
 
-fn ref_pill(reference: &CommitRef) -> Div {
+/// Truncates long Git branch/ref names in the middle so the trailing meaningful identifier
+/// (e.g. `0.3_gfz_entFlash` in `origin/feature/0.3_gfz_entFlash`) is preserved instead of cut off.
+fn middle_truncate_branch(name: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= max_chars || max_chars < 6 {
+        return name.to_owned();
+    }
+
+    if let (Some(first_slash), Some(last_slash)) = (name.find('/'), name.rfind('/'))
+        && first_slash < last_slash
+    {
+        let first_seg = &name[..first_slash];
+        let last_seg = &name[last_slash + 1..];
+        let first_len = first_seg.chars().count();
+        let last_len = last_seg.chars().count();
+
+        // Ideal form: `origin/…/0.3_gfz_entFlash` (keeps remote/prefix + full trailing segment).
+        if first_len + 3 + last_len <= max_chars {
+            return format!("{first_seg}/…/{last_seg}");
+        }
+        // Keep full trailing segment with a shortened prefix when the first segment is long.
+        if last_len + 2 <= max_chars {
+            let prefix_budget = max_chars - last_len - 2;
+            if prefix_budget >= 3 {
+                let prefix: String = first_seg.chars().take(prefix_budget).collect();
+                return format!("{prefix}…/{last_seg}");
+            }
+            return format!("…/{last_seg}");
+        }
+    }
+
+    // Single-segment or ultra-long trailing segment: reserve ~75% budget for the trailing suffix.
+    let head_len = ((max_chars - 1) / 4).clamp(2, 6);
+    let tail_len = max_chars - 1 - head_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// Compact ref badge for single-line commit log rows: middle-truncates long names so the
+/// distinguishing trailing part stays visible without starving the commit subject.
+fn ref_pill_compact(reference: &CommitRef) -> Div {
     match reference.kind {
         CommitRefKind::Head => pill(
-            format!("● {}", reference.name),
+            format!("● {}", middle_truncate_branch(&reference.name, 24)),
             theme().brand_bg,
             theme().brand_border,
             theme().brand_text,
         )
         .font_weight(FontWeight::MEDIUM)
-        .max_w(px(140.))
+        .max_w(px(210.))
         .truncate(),
         CommitRefKind::LocalBranch => pill(
-            reference.name.clone(),
+            middle_truncate_branch(&reference.name, 24),
             theme().accent_bg,
             theme().accent_border,
             theme().link,
         )
-        .max_w(px(130.))
+        .max_w(px(200.))
         .truncate(),
         CommitRefKind::RemoteBranch => pill(
-            reference.name.clone(),
+            middle_truncate_branch(&reference.name, 26),
             theme().remote_bg,
             theme().remote_border,
             theme().remote_text,
         )
-        .max_w(px(145.))
+        .max_w(px(220.))
         .truncate(),
         CommitRefKind::Tag => pill(
-            format!("⚑ {}", reference.name),
+            format!("⚑ {}", middle_truncate_branch(&reference.name, 20)),
             theme().warn_bg,
             theme().warn_border,
             theme().warning,
         )
-        .max_w(px(110.))
+        .max_w(px(170.))
+        .truncate(),
+    }
+}
+
+/// Full-width ref badge for wrapping detail panes (commit header, containing branches,
+/// multi-commit summary): displays complete branch names without artificial narrow caps.
+fn ref_pill_full(reference: &CommitRef) -> Div {
+    match reference.kind {
+        CommitRefKind::Head => pill(
+            format!("● {}", middle_truncate_branch(&reference.name, 48)),
+            theme().brand_bg,
+            theme().brand_border,
+            theme().brand_text,
+        )
+        .font_weight(FontWeight::MEDIUM)
+        .max_w_full()
+        .truncate(),
+        CommitRefKind::LocalBranch => pill(
+            middle_truncate_branch(&reference.name, 48),
+            theme().accent_bg,
+            theme().accent_border,
+            theme().link,
+        )
+        .max_w_full()
+        .truncate(),
+        CommitRefKind::RemoteBranch => pill(
+            middle_truncate_branch(&reference.name, 52),
+            theme().remote_bg,
+            theme().remote_border,
+            theme().remote_text,
+        )
+        .max_w_full()
+        .truncate(),
+        CommitRefKind::Tag => pill(
+            format!("⚑ {}", middle_truncate_branch(&reference.name, 44)),
+            theme().warn_bg,
+            theme().warn_border,
+            theme().warning,
+        )
+        .max_w_full()
         .truncate(),
     }
 }
@@ -5454,5 +5665,26 @@ mod tests {
                 .iter()
                 .all(|l| l.text.len() <= MAX_DIFF_DISPLAY_BYTES + 16)
         );
+    }
+
+    #[test]
+    fn middle_truncate_branch_preserves_prefix_and_trailing_segment() {
+        assert_eq!(middle_truncate_branch("origin/0.3", 26), "origin/0.3");
+        assert_eq!(
+            middle_truncate_branch("origin/feature/0.3_gfz_entFlash", 26),
+            "origin/…/0.3_gfz_entFlash"
+        );
+        assert_eq!(
+            middle_truncate_branch("origin/feature/0.3_gfz_dtRoute", 26),
+            "origin/…/0.3_gfz_dtRoute"
+        );
+        // Very long first segment still keeps the complete trailing branch identifier.
+        let shortened = middle_truncate_branch("company-remote/feature/0.3_gfz_dtRoute", 24);
+        assert!(shortened.ends_with("/0.3_gfz_dtRoute"));
+        assert!(shortened.chars().count() <= 24);
+        // Single-segment long names keep most of the trailing part and stay UTF-8 safe.
+        let zh = middle_truncate_branch("release_2026_全链路订单优化_最终版", 14);
+        assert!(zh.ends_with("订单优化_最终版"));
+        assert!(zh.chars().count() <= 14);
     }
 }

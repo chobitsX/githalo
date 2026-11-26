@@ -55,6 +55,25 @@ pub(super) struct Runtime {
     events: Sender<Update>,
 }
 
+#[derive(Clone)]
+pub(super) struct StoreHandle {
+    store_queue: Sender<StoreJob>,
+    events: Sender<Update>,
+}
+
+impl StoreHandle {
+    pub(super) fn run(
+        &self,
+        op: impl FnOnce(&mut Registry) -> Result<Event, String> + Send + 'static,
+    ) {
+        if self.store_queue.try_send(Box::new(op)).is_err() {
+            let _ = self
+                .events
+                .try_send(Update(Event::Error("仓库登记不可用".into())));
+        }
+    }
+}
+
 impl Runtime {
     pub(super) fn new(path: PathBuf) -> (Self, Receiver<Update>) {
         let db_path = path.clone();
@@ -99,11 +118,16 @@ impl Runtime {
                 }
             })
             .expect("start registry worker");
+        let cpus = thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(4);
+        let status_threads = cpus.clamp(4, 8);
+        let fetch_threads = (cpus / 2).clamp(4, 6);
         (
             Self {
-                status: Pool::new("status", 3, events.clone()),
+                status: Pool::new("status", status_threads, events.clone()),
                 detail: Pool::new("details", 2, events.clone()),
-                fetch: Pool::new("fetch", 3, events.clone()),
+                fetch: Pool::new("fetch", fetch_threads, events.clone()),
                 // Allow concurrent writes across distinct repositories (e.g. pulling one sub-repo
                 // while committing or pushing another); same-worktree & shared-common-dir
                 // serialization is enforced in `Workspace::write_with_progress`.
@@ -120,14 +144,17 @@ impl Runtime {
         self.events.clone()
     }
 
+    pub(super) fn store_handle(&self) -> StoreHandle {
+        StoreHandle {
+            store_queue: self.store_queue.clone(),
+            events: self.events.clone(),
+        }
+    }
+
     pub(super) fn store(
         &self,
         op: impl FnOnce(&mut Registry) -> Result<Event, String> + Send + 'static,
     ) {
-        if self.store_queue.try_send(Box::new(op)).is_err() {
-            let _ = self
-                .events
-                .try_send(Update(Event::Error("仓库登记不可用".into())));
-        }
+        self.store_handle().run(op);
     }
 }

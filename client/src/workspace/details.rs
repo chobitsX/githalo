@@ -22,7 +22,7 @@ impl Workspace {
         self.selected_commit_refs.clear();
         self.commit_refs_loading = false;
         self.commits.clear();
-        self.branch_filter = None;
+        self.branch_filter = Some("HEAD".to_owned());
         self.history_limit = history::RECENT_LIMIT;
         self.changes.clear();
         self.changes_contiguous = true;

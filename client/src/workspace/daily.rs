@@ -390,6 +390,7 @@ impl Workspace {
                 result: None,
             },
         );
+        self.bump_board_version();
         let db_path = self.runtime.db_path.clone();
         let events = self.runtime.events_sender();
         let worktree_id = target.id;
@@ -907,6 +908,7 @@ impl Workspace {
             }
         });
         record.result = Some(feedback.clone());
+        self.bump_board_version();
         let current = self.current_target().as_ref() == Some(&target);
         let affected = if index_only {
             Vec::new()

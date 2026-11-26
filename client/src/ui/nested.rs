@@ -76,6 +76,7 @@ impl DesktopView {
         });
         let focus = self.overlay_focus.clone();
         self.previous_focus = window.focused(cx);
+        self.adopt_nested_scroll = gpui::UniformListScrollHandle::new();
         self.overlay = Some(Overlay::Dialog(Dialog::AdoptNested(AdoptNestedDialog {
             source: NestedDialogSource::Parent {
                 parent_id,
@@ -146,6 +147,7 @@ impl DesktopView {
         });
         let focus = self.overlay_focus.clone();
         self.previous_focus = window.focused(cx);
+        self.adopt_nested_scroll = gpui::UniformListScrollHandle::new();
         self.overlay = Some(Overlay::Dialog(Dialog::AdoptNested(AdoptNestedDialog {
             source: NestedDialogSource::Container {
                 container_root: discovery.container,
@@ -436,104 +438,132 @@ impl DesktopView {
                             ),
                     ),
             )
-            .child(
+            .child({
+                let row_h = px(28.);
+                let list_h = (row_h * total as f32).min(list_max_height);
+                let weak_view = cx.weak_entity();
                 div()
-                    .id("nested-repo-checklist")
-                    .max_h(list_max_height)
-                    .overflow_y_scroll()
                     .py(px(4.))
                     .px(px(4.))
-                    .children(form.repos.iter().enumerate().map(|(idx, repo)| {
-                        let checked = form.selected.contains(&repo.root);
-                        let path = repo.root.clone();
-                        div()
-                            .id(("nested-item", idx))
-                            .role(Role::CheckBox)
-                            .aria_label(repo.name.clone())
-                            .aria_toggled(if checked {
-                                Toggled::True
-                            } else {
-                                Toggled::False
-                            })
-                            .tab_index(0)
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .min_h(px(28.))
-                            .px(px(8.))
-                            .py(px(4.))
-                            .rounded(px(4.))
-                            .hover(|s| s.bg(rgb(theme().hover)))
-                            .child(
-                                div()
-                                    .w(px(14.))
-                                    .h(px(14.))
-                                    .flex_shrink_0()
-                                    .rounded(px(3.))
-                                    .border_1()
-                                    .border_color(rgb(if checked {
-                                        theme().brand_border
-                                    } else {
-                                        theme().border
-                                    }))
-                                    .bg(rgb(if checked {
-                                        theme().primary_bg
-                                    } else {
-                                        theme().chrome
-                                    }))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_size(px(10.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(theme().primary_text))
-                                    .child(if checked { "✓" } else { "" }),
-                            )
-                            .child(icon(
-                                Icon::Folder,
-                                if checked {
-                                    theme().brand
-                                } else {
-                                    theme().subtle
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .items_baseline()
-                                    .gap(px(8.))
-                                    .child(
-                                        elide(repo.name.clone())
-                                            .flex_shrink_0()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(rgb(if checked {
-                                                theme().text
-                                            } else {
-                                                theme().subtle
-                                            })),
-                                    )
-                                    .child(
-                                        elide(repo.relative_path.clone())
-                                            .flex_1()
-                                            .text_size(px(11.))
-                                            .text_color(rgb(theme().subtle)),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                if let Some(Overlay::Dialog(Dialog::AdoptNested(form))) =
-                                    &mut view.overlay
-                                {
-                                    if !form.selected.remove(&path) {
-                                        form.selected.insert(path.clone());
-                                    }
-                                    form.error = None;
-                                    cx.notify();
-                                }
-                            }))
-                    })),
-            );
+                    .child(
+                        gpui::uniform_list(
+                            "nested-repo-checklist",
+                            total,
+                            move |range, window, cx| {
+                                let Some(entity) = weak_view.upgrade() else {
+                                    return Vec::new();
+                                };
+                                let view = entity.read(cx);
+                                let Some(Overlay::Dialog(Dialog::AdoptNested(form))) =
+                                    &view.overlay
+                                else {
+                                    return Vec::new();
+                                };
+                                range
+                                    .filter_map(|idx| {
+                                        let repo = form.repos.get(idx)?;
+                                        let checked = form.selected.contains(&repo.root);
+                                        let path = repo.root.clone();
+                                        Some(
+                                            div()
+                                                .id(("nested-item", idx))
+                                                .role(Role::CheckBox)
+                                                .aria_label(repo.name.clone())
+                                                .aria_toggled(if checked {
+                                                    Toggled::True
+                                                } else {
+                                                    Toggled::False
+                                                })
+                                                .tab_index(0)
+                                                .h(row_h)
+                                                .flex()
+                                                .items_center()
+                                                .gap(px(8.))
+                                                .px(px(8.))
+                                                .rounded(px(4.))
+                                                .hover(|s| s.bg(rgb(theme().hover)))
+                                                .child(
+                                                    div()
+                                                        .w(px(14.))
+                                                        .h(px(14.))
+                                                        .flex_shrink_0()
+                                                        .rounded(px(3.))
+                                                        .border_1()
+                                                        .border_color(rgb(if checked {
+                                                            theme().brand_border
+                                                        } else {
+                                                            theme().border
+                                                        }))
+                                                        .bg(rgb(if checked {
+                                                            theme().primary_bg
+                                                        } else {
+                                                            theme().chrome
+                                                        }))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .text_size(px(10.))
+                                                        .font_weight(FontWeight::BOLD)
+                                                        .text_color(rgb(theme().primary_text))
+                                                        .child(if checked { "✓" } else { "" }),
+                                                )
+                                                .child(icon(
+                                                    Icon::Folder,
+                                                    if checked {
+                                                        theme().brand
+                                                    } else {
+                                                        theme().subtle
+                                                    },
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .items_baseline()
+                                                        .gap(px(8.))
+                                                        .child(
+                                                            elide(repo.name.clone())
+                                                                .flex_shrink_0()
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(rgb(if checked {
+                                                                    theme().text
+                                                                } else {
+                                                                    theme().subtle
+                                                                })),
+                                                        )
+                                                        .child(
+                                                            elide(repo.relative_path.clone())
+                                                                .flex_1()
+                                                                .text_size(px(11.))
+                                                                .text_color(rgb(theme().subtle)),
+                                                        ),
+                                                )
+                                                .on_click(window.listener_for(
+                                                    &entity,
+                                                    move |view, _, _, cx| {
+                                                        if let Some(Overlay::Dialog(
+                                                            Dialog::AdoptNested(form),
+                                                        )) = &mut view.overlay
+                                                        {
+                                                            if !form.selected.remove(&path) {
+                                                                form.selected.insert(path.clone());
+                                                            }
+                                                            form.error = None;
+                                                            cx.notify();
+                                                        }
+                                                    },
+                                                )),
+                                        )
+                                    })
+                                    .collect()
+                            },
+                        )
+                        .track_scroll(&self.adopt_nested_scroll)
+                        .h(list_h)
+                        .w_full(),
+                    )
+            });
 
         let confirm_label = if is_parent_mode {
             if is_zh() {

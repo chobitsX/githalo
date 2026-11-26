@@ -24,6 +24,67 @@ const AUTO_DIVERGED_NESTED_CAP: usize = 20;
 const FILTERED_NESTED_VISIBLE_LIMIT: usize = 30;
 const NESTED_EXPAND_STEP: usize = 30;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SidebarRow {
+    GroupHeader {
+        group_id: Option<GroupId>,
+        group_index: usize,
+        visible_member_count: usize,
+        changed: usize,
+        uncertain: usize,
+        expanded: bool,
+        has_members: bool,
+    },
+    Repo {
+        id: WorktreeId,
+        group: Option<GroupId>,
+        nested_parent: Option<WorktreeId>,
+        selected: bool,
+        nested_total: usize,
+        nested_diverged: usize,
+        nested_expanded: bool,
+    },
+    ScanningNested {
+        parent_id: WorktreeId,
+        group: Option<GroupId>,
+    },
+    DiscoveredNested {
+        parent_id: WorktreeId,
+        group: Option<GroupId>,
+        count: usize,
+    },
+    NestedControls {
+        parent_id: WorktreeId,
+        group: Option<GroupId>,
+        total_children: usize,
+        default_limit: usize,
+        current_limit: usize,
+        remaining: usize,
+        is_expanded_beyond_default: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SidebarCacheKey {
+    board_version: u64,
+    selected: Option<WorktreeId>,
+    preferred_group: Option<Option<GroupId>>,
+    query: String,
+    diverged_only: bool,
+    nested_limits_version: u64,
+}
+
+#[derive(Default)]
+pub(super) struct SidebarBoardCache {
+    key: Option<SidebarCacheKey>,
+    pub(super) rows: Vec<SidebarRow>,
+    pub(super) total_repos: usize,
+    pub(super) diverged_repos: usize,
+    pub(super) matched_repo_count: usize,
+    pub(super) filtered_empty: bool,
+    pub(super) has_query: bool,
+}
+
 struct RepoFilter {
     tokens: Vec<String>,
     diverged_only: bool,
@@ -73,20 +134,19 @@ fn repo_matches_tokens(repo: &RepoRow, tokens: &[String]) -> bool {
     if tokens.is_empty() {
         return true;
     }
-    let name = repo.name.to_lowercase();
-    let path = repo.target.root.to_string_lossy().to_lowercase();
     tokens
         .iter()
-        .all(|token| name.contains(token) || path.contains(token))
+        .all(|token| repo.name_lower.contains(token) || repo.path_lower.contains(token))
 }
 
 /// Sorts nested children so actionable repositories (pending push/pull, then blocking errors)
 /// always float to the top ahead of alphabetical synced repositories.
+/// Uses precomputed `name_lower` to avoid heap allocations during O(N log N) comparisons.
 fn sort_nested_children(children: &mut [&RepoRow]) {
     children.sort_by(|a, b| {
         nested_sort_key(a)
             .cmp(&nested_sort_key(b))
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name_lower.cmp(&b.name_lower))
             .then_with(|| a.target.id.cmp(&b.target.id))
     });
 }
@@ -216,7 +276,24 @@ fn tab_badge(count: usize, active: bool, dot_only: bool, style: TabBadgeStyle) -
 }
 
 impl DesktopView {
-    pub(super) fn sidebar_badge_counts(&self) -> SidebarBadgeCounts {
+    pub(super) fn sync_sidebar_board_cache(&mut self, cx: &Context<Self>) {
+        let raw_query = self.repo_filter.read(cx).text().to_owned();
+        let next_key = SidebarCacheKey {
+            board_version: self.workspace.board_version,
+            selected: self.workspace.selected,
+            preferred_group: self.preferred_group,
+            query: raw_query,
+            diverged_only: self.repo_filter_diverged_only,
+            nested_limits_version: self.nested_limits_version,
+        };
+        if self.sidebar_board_cache.key.as_ref() == Some(&next_key) {
+            return;
+        }
+        let filter_changed = self.sidebar_board_cache.key.as_ref().is_none_or(|prev| {
+            prev.query != next_key.query || prev.diverged_only != next_key.diverged_only
+        });
+
+        let total_repos = self.workspace.repos.len();
         let diverged_repos = self
             .workspace
             .repos
@@ -226,6 +303,285 @@ impl DesktopView {
                     .is_some_and(|c| (c.behind > 0 || c.ahead > 0) && !r.historical)
             })
             .count();
+
+        let filter = RepoFilter::new(&next_key.query, next_key.diverged_only);
+        let filtering = filter.is_active();
+        let has_query = filter.has_query();
+
+        // Precompute per-repo match flags once so nested parents & groups never scan tokens 3x.
+        let matched_flags: Vec<bool> = if filtering {
+            self.workspace
+                .repos
+                .iter()
+                .map(|repo| filter.matches(repo))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let matched_repo_count = if filtering {
+            matched_flags.iter().filter(|&&m| m).count()
+        } else {
+            total_repos
+        };
+        let repo_matches = |id: WorktreeId| -> bool {
+            if !filtering {
+                return true;
+            }
+            self.workspace
+                .repos
+                .binary_search_by_key(&id, |r| r.target.id)
+                .ok()
+                .is_some_and(|idx| matched_flags[idx])
+        };
+
+        let selected = self.workspace.selected;
+        let visible_group = selected.and_then(|id| {
+            let mut expanded = self.workspace.groups.iter().filter(|group| {
+                (filtering || group.expanded)
+                    && (group.members.contains(&id)
+                        || group.members.iter().any(|member| {
+                            self.workspace.nested.get(member).is_some_and(|n| {
+                                (filtering || n.expanded) && n.children.contains(&id)
+                            })
+                        }))
+            });
+            let first = expanded.clone().next().map(|group| group.id);
+            self.preferred_group
+                .filter(|preferred| expanded.any(|group| group.id == *preferred))
+                .or(first)
+        });
+
+        let mut rows = Vec::with_capacity(self.workspace.groups.len() * 4 + 16);
+        let mut visible_group_count = 0usize;
+
+        for (group_index, group) in self.workspace.groups.iter().enumerate() {
+            if group.id.is_none() && group.members.is_empty() {
+                continue;
+            }
+            let visible_members: Vec<WorktreeId> = if !filtering {
+                group.members.clone()
+            } else {
+                group
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|&member_id| {
+                        repo_matches(member_id)
+                            || self.workspace.nested.get(&member_id).is_some_and(|nested| {
+                                nested.children.iter().any(|&child_id| repo_matches(child_id))
+                            })
+                    })
+                    .collect()
+            };
+            if filtering && visible_members.is_empty() {
+                continue;
+            }
+            visible_group_count += 1;
+
+            let expanded = filtering || group.expanded;
+            let (changed, uncertain) =
+                visible_members
+                    .iter()
+                    .fold((0usize, 0usize), |(changed, uncertain), id| {
+                        if let Some(counts) = self.workspace.repo(*id).and_then(|repo| {
+                            repo.counts
+                                .filter(|_| repo.issue.is_none() && !repo.historical)
+                        }) {
+                            return (
+                                changed + usize::from(counts.behind > 0 || counts.ahead > 0),
+                                uncertain,
+                            );
+                        }
+                        (changed, uncertain + 1)
+                    });
+
+            rows.push(SidebarRow::GroupHeader {
+                group_id: group.id,
+                group_index,
+                visible_member_count: visible_members.len(),
+                changed,
+                uncertain,
+                expanded,
+                has_members: !group.members.is_empty(),
+            });
+
+            if !expanded {
+                continue;
+            }
+
+            for member_id in visible_members {
+                let Some(repo) = self.workspace.repo(member_id) else {
+                    continue;
+                };
+                let nested = self
+                    .workspace
+                    .nested
+                    .get(&member_id)
+                    .filter(|n| !n.children.is_empty());
+                let (nested_total, nested_diverged, nested_expanded) = match nested {
+                    Some(n) => {
+                        let mut diverged = 0usize;
+                        for &child_id in &n.children {
+                            if let Some(counts) = self.workspace.repo(child_id).and_then(|r| {
+                                r.counts.filter(|_| r.issue.is_none() && !r.historical)
+                            }) && (counts.behind > 0 || counts.ahead > 0)
+                            {
+                                diverged += 1;
+                            }
+                        }
+                        (n.children.len(), diverged, n.expanded)
+                    }
+                    None => (0, 0, false),
+                };
+                let row_selected =
+                    self.workspace.selected == Some(member_id) && visible_group == Some(group.id);
+                rows.push(SidebarRow::Repo {
+                    id: repo.target.id,
+                    group: group.id,
+                    nested_parent: None,
+                    selected: row_selected,
+                    nested_total,
+                    nested_diverged,
+                    nested_expanded,
+                });
+
+                if self.workspace.scanning_nested.contains(&member_id) {
+                    rows.push(SidebarRow::ScanningNested {
+                        parent_id: member_id,
+                        group: group.id,
+                    });
+                } else if let Some(found) = self
+                    .workspace
+                    .discovered_nested
+                    .get(&member_id)
+                    .filter(|d| !d.is_empty())
+                {
+                    rows.push(SidebarRow::DiscoveredNested {
+                        parent_id: member_id,
+                        group: group.id,
+                        count: found.len(),
+                    });
+                }
+
+                if let Some(nested) = nested {
+                    let all_children: Vec<&RepoRow> = nested
+                        .children
+                        .iter()
+                        .filter_map(|&child_id| self.workspace.repo(child_id))
+                        .collect();
+                    let matched_children: Vec<&RepoRow> = if filtering {
+                        all_children
+                            .iter()
+                            .copied()
+                            .filter(|child| repo_matches(child.target.id))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let show_filtered_children = filtering && !matched_children.is_empty();
+                    let should_show_children = show_filtered_children || nested.expanded;
+
+                    if should_show_children {
+                        let mut sorted_children = if show_filtered_children {
+                            matched_children
+                        } else {
+                            all_children
+                        };
+                        sort_nested_children(&mut sorted_children);
+
+                        let total_children = sorted_children.len();
+                        let diverged_count = sorted_children
+                            .iter()
+                            .filter(|child| repo_is_diverged(child))
+                            .count();
+                        let default_limit = if show_filtered_children {
+                            FILTERED_NESTED_VISIBLE_LIMIT
+                        } else {
+                            DEFAULT_NESTED_VISIBLE_LIMIT
+                                .max(diverged_count.min(AUTO_DIVERGED_NESTED_CAP))
+                        };
+                        let current_limit = self
+                            .nested_visible_limits
+                            .get(&member_id)
+                            .copied()
+                            .map_or(default_limit, |saved| saved.max(default_limit));
+                        let visible_children = select_visible_nested_children(
+                            &sorted_children,
+                            current_limit,
+                            self.workspace.selected,
+                        );
+                        let remaining = total_children.saturating_sub(visible_children.len());
+                        let is_expanded_beyond_default =
+                            total_children > default_limit && current_limit > default_limit;
+
+                        for child in visible_children {
+                            let child_id = child.target.id;
+                            let child_selected = self.workspace.selected == Some(child_id)
+                                && visible_group == Some(group.id);
+                            rows.push(SidebarRow::Repo {
+                                id: child_id,
+                                group: group.id,
+                                nested_parent: Some(member_id),
+                                selected: child_selected,
+                                nested_total: 0,
+                                nested_diverged: 0,
+                                nested_expanded: false,
+                            });
+                        }
+
+                        if remaining > 0 || is_expanded_beyond_default {
+                            rows.push(SidebarRow::NestedControls {
+                                parent_id: member_id,
+                                group: group.id,
+                                total_children,
+                                default_limit,
+                                current_limit,
+                                remaining,
+                                is_expanded_beyond_default,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let old_rows = &self.sidebar_board_cache.rows;
+        let old_len = old_rows.len();
+        let new_len = rows.len();
+        if filter_changed {
+            self.sidebar_list_state.reset(new_len);
+        } else if old_len != new_len || !sidebar_row_shapes_match(old_rows, &rows) {
+            // Splice only the changed middle span so expanding/collapsing preserves scroll offset.
+            let mut prefix = 0usize;
+            let min_len = old_len.min(new_len);
+            while prefix < min_len && sidebar_row_same_slot(&old_rows[prefix], &rows[prefix]) {
+                prefix += 1;
+            }
+            let mut suffix = 0usize;
+            while suffix < (min_len - prefix)
+                && sidebar_row_same_slot(
+                    &old_rows[old_len - 1 - suffix],
+                    &rows[new_len - 1 - suffix],
+                )
+            {
+                suffix += 1;
+            }
+            self.sidebar_list_state
+                .splice(prefix..(old_len - suffix), new_len - prefix - suffix);
+        }
+
+        self.sidebar_board_cache.key = Some(next_key);
+        self.sidebar_board_cache.rows = rows;
+        self.sidebar_board_cache.total_repos = total_repos;
+        self.sidebar_board_cache.diverged_repos = diverged_repos;
+        self.sidebar_board_cache.matched_repo_count = matched_repo_count;
+        self.sidebar_board_cache.filtered_empty =
+            filtering && visible_group_count == 0 && total_repos > 0;
+        self.sidebar_board_cache.has_query = has_query;
+    }
+
+    pub(super) fn sidebar_badge_counts(&self) -> SidebarBadgeCounts {
+        let diverged_repos = self.sidebar_board_cache.diverged_repos;
 
         let selected = self.workspace.selected;
         let (commit_files, commit_staged, commit_unstaged, commit_conflicts) = self
@@ -514,30 +870,13 @@ impl DesktopView {
     }
 
     fn repositories(&self, cx: &mut Context<Self>) -> Div {
-        let total_repos = self.workspace.repos.len();
-        let diverged_repos = self
-            .workspace
-            .repos
-            .iter()
-            .filter(|r| {
-                r.counts
-                    .is_some_and(|c| (c.behind > 0 || c.ahead > 0) && !r.historical)
-            })
-            .count();
-        let raw_query = self.repo_filter.read(cx).text().to_owned();
-        let filter = RepoFilter::new(&raw_query, self.repo_filter_diverged_only);
-        let filtering = filter.is_active();
+        let cache = &self.sidebar_board_cache;
+        let total_repos = cache.total_repos;
+        let diverged_repos = cache.diverged_repos;
+        let has_query = cache.has_query;
+        let matched_repo_count = cache.matched_repo_count;
+        let filtered_empty = cache.filtered_empty;
         let diverged_filter_active = self.repo_filter_diverged_only;
-
-        let matched_repo_count = if filtering {
-            self.workspace
-                .repos
-                .iter()
-                .filter(|repo| filter.matches(repo))
-                .count()
-        } else {
-            total_repos
-        };
 
         let summary_pill: Option<AnyElement> = if total_repos == 0 {
             None
@@ -609,7 +948,7 @@ impl DesktopView {
                     .into_any_element(),
             )
         } else {
-            let label = if filter.has_query() {
+            let label = if has_query {
                 format!("{matched_repo_count} / {total_repos}")
             } else if is_zh() {
                 format!("{total_repos} 仓库")
@@ -683,7 +1022,6 @@ impl DesktopView {
             .children(summary_pill);
 
         let search_bar = (total_repos > 0).then(|| {
-            let has_query = filter.has_query();
             div()
                 .px(px(6.))
                 .pt(px(5.))
@@ -745,53 +1083,20 @@ impl DesktopView {
         });
 
         let selected = self.workspace.selected;
-        let visible_group = selected.and_then(|id| {
-            let mut expanded = self.workspace.groups.iter().filter(|group| {
-                (filtering || group.expanded)
-                    && (group.members.contains(&id)
-                        || group.members.iter().any(|member| {
-                            self.workspace.nested.get(member).is_some_and(|n| {
-                                (filtering || n.expanded) && n.children.contains(&id)
-                            })
-                        }))
-            });
-            let first = expanded.clone().next().map(|group| group.id);
-            self.preferred_group
-                .filter(|preferred| expanded.any(|group| group.id == *preferred))
-                .or(first)
-        });
-        let visible_groups: Vec<(&GroupView, Vec<WorktreeId>)> = self
-            .workspace
-            .groups
-            .iter()
-            .filter(|group| group.id.is_some() || !group.members.is_empty())
-            .filter_map(|group| {
-                if !filtering {
-                    return Some((group, group.members.clone()));
-                }
-                let matched_members: Vec<WorktreeId> = group
-                    .members
-                    .iter()
-                    .copied()
-                    .filter(|member_id| self.member_matches_filter(*member_id, &filter))
-                    .collect();
-                (!matched_members.is_empty()).then_some((group, matched_members))
-            })
-            .collect();
-        let filtered_empty =
-            filtering && visible_groups.is_empty() && !self.workspace.repos.is_empty();
-
+        let has_rows = !cache.rows.is_empty();
+        let weak_view = cx.weak_entity();
         let board = div()
             .id("repository-board")
             .role(Role::Tree)
             .aria_label(tr("仓库分组", "Repository Groups"))
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .px(px(6.))
             .py(px(3.))
             .border_1()
             .border_color(transparent_black())
-            .overflow_y_scroll()
             .drag_over::<ExternalPaths>(|style, _, _, _| {
                 style
                     .bg(rgb(theme().brand_bg))
@@ -800,11 +1105,21 @@ impl DesktopView {
             .on_drop::<ExternalPaths>(cx.listener(|view, paths: &ExternalPaths, _, cx| {
                 view.drop_external_paths(paths, None, cx);
             }))
-            .children(
-                visible_groups.into_iter().map(|(group, members)| {
-                    self.group(group, &members, &filter, visible_group, cx)
-                }),
-            )
+            .when(has_rows, |list_container| {
+                let state = self.sidebar_list_state.clone();
+                list_container.child(
+                    gpui::list(state, move |ix, window, cx| {
+                        let Some(entity) = weak_view.upgrade() else {
+                            return div().into_any_element();
+                        };
+                        let view = entity.read(cx);
+                        view.render_sidebar_row(ix, &entity, window)
+                    })
+                    .flex_1()
+                    .min_h_0()
+                    .w_full(),
+                )
+            })
             .when(filtered_empty, |list| {
                 list.child(
                     div()
@@ -873,6 +1188,172 @@ impl DesktopView {
                 },
             );
 
+        let batch_fetch_banner = self.workspace.batch_fetch_progress().map(|progress| {
+            let ratio = if progress.total == 0 {
+                0.0
+            } else {
+                (progress.completed as f32 / progress.total as f32).clamp(0.0, 1.0)
+            };
+            let title = if progress.cancelling {
+                if is_zh() {
+                    format!("正在取消「{}」…", progress.label)
+                } else {
+                    format!("Cancelling “{}”…", progress.label)
+                }
+            } else if is_zh() {
+                format!("正在刷新「{}」", progress.label)
+            } else {
+                format!("Fetching “{}”", progress.label)
+            };
+            let counter = format!("{}/{}", progress.completed, progress.total);
+            let fail_badge = (progress.failed > 0).then(|| {
+                if is_zh() {
+                    format!("{} 失败", progress.failed)
+                } else {
+                    format!("{} failed", progress.failed)
+                }
+            });
+            let tip = if progress.skipped > 0 {
+                if is_zh() {
+                    format!(
+                        "正在批量刷新「{}」：已完成 {}/{}，已自动跳过 {} 个无上游/分离 HEAD 仓库",
+                        progress.label, progress.completed, progress.total, progress.skipped
+                    )
+                } else {
+                    format!(
+                        "Fetching “{}”: {}/{} done ({} detached/no-upstream repos skipped)",
+                        progress.label, progress.completed, progress.total, progress.skipped
+                    )
+                }
+            } else if is_zh() {
+                format!(
+                    "正在批量刷新「{}」：已完成 {}/{}",
+                    progress.label, progress.completed, progress.total
+                )
+            } else {
+                format!(
+                    "Fetching “{}”: {}/{} completed",
+                    progress.label, progress.completed, progress.total
+                )
+            };
+            let (bg, border, accent) = if progress.cancelling {
+                (theme().warn_bg, theme().warn_border, theme().warning)
+            } else {
+                (theme().brand_bg, theme().brand_border, theme().brand_text)
+            };
+            let cancel_disabled = progress.cancelling;
+
+            div()
+                .id("batch-fetch-banner")
+                .mx(px(6.))
+                .mt(px(3.))
+                .mb(px(2.))
+                .px(px(8.))
+                .py(px(5.))
+                .flex_shrink_0()
+                .rounded(px(6.))
+                .bg(rgb(bg))
+                .border_1()
+                .border_color(rgb(border))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                    view.set_hovered_hint(hovered.then(|| tip.clone()), cx);
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .min_w_0()
+                        .child(
+                            div()
+                                .size(px(5.5))
+                                .flex_shrink_0()
+                                .rounded(px(999.))
+                                .bg(rgb(accent)),
+                        )
+                        .child(
+                            elide(title)
+                                .flex_1()
+                                .text_size(rems(0.71))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(accent)),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(rems(0.68))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(accent))
+                                .child(counter),
+                        )
+                        .when_some(fail_badge, |row, text| {
+                            row.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(rems(0.66))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(rgb(theme().error))
+                                    .child(text),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("cancel-batch-fetch")
+                                .role(Role::Button)
+                                .tab_index(0)
+                                .flex_shrink_0()
+                                .px(px(6.))
+                                .h(px(18.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(rgb(border))
+                                .bg(rgb(theme().card))
+                                .flex()
+                                .items_center()
+                                .text_size(rems(0.64))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(rgb(if cancel_disabled {
+                                    theme().subtle
+                                } else {
+                                    theme().text
+                                }))
+                                .when(!cancel_disabled, |btn| {
+                                    btn.hover(|s| {
+                                        s.bg(rgb(theme().danger_bg))
+                                            .border_color(rgb(theme().error))
+                                            .text_color(rgb(theme().error))
+                                    })
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.dispatch(Action::CancelBatchFetch, cx);
+                                    }))
+                                })
+                                .child(if cancel_disabled {
+                                    tr("取消中", "Stopping")
+                                } else {
+                                    tr("取消", "Cancel")
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(3.))
+                        .rounded(px(999.))
+                        .bg(rgb(theme().card))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .h_full()
+                                .rounded(px(999.))
+                                .bg(rgb(accent))
+                                .w(gpui::relative(ratio.max(0.06))),
+                        ),
+                )
+        });
+
         div()
             .flex()
             .flex_col()
@@ -880,6 +1361,7 @@ impl DesktopView {
             .min_h_0()
             .child(toolbar)
             .children(search_bar)
+            .children(batch_fetch_banner)
             .child(board)
             .when(drawer_shown, |col| {
                 col.child(self.sidebar_branches_drawer(cx))
@@ -891,57 +1373,147 @@ impl DesktopView {
             )
     }
 
-    fn member_matches_filter(&self, member_id: WorktreeId, filter: &RepoFilter) -> bool {
-        if let Some(repo) = self.workspace.repo(member_id)
-            && filter.matches(repo)
-        {
-            return true;
+    fn render_sidebar_row(
+        &self,
+        ix: usize,
+        entity: &gpui::Entity<Self>,
+        window: &mut Window,
+    ) -> AnyElement {
+        let Some(row) = self.sidebar_board_cache.rows.get(ix) else {
+            return div().into_any_element();
+        };
+        match *row {
+            SidebarRow::GroupHeader {
+                group_id,
+                group_index,
+                visible_member_count,
+                changed,
+                uncertain,
+                expanded,
+                has_members,
+            } => {
+                let Some(group) = self.workspace.groups.get(group_index) else {
+                    return div().into_any_element();
+                };
+                self.render_group_header_row(
+                    group,
+                    group_id,
+                    visible_member_count,
+                    changed,
+                    uncertain,
+                    expanded,
+                    has_members,
+                    entity,
+                    window,
+                )
+            }
+            SidebarRow::Repo {
+                id,
+                group,
+                nested_parent,
+                selected,
+                nested_total,
+                nested_diverged,
+                nested_expanded,
+            } => {
+                let Some(repo) = self.workspace.repo(id) else {
+                    return div().into_any_element();
+                };
+                self.render_repo_row_virtual(
+                    repo,
+                    group,
+                    nested_parent,
+                    selected,
+                    nested_total,
+                    nested_diverged,
+                    nested_expanded,
+                    entity,
+                    window,
+                )
+            }
+            SidebarRow::ScanningNested { parent_id, group } => div()
+                .id(("scanning-nested", parent_id.get() as usize))
+                .ml(px(17.))
+                .pl(px(12.))
+                .border_l_1()
+                .border_color(rgb(theme().border))
+                .py(px(2.))
+                .pr(px(4.))
+                .on_drop::<ExternalPaths>(window.listener_for(
+                    entity,
+                    move |view, paths: &ExternalPaths, _, cx| {
+                        view.drop_external_paths(paths, group, cx);
+                    },
+                ))
+                .on_drop::<DraggedRepo>(window.listener_for(
+                    entity,
+                    move |view, dragged: &DraggedRepo, _, cx| {
+                        view.drop_repo_to_group(dragged, group, cx);
+                    },
+                ))
+                .child(
+                    div()
+                        .px(px(8.))
+                        .py(px(4.))
+                        .rounded(px(5.))
+                        .bg(rgb(theme().card))
+                        .border_1()
+                        .border_color(rgb(theme().border))
+                        .text_size(px(11.))
+                        .text_color(rgb(theme().subtle))
+                        .child(tr("正在扫描子仓库…", "Scanning nested repositories…")),
+                )
+                .into_any_element(),
+            SidebarRow::DiscoveredNested {
+                parent_id,
+                group,
+                count,
+            } => self.render_discovered_nested_row(parent_id, group, count, entity, window),
+            SidebarRow::NestedControls {
+                parent_id,
+                group,
+                total_children,
+                default_limit,
+                current_limit,
+                remaining,
+                is_expanded_beyond_default,
+            } => self.render_nested_controls_row(
+                parent_id,
+                group,
+                total_children,
+                default_limit,
+                current_limit,
+                remaining,
+                is_expanded_beyond_default,
+                entity,
+                window,
+            ),
         }
-        self.workspace.nested.get(&member_id).is_some_and(|nested| {
-            nested
-                .children
-                .iter()
-                .filter_map(|child_id| self.workspace.repo(*child_id))
-                .any(|child| filter.matches(child))
-        })
     }
 
-    fn group(
+    #[allow(clippy::too_many_arguments)]
+    fn render_group_header_row(
         &self,
         group: &GroupView,
-        visible_members: &[WorktreeId],
-        filter: &RepoFilter,
-        visible_group: Option<Option<GroupId>>,
-        cx: &mut Context<Self>,
+        id: Option<GroupId>,
+        visible_member_count: usize,
+        changed: usize,
+        uncertain: usize,
+        expanded: bool,
+        has_members: bool,
+        entity: &gpui::Entity<Self>,
+        window: &mut Window,
     ) -> AnyElement {
-        let id = group.id;
         let group_key = id.map_or(0, |id| id.get() as usize);
-        let filtering = filter.is_active();
-        let expanded = filtering || group.expanded;
-        let (changed, uncertain) =
-            visible_members
-                .iter()
-                .fold((0, 0), |(changed, uncertain), id| {
-                    if let Some(counts) = self.workspace.repo(*id).and_then(|repo| {
-                        repo.counts
-                            .filter(|_| repo.issue.is_none() && !repo.historical)
-                    }) {
-                        return (
-                            changed + usize::from(counts.behind > 0 || counts.ahead > 0),
-                            uncertain,
-                        );
-                    }
-                    (changed, uncertain + 1)
-                });
         let group_title = if id.is_none() {
             tr("未分组", "Ungrouped").to_owned()
         } else {
             group.name.clone()
         };
         let mut summary = if is_zh() {
-            format!("{} 个仓库 · {changed} 个有差异", visible_members.len())
+            format!("{visible_member_count} 个仓库 · {changed} 个有差异")
         } else {
-            format!("{} repos · {changed} diverged", visible_members.len())
+            format!("{visible_member_count} repos · {changed} diverged")
         };
         if uncertain > 0 {
             if is_zh() {
@@ -968,7 +1540,7 @@ impl DesktopView {
             .min_w_0()
             .h(rems(1.625))
             .px(px(4.))
-            .pr(px(if group.members.is_empty() { 26. } else { 50. }))
+            .pr(px(if !has_members { 26. } else { 50. }))
             .gap(px(5.))
             .rounded(px(5.))
             .hover(|s| s.bg(rgb(theme().hover)))
@@ -985,7 +1557,7 @@ impl DesktopView {
                     .flex_shrink_0()
                     .text_size(rems(0.7))
                     .text_color(rgb(theme().subtle))
-                    .child(visible_members.len().to_string()),
+                    .child(visible_member_count.to_string()),
             )
             .when(changed > 0, |row| {
                 let badge = if is_zh() {
@@ -1003,70 +1575,26 @@ impl DesktopView {
                     .text_size(rems(0.64)),
                 )
             })
-            .on_click(cx.listener(move |view, event: &gpui::ClickEvent, _, cx| {
+            .on_click(window.listener_for(entity, move |view, event: &gpui::ClickEvent, _, cx| {
                 if event.click_count() == 1 {
                     view.dispatch(Action::ToggleGroup(id), cx);
                 }
             }));
-        let header = div()
+
+        div()
+            .id(("repo-group", group_key))
+            .role(Role::Group)
+            .aria_label(group_title)
             .relative()
             .flex()
             .items_center()
             .min_w_0()
             .gap(px(2.))
-            .pt(px(4.))
+            .pt(px(5.))
             .pb(px(2.))
-            .child(toggle)
-            .child(
-                div()
-                    .absolute()
-                    .right_0()
-                    .top(px(4.))
-                    .flex()
-                    .items_center()
-                    .occlude()
-                    .gap(px(1.))
-                    .when(!group.members.is_empty(), |actions| {
-                        actions.child(
-                            icon_button(
-                                "refresh-group",
-                                Icon::Refresh,
-                                tr("刷新整组", "Fetch group"),
-                            )
-                            .size(rems(1.5))
-                            .on_click(cx.listener(
-                                move |view, _, _, cx| {
-                                    cx.stop_propagation();
-                                    view.dispatch(Action::RefreshGroup(id), cx);
-                                },
-                            )),
-                        )
-                    })
-                    .child(
-                        icon_button("group-options", Icon::More, tr("分组操作", "Group actions"))
-                            .size(rems(1.5))
-                            .on_click(cx.listener(
-                                move |view, event: &gpui::ClickEvent, window, cx| {
-                                    cx.stop_propagation();
-                                    view.open_menu(
-                                        MenuKind::Group(id),
-                                        event.position(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            )),
-                    ),
-            );
-        div()
-            .id(("repo-group", group_key))
-            .role(Role::Group)
-            .aria_label(group_title)
             .rounded(px(6.))
             .border_1()
             .border_color(transparent_black())
-            .pb(px(4.))
-            .mb(px(2.))
             .drag_over::<ExternalPaths>(|style, _, _, _| {
                 style
                     .bg(rgb(theme().brand_bg))
@@ -1077,20 +1605,376 @@ impl DesktopView {
                     .bg(rgb(theme().brand_bg))
                     .border_color(rgb(theme().brand))
             })
-            .on_drop::<ExternalPaths>(cx.listener(move |view, paths: &ExternalPaths, _, cx| {
-                view.drop_external_paths(paths, id, cx);
+            .on_drop::<ExternalPaths>(window.listener_for(
+                entity,
+                move |view, paths: &ExternalPaths, _, cx| {
+                    view.drop_external_paths(paths, id, cx);
+                },
+            ))
+            .on_drop::<DraggedRepo>(window.listener_for(
+                entity,
+                move |view, dragged: &DraggedRepo, _, cx| {
+                    view.drop_repo_to_group(dragged, id, cx);
+                },
+            ))
+            .child(toggle)
+            .child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top(px(5.))
+                    .flex()
+                    .items_center()
+                    .occlude()
+                    .gap(px(1.))
+                    .when(has_members, |actions| {
+                        actions.child(
+                            icon_button(
+                                ("refresh-group", group_key),
+                                Icon::Refresh,
+                                tr("刷新整组", "Fetch group"),
+                            )
+                            .size(rems(1.5))
+                            .on_click(window.listener_for(
+                                entity,
+                                move |view, _, _, cx| {
+                                    cx.stop_propagation();
+                                    view.dispatch(Action::RefreshGroup(id), cx);
+                                },
+                            )),
+                        )
+                    })
+                    .child(
+                        icon_button(
+                            ("group-options", group_key),
+                            Icon::More,
+                            tr("分组操作", "Group actions"),
+                        )
+                        .size(rems(1.5))
+                        .on_click(window.listener_for(
+                            entity,
+                            move |view, event: &gpui::ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                view.open_menu(MenuKind::Group(id), event.position(), window, cx);
+                            },
+                        )),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_discovered_nested_row(
+        &self,
+        parent_id: WorktreeId,
+        group: Option<GroupId>,
+        count: usize,
+        entity: &gpui::Entity<Self>,
+        window: &mut Window,
+    ) -> AnyElement {
+        let banner_label = if is_zh() {
+            format!("发现 {count} 个子仓库")
+        } else {
+            format!("{count} nested repos found")
+        };
+        div()
+            .id(("nested-banner", parent_id.get() as usize))
+            .ml(px(29.))
+            .mr(px(3.))
+            .my(px(2.))
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(rgb(theme().brand_bg))
+            .border_1()
+            .border_color(rgb(theme().brand_border))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .min_w_0()
+            .on_drop::<ExternalPaths>(window.listener_for(
+                entity,
+                move |view, paths: &ExternalPaths, _, cx| {
+                    view.drop_external_paths(paths, group, cx);
+                },
+            ))
+            .on_drop::<DraggedRepo>(window.listener_for(
+                entity,
+                move |view, dragged: &DraggedRepo, _, cx| {
+                    view.drop_repo_to_group(dragged, group, cx);
+                },
+            ))
+            .on_hover(window.listener_for(entity, move |view, hovered: &bool, _, cx| {
+                let tip = hovered.then(|| {
+                    let name = view
+                        .workspace
+                        .repo(parent_id)
+                        .map(|r| r.name.as_str())
+                        .unwrap_or_default();
+                    if is_zh() {
+                        format!(
+                            "在 {name} 子目录下检测到 {count} 个 Git 仓库，点击“纳管”可选择性挂载或建组"
+                        )
+                    } else {
+                        format!(
+                            "Detected {count} Git repositories under {name}. Click Adopt to manage them."
+                        )
+                    }
+                });
+                view.set_hovered_hint(tip, cx);
             }))
-            .on_drop::<DraggedRepo>(cx.listener(move |view, dragged: &DraggedRepo, _, cx| {
-                view.drop_repo_to_group(dragged, id, cx);
-            }))
-            .child(header)
-            .when(expanded, |entry| {
-                entry.children(visible_members.iter().filter_map(|repo_id| {
-                    self.workspace
-                        .repo(*repo_id)
-                        .map(|repo| self.repo_with_nested(repo, id, filter, visible_group, cx))
+            .child(
+                div()
+                    .size(px(5.5))
+                    .flex_shrink_0()
+                    .rounded(px(3.))
+                    .bg(rgb(theme().brand)),
+            )
+            .child(
+                elide(banner_label)
+                    .flex_1()
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme().brand_text)),
+            )
+            .child(
+                div()
+                    .id(("nested-adopt-btn", parent_id.get() as usize))
+                    .role(Role::Button)
+                    .tab_index(0)
+                    .flex_shrink_0()
+                    .px(px(7.))
+                    .h(px(19.))
+                    .rounded(px(4.))
+                    .bg(rgb(theme().primary_bg))
+                    .border_1()
+                    .border_color(rgb(theme().primary_border))
+                    .flex()
+                    .items_center()
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(theme().primary_text))
+                    .hover(|s| s.bg(rgb(theme().primary_hover)))
+                    .child(tr("纳管…", "Adopt…"))
+                    .on_click(window.listener_for(entity, move |view, _, window, cx| {
+                        cx.stop_propagation();
+                        view.open_adopt_nested_dialog(parent_id, window, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id(("nested-dismiss-btn", parent_id.get() as usize))
+                    .role(Role::Button)
+                    .aria_label(tr("忽略子仓库提示", "Dismiss nested repos"))
+                    .tab_index(0)
+                    .flex_shrink_0()
+                    .size(px(18.))
+                    .rounded(px(4.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(|s| s.bg(rgb(theme().hover)))
+                    .tooltip(tooltip(tr("忽略本次发现", "Ignore these").to_owned()))
+                    .child(icon(Icon::Close, theme().subtle))
+                    .on_click(window.listener_for(entity, move |view, _, _, cx| {
+                        cx.stop_propagation();
+                        let dismiss_paths = view
+                            .workspace
+                            .discovered_nested
+                            .get(&parent_id)
+                            .map(|items| items.iter().map(|r| r.root.clone()).collect())
+                            .unwrap_or_default();
+                        view.dispatch(
+                            Action::DismissNested {
+                                parent: parent_id,
+                                paths: dismiss_paths,
+                            },
+                            cx,
+                        );
+                    })),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_nested_controls_row(
+        &self,
+        parent_id: WorktreeId,
+        group: Option<GroupId>,
+        total_children: usize,
+        default_limit: usize,
+        current_limit: usize,
+        remaining: usize,
+        is_expanded_beyond_default: bool,
+        entity: &gpui::Entity<Self>,
+        window: &mut Window,
+    ) -> AnyElement {
+        let parent_key = parent_id.get() as usize;
+        let step_target = current_limit
+            .saturating_add(NESTED_EXPAND_STEP)
+            .min(total_children);
+        let controls = if remaining > 0 {
+            let expand_label = if remaining <= NESTED_EXPAND_STEP {
+                if is_zh() {
+                    format!("展开剩余 {remaining} 个子仓库")
+                } else {
+                    format!("Show {remaining} more sub-repos")
+                }
+            } else if is_zh() {
+                format!("展开更多 (+{NESTED_EXPAND_STEP} · 剩 {remaining})")
+            } else {
+                format!("Show +{NESTED_EXPAND_STEP} more ({remaining} left)")
+            };
+            let mut bar = div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .mt(px(1.))
+                .min_w_0()
+                .child(
+                    div()
+                        .id(("nested-expand-more", parent_key))
+                        .role(Role::Button)
+                        .tab_index(0)
+                        .flex_1()
+                        .min_w_0()
+                        .h(rems(1.5))
+                        .pl(px(8.))
+                        .pr(px(6.))
+                        .rounded(px(5.))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .text_size(rems(0.71))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(theme().brand_text))
+                        .hover(|s| s.bg(rgb(theme().hover)))
+                        .on_hover(window.listener_for(entity, move |view, hovered: &bool, _, cx| {
+                            let tip = hovered.then(|| {
+                                if is_zh() {
+                                    format!("共 {total_children} 个子仓库（待同步优先排前），点击继续展开")
+                                } else {
+                                    format!("{total_children} sub-repos total (diverged first); click to show more")
+                                }
+                            });
+                            view.set_hovered_hint(tip, cx);
+                        }))
+                        .on_click(window.listener_for(entity, move |view, _, _, cx| {
+                            view.nested_visible_limits.insert(parent_id, step_target);
+                            view.nested_limits_version =
+                                view.nested_limits_version.wrapping_add(1);
+                            cx.notify();
+                        }))
+                        .child(icon(Icon::ChevronDown, theme().brand_text))
+                        .child(elide(expand_label)),
+                );
+            if remaining > NESTED_EXPAND_STEP {
+                let all_label = if is_zh() {
+                    format!("全部 ({total_children})")
+                } else {
+                    format!("All ({total_children})")
+                };
+                bar = bar.child(
+                    div()
+                        .id(("nested-expand-all", parent_key))
+                        .role(Role::Button)
+                        .tab_index(0)
+                        .flex_shrink_0()
+                        .h(rems(1.375))
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(rgb(theme().border))
+                        .bg(rgb(theme().card))
+                        .flex()
+                        .items_center()
+                        .text_size(rems(0.66))
+                        .text_color(rgb(theme().muted))
+                        .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
+                        .on_click(window.listener_for(entity, move |view, _, _, cx| {
+                            view.nested_visible_limits.insert(parent_id, total_children);
+                            view.nested_limits_version =
+                                view.nested_limits_version.wrapping_add(1);
+                            cx.notify();
+                        }))
+                        .child(all_label),
+                );
+            }
+            if is_expanded_beyond_default {
+                bar = bar.child(
+                    div()
+                        .id(("nested-collapse-limit", parent_key))
+                        .role(Role::Button)
+                        .tab_index(0)
+                        .flex_shrink_0()
+                        .h(rems(1.375))
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .flex()
+                        .items_center()
+                        .text_size(rems(0.66))
+                        .text_color(rgb(theme().subtle))
+                        .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
+                        .on_click(window.listener_for(entity, move |view, _, _, cx| {
+                            view.nested_visible_limits.remove(&parent_id);
+                            view.nested_limits_version =
+                                view.nested_limits_version.wrapping_add(1);
+                            cx.notify();
+                        }))
+                        .child(tr("收起", "Less")),
+                );
+            }
+            bar.into_any_element()
+        } else {
+            let collapse_label = if is_zh() {
+                format!("收起至前 {default_limit} 个（共 {total_children} 个）")
+            } else {
+                format!("Show top {default_limit} only ({total_children} total)")
+            };
+            div()
+                .id(("nested-collapse-to-top", parent_key))
+                .role(Role::Button)
+                .tab_index(0)
+                .mt(px(1.))
+                .h(rems(1.5))
+                .pl(px(8.))
+                .pr(px(6.))
+                .rounded(px(5.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .text_size(rems(0.71))
+                .text_color(rgb(theme().subtle))
+                .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
+                .on_click(window.listener_for(entity, move |view, _, _, cx| {
+                    view.nested_visible_limits.remove(&parent_id);
+                    view.nested_limits_version = view.nested_limits_version.wrapping_add(1);
+                    cx.notify();
                 }))
-            })
+                .child(icon(Icon::ChevronUp, theme().subtle))
+                .child(elide(collapse_label))
+                .into_any_element()
+        };
+
+        div()
+            .ml(px(17.))
+            .pl(px(12.))
+            .pb(px(2.))
+            .border_l_1()
+            .border_color(rgb(theme().border))
+            .min_w_0()
+            .on_drop::<ExternalPaths>(window.listener_for(
+                entity,
+                move |view, paths: &ExternalPaths, _, cx| {
+                    view.drop_external_paths(paths, group, cx);
+                },
+            ))
+            .on_drop::<DraggedRepo>(window.listener_for(
+                entity,
+                move |view, dragged: &DraggedRepo, _, cx| {
+                    view.drop_repo_to_group(dragged, group, cx);
+                },
+            ))
+            .child(controls)
             .into_any_element()
     }
 
@@ -1151,385 +2035,20 @@ impl DesktopView {
         }
     }
 
-    fn repo_with_nested(
-        &self,
-        repo: &RepoRow,
-        group: Option<GroupId>,
-        filter: &RepoFilter,
-        visible_group: Option<Option<GroupId>>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = repo.target.id;
-        let selected = self.workspace.selected == Some(id) && visible_group == Some(group);
-        let nested = self.workspace.nested.get(&id);
-        let discovered = self.workspace.discovered_nested.get(&id);
-        let scanning = self.workspace.scanning_nested.contains(&id);
-
-        let parent_row = self.repo_row(repo, group, None, selected, cx);
-        let has_children = nested.is_some_and(|n| !n.children.is_empty());
-        let has_discovery = discovered.is_some_and(|d| !d.is_empty());
-        if !has_children && !has_discovery && !scanning {
-            return parent_row;
-        }
-
-        let mut container = div().flex().flex_col().min_w_0().child(parent_row);
-
-        if scanning {
-            container = container.child(
-                div()
-                    .ml(px(20.))
-                    .mr(px(4.))
-                    .my(px(2.))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .rounded(px(5.))
-                    .bg(rgb(theme().card))
-                    .border_1()
-                    .border_color(rgb(theme().border))
-                    .text_size(px(11.))
-                    .text_color(rgb(theme().subtle))
-                    .child(tr("正在扫描子仓库…", "Scanning nested repositories…")),
-            );
-        } else if let Some(found) = discovered.filter(|d| !d.is_empty()) {
-            let count = found.len();
-            let dismiss_paths: Vec<_> = found.iter().map(|r| r.root.clone()).collect();
-            let banner_label = if is_zh() {
-                format!("发现 {count} 个子仓库")
-            } else {
-                format!("{count} nested repos found")
-            };
-            let banner_tip = if is_zh() {
-                format!(
-                    "在 {} 子目录下检测到 {count} 个 Git 仓库，点击“纳管”可选择性挂载或建组",
-                    repo.name
-                )
-            } else {
-                format!(
-                    "Detected {count} Git repositories under {}. Click Adopt to manage them.",
-                    repo.name
-                )
-            };
-            container = container.child(
-                div()
-                    .id(("nested-banner", id.get() as usize))
-                    .ml(px(18.))
-                    .mr(px(3.))
-                    .my(px(2.))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .rounded(px(6.))
-                    .bg(rgb(theme().brand_bg))
-                    .border_1()
-                    .border_color(rgb(theme().brand_border))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .min_w_0()
-                    .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
-                        view.set_hovered_hint(hovered.then(|| banner_tip.clone()), cx);
-                    }))
-                    .child(
-                        div()
-                            .size(px(5.5))
-                            .flex_shrink_0()
-                            .rounded(px(3.))
-                            .bg(rgb(theme().brand)),
-                    )
-                    .child(
-                        elide(banner_label)
-                            .flex_1()
-                            .text_size(px(11.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(theme().brand_text)),
-                    )
-                    .child(
-                        div()
-                            .id(("nested-adopt-btn", id.get() as usize))
-                            .role(Role::Button)
-                            .tab_index(0)
-                            .flex_shrink_0()
-                            .px(px(7.))
-                            .h(px(19.))
-                            .rounded(px(4.))
-                            .bg(rgb(theme().primary_bg))
-                            .border_1()
-                            .border_color(rgb(theme().primary_border))
-                            .flex()
-                            .items_center()
-                            .text_size(px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(theme().primary_text))
-                            .hover(|s| s.bg(rgb(theme().primary_hover)))
-                            .child(tr("纳管…", "Adopt…"))
-                            .on_click(cx.listener(move |view, _, window, cx| {
-                                cx.stop_propagation();
-                                view.open_adopt_nested_dialog(id, window, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(("nested-dismiss-btn", id.get() as usize))
-                            .role(Role::Button)
-                            .aria_label(tr("忽略子仓库提示", "Dismiss nested repos"))
-                            .tab_index(0)
-                            .flex_shrink_0()
-                            .size(px(18.))
-                            .rounded(px(4.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .hover(|s| s.bg(rgb(theme().hover)))
-                            .tooltip(tooltip(tr("忽略本次发现", "Ignore these").to_owned()))
-                            .child(icon(Icon::Close, theme().subtle))
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                cx.stop_propagation();
-                                view.dispatch(
-                                    Action::DismissNested {
-                                        parent: id,
-                                        paths: dismiss_paths.clone(),
-                                    },
-                                    cx,
-                                );
-                            })),
-                    ),
-            );
-        }
-
-        if let Some(nested) = nested.filter(|n| !n.children.is_empty()) {
-            let all_children: Vec<&RepoRow> = nested
-                .children
-                .iter()
-                .filter_map(|child_id| self.workspace.repo(*child_id))
-                .collect();
-            let filtering = filter.is_active();
-            let matched_children: Vec<&RepoRow> = if filtering {
-                all_children
-                    .iter()
-                    .copied()
-                    .filter(|child| filter.matches(child))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            let show_filtered_children = filtering && !matched_children.is_empty();
-            let should_show_children = show_filtered_children || nested.expanded;
-
-            if should_show_children {
-                let mut sorted_children = if show_filtered_children {
-                    matched_children
-                } else {
-                    all_children
-                };
-                sort_nested_children(&mut sorted_children);
-
-                let total_children = sorted_children.len();
-                let diverged_count = sorted_children
-                    .iter()
-                    .filter(|child| repo_is_diverged(child))
-                    .count();
-                let default_limit = if show_filtered_children {
-                    FILTERED_NESTED_VISIBLE_LIMIT
-                } else {
-                    DEFAULT_NESTED_VISIBLE_LIMIT.max(diverged_count.min(AUTO_DIVERGED_NESTED_CAP))
-                };
-                let current_limit = self
-                    .nested_visible_limits
-                    .get(&id)
-                    .copied()
-                    .map_or(default_limit, |saved| saved.max(default_limit));
-                let visible_children = select_visible_nested_children(
-                    &sorted_children,
-                    current_limit,
-                    self.workspace.selected,
-                );
-                let remaining = total_children.saturating_sub(visible_children.len());
-                let is_expanded_beyond_default =
-                    total_children > default_limit && current_limit > default_limit;
-
-                let mut children_view = div()
-                    .ml(px(14.))
-                    .pl(px(5.))
-                    .my(px(1.))
-                    .border_l_1()
-                    .border_color(rgb(theme().border))
-                    .flex()
-                    .flex_col()
-                    .gap(px(0.5))
-                    .min_w_0()
-                    .children(visible_children.into_iter().map(|child| {
-                        let child_id = child.target.id;
-                        let child_selected = self.workspace.selected == Some(child_id)
-                            && visible_group == Some(group);
-                        self.repo_row(child, group, Some(id), child_selected, cx)
-                    }));
-
-                if remaining > 0 || is_expanded_beyond_default {
-                    let parent_key = id.get() as usize;
-                    let step_target = current_limit
-                        .saturating_add(NESTED_EXPAND_STEP)
-                        .min(total_children);
-                    let controls = if remaining > 0 {
-                        let expand_label = if remaining <= NESTED_EXPAND_STEP {
-                            if is_zh() {
-                                format!("展开剩余 {remaining} 个子仓库")
-                            } else {
-                                format!("Show {remaining} more sub-repos")
-                            }
-                        } else if is_zh() {
-                            format!("展开更多 (+{NESTED_EXPAND_STEP} · 剩 {remaining})")
-                        } else {
-                            format!("Show +{NESTED_EXPAND_STEP} more ({remaining} left)")
-                        };
-                        let expand_tip = if is_zh() {
-                            format!("共 {total_children} 个子仓库（待同步优先排前），点击继续展开")
-                        } else {
-                            format!(
-                                "{total_children} sub-repos total (diverged first); click to show more"
-                            )
-                        };
-                        let mut bar = div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .mt(px(1.))
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .id(("nested-expand-more", parent_key))
-                                    .role(Role::Button)
-                                    .tab_index(0)
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h(rems(1.5))
-                                    .pl(px(7.))
-                                    .pr(px(6.))
-                                    .rounded(px(5.))
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.))
-                                    .text_size(rems(0.71))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(rgb(theme().brand_text))
-                                    .hover(|s| s.bg(rgb(theme().hover)))
-                                    .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
-                                        view.set_hovered_hint(
-                                            hovered.then(|| expand_tip.clone()),
-                                            cx,
-                                        );
-                                    }))
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.nested_visible_limits.insert(id, step_target);
-                                        cx.notify();
-                                    }))
-                                    .child(icon(Icon::ChevronDown, theme().brand_text))
-                                    .child(elide(expand_label)),
-                            );
-                        if remaining > NESTED_EXPAND_STEP {
-                            let all_label = if is_zh() {
-                                format!("全部 ({total_children})")
-                            } else {
-                                format!("All ({total_children})")
-                            };
-                            bar = bar.child(
-                                div()
-                                    .id(("nested-expand-all", parent_key))
-                                    .role(Role::Button)
-                                    .tab_index(0)
-                                    .flex_shrink_0()
-                                    .h(rems(1.375))
-                                    .px(px(6.))
-                                    .rounded(px(4.))
-                                    .border_1()
-                                    .border_color(rgb(theme().border))
-                                    .bg(rgb(theme().card))
-                                    .flex()
-                                    .items_center()
-                                    .text_size(rems(0.66))
-                                    .text_color(rgb(theme().muted))
-                                    .hover(|s| {
-                                        s.bg(rgb(theme().hover)).text_color(rgb(theme().text))
-                                    })
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.nested_visible_limits.insert(id, total_children);
-                                        cx.notify();
-                                    }))
-                                    .child(all_label),
-                            );
-                        }
-                        if is_expanded_beyond_default {
-                            bar = bar.child(
-                                div()
-                                    .id(("nested-collapse-limit", parent_key))
-                                    .role(Role::Button)
-                                    .tab_index(0)
-                                    .flex_shrink_0()
-                                    .h(rems(1.375))
-                                    .px(px(6.))
-                                    .rounded(px(4.))
-                                    .flex()
-                                    .items_center()
-                                    .text_size(rems(0.66))
-                                    .text_color(rgb(theme().subtle))
-                                    .hover(|s| {
-                                        s.bg(rgb(theme().hover)).text_color(rgb(theme().text))
-                                    })
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.nested_visible_limits.remove(&id);
-                                        cx.notify();
-                                    }))
-                                    .child(tr("收起", "Less")),
-                            );
-                        }
-                        bar.into_any_element()
-                    } else {
-                        let collapse_label = if is_zh() {
-                            format!("收起至前 {default_limit} 个（共 {total_children} 个）")
-                        } else {
-                            format!("Show top {default_limit} only ({total_children} total)")
-                        };
-                        div()
-                            .id(("nested-collapse-to-top", parent_key))
-                            .role(Role::Button)
-                            .tab_index(0)
-                            .mt(px(1.))
-                            .h(rems(1.5))
-                            .pl(px(7.))
-                            .pr(px(6.))
-                            .rounded(px(5.))
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .text_size(rems(0.71))
-                            .text_color(rgb(theme().subtle))
-                            .hover(|s| s.bg(rgb(theme().hover)).text_color(rgb(theme().text)))
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                view.nested_visible_limits.remove(&id);
-                                cx.notify();
-                            }))
-                            .child(icon(Icon::ChevronUp, theme().subtle))
-                            .child(elide(collapse_label))
-                            .into_any_element()
-                    };
-                    children_view = children_view.child(controls);
-                }
-
-                container = container.child(children_view);
-            }
-        }
-
-        container.into_any_element()
-    }
-
-    fn repo_row(
+    #[allow(clippy::too_many_arguments)]
+    fn render_repo_row_virtual(
         &self,
         repo: &RepoRow,
         group: Option<GroupId>,
         nested_parent: Option<WorktreeId>,
         selected: bool,
-        cx: &mut Context<Self>,
+        nested_total: usize,
+        nested_diverged: usize,
+        nested_expanded: bool,
+        entity: &gpui::Entity<Self>,
+        window: &mut Window,
     ) -> AnyElement {
         let id = repo.target.id;
-        let details = repo_description(repo);
         let active_write = self.workspace.active_write(id);
         let active_remote_pill: Option<(String, u32, u32, u32)> = if let Some(active) = active_write
         {
@@ -1633,50 +2152,19 @@ impl DesktopView {
                 row
             });
 
-        let nested_info = if nested_parent.is_none() {
-            self.workspace
-                .nested
-                .get(&id)
-                .filter(|n| !n.children.is_empty())
-        } else {
-            None
-        };
-        let nested_summary = nested_info.map(|nested| {
-            let total = nested.children.len();
-            let mut diverged = 0usize;
-            for child_id in &nested.children {
-                if let Some(counts) = self
-                    .workspace
-                    .repo(*child_id)
-                    .and_then(|r| r.counts.filter(|_| r.issue.is_none() && !r.historical))
-                    && (counts.behind > 0 || counts.ahead > 0)
-                {
-                    diverged += 1;
-                }
-            }
-            let badge_text = if diverged > 0 {
+        let nested_summary = (nested_parent.is_none() && nested_total > 0).then(|| {
+            let badge_text = if nested_diverged > 0 {
                 if is_zh() {
-                    format!("{total} 子仓 · {diverged}")
+                    format!("{nested_total} 子仓 · {nested_diverged}")
                 } else {
-                    format!("{total} sub · {diverged}")
+                    format!("{nested_total} sub · {nested_diverged}")
                 }
             } else if is_zh() {
-                format!("{total} 子仓")
+                format!("{nested_total} 子仓")
             } else {
-                format!("{total} sub")
+                format!("{nested_total} sub")
             };
-            let tip_text = if diverged > 0 {
-                if is_zh() {
-                    format!("{total} 个子仓库 · {diverged} 个待同步")
-                } else {
-                    format!("{total} sub-repos · {diverged} diverged")
-                }
-            } else if is_zh() {
-                format!("{total} 个子仓库 · 已同步")
-            } else {
-                format!("{total} sub-repos · synced")
-            };
-            (nested.expanded, diverged > 0, badge_text, tip_text)
+            (nested_expanded, nested_diverged > 0, badge_text)
         });
 
         let branch_label = if repo.branch.is_empty() {
@@ -1686,15 +2174,16 @@ impl DesktopView {
         };
 
         let more_btn = icon_button(
-            "repo-options",
+            ("repo-options", (id.get() as usize) * 4 + usize::from(nested_parent.is_some())),
             Icon::More,
             tr("仓库操作", "Repository actions"),
         )
         .size(rems(1.25))
         .opacity(if selected { 1. } else { 0. })
         .group_hover("repo-row", |s| s.opacity(1.))
-        .on_click(
-            cx.listener(move |view, event: &gpui::ClickEvent, window, cx| {
+        .on_click(window.listener_for(
+            entity,
+            move |view, event: &gpui::ClickEvent, window, cx| {
                 cx.stop_propagation();
                 view.open_menu(
                     MenuKind::Repository {
@@ -1706,14 +2195,12 @@ impl DesktopView {
                     window,
                     cx,
                 );
-            }),
-        );
+            },
+        ));
 
         let drag_name = repo.name.clone();
         let drag_path = repo.target.root.clone();
-        let hover_summary = repo_hover_summary(repo);
         let has_nested_children = nested_summary.is_some();
-        // 子仓库与无异常的独立单仓采用清爽紧凑单行布局；含子仓胶囊或需重点凸显多行历史异常的主仓采用自适应结构
         let single_line = nested_parent.is_some() || (nested_summary.is_none() && !repo.historical);
 
         let base_row = div()
@@ -1724,14 +2211,31 @@ impl DesktopView {
             .group("repo-row")
             .role(Role::TreeItem)
             .aria_label(repo.name.clone())
-            .aria_description(details)
+            .aria_description(format!("{} · {branch_label}", repo.name))
             .aria_selected(selected)
             .tab_index(0)
             .relative()
             .min_w_0()
             .rounded(px(6.))
-            .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
-                view.set_hovered_hint(hovered.then(|| hover_summary.clone()), cx);
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme().brand_bg)))
+            .drag_over::<DraggedRepo>(|style, _, _, _| style.bg(rgb(theme().brand_bg)))
+            .on_drop::<ExternalPaths>(window.listener_for(
+                entity,
+                move |view, paths: &ExternalPaths, _, cx| {
+                    view.drop_external_paths(paths, group, cx);
+                },
+            ))
+            .on_drop::<DraggedRepo>(window.listener_for(
+                entity,
+                move |view, dragged: &DraggedRepo, _, cx| {
+                    view.drop_repo_to_group(dragged, group, cx);
+                },
+            ))
+            .on_hover(window.listener_for(entity, move |view, hovered: &bool, _, cx| {
+                let hint = hovered
+                    .then(|| view.workspace.repo(id).map(repo_hover_summary))
+                    .flatten();
+                view.set_hovered_hint(hint, cx);
             }))
             .on_drag(
                 DraggedRepo {
@@ -1756,16 +2260,18 @@ impl DesktopView {
                 }))
             })
             .focus_visible(|s| s.bg(rgb(theme().active)))
-            .on_click(
-                cx.listener(move |view, event: &gpui::ClickEvent, window, cx| {
+            .on_click(window.listener_for(
+                entity,
+                move |view, event: &gpui::ClickEvent, window, cx| {
                     view.select_repo(id, Some(group), window, cx);
                     if has_nested_children && event.click_count() >= 2 {
                         view.dispatch(Action::ToggleNested(id), cx);
                     }
-                }),
-            )
-            .on_aux_click(
-                cx.listener(move |view, event: &gpui::ClickEvent, window, cx| {
+                },
+            ))
+            .on_aux_click(window.listener_for(
+                entity,
+                move |view, event: &gpui::ClickEvent, window, cx| {
                     if event.is_right_click() {
                         cx.stop_propagation();
                         view.open_menu(
@@ -1779,8 +2285,8 @@ impl DesktopView {
                             cx,
                         );
                     }
-                }),
-            );
+                },
+            ));
 
         let render_active_pill = |pill: (String, u32, u32, u32)| {
             let (text, bg, border, fg) = pill;
@@ -1801,11 +2307,11 @@ impl DesktopView {
 
         if single_line {
             let pl = if nested_parent.is_some() {
-                px(7.)
+                px(8.)
             } else {
-                px(18.)
+                px(30.)
             };
-            return base_row
+            let row_el = base_row
                 .h(rems(if nested_parent.is_some() { 1.625 } else { 1.75 }))
                 .pl(pl)
                 .pr(px(4.))
@@ -1868,13 +2374,24 @@ impl DesktopView {
                     )
                 })
                 .children(sync_badges)
-                .child(more_btn)
-                .into_any_element();
+                .child(more_btn);
+
+            if nested_parent.is_some() {
+                return div()
+                    .ml(px(17.))
+                    .pl(px(12.))
+                    .border_l_1()
+                    .border_color(rgb(theme().border))
+                    .min_w_0()
+                    .child(row_el)
+                    .into_any_element();
+            }
+            return row_el.into_any_element();
         }
 
         // 含子仓库胶囊或历史缓存状态的仓库行
-        let mut name = div().flex().min_w_0().flex_1().gap(px(5.)).items_center();
-        if let Some((expanded, _, _, _)) = &nested_summary {
+        let mut name = div().flex().min_w_0().flex_1().gap(px(4.)).items_center();
+        if let Some((expanded, _, _)) = &nested_summary {
             let arrow = if *expanded {
                 Icon::ChevronDown
             } else {
@@ -1886,7 +2403,7 @@ impl DesktopView {
                     .role(Role::Button)
                     .aria_label(tr("展开或折叠子仓库", "Toggle nested repositories"))
                     .tab_index(0)
-                    .size(rems(1.35))
+                    .size(px(18.))
                     .flex_shrink_0()
                     .rounded(px(4.))
                     .flex()
@@ -1894,7 +2411,7 @@ impl DesktopView {
                     .justify_center()
                     .hover(|s| s.bg(rgb(theme().hover)))
                     .child(icon(arrow, theme().brand))
-                    .on_click(cx.listener(move |view, _, _, cx| {
+                    .on_click(window.listener_for(entity, move |view, _, _, cx| {
                         cx.stop_propagation();
                         view.dispatch(Action::ToggleNested(id), cx);
                     })),
@@ -1930,39 +2447,47 @@ impl DesktopView {
             .items_center()
             .gap(px(4.))
             .child(name)
-            .children(
-                nested_summary
-                    .as_ref()
-                    .map(|(_, has_diverged, badge_text, tip_text)| {
-                        let tip = tip_text.clone();
-                        let (bg, border, fg) = if *has_diverged {
-                            (theme().warn_bg, theme().warn_border, theme().warning)
-                        } else {
-                            (theme().card, theme().border_strong, theme().muted)
-                        };
-                        div()
-                            .id(("nested-pill", id.get() as usize))
-                            .flex_shrink_0()
-                            .px(px(5.5))
-                            .py(px(0.5))
-                            .rounded(px(4.))
-                            .bg(rgb(bg))
-                            .border_1()
-                            .border_color(rgb(border))
-                            .text_size(rems(0.66))
-                            .line_height(rems(0.92))
-                            .text_color(rgb(fg))
-                            .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
-                                view.set_hovered_hint(hovered.then(|| tip.clone()), cx);
-                            }))
-                            .hover(|s| s.border_color(rgb(theme().brand)))
-                            .child(badge_text.clone())
-                            .on_click(cx.listener(move |view, _, _, cx| {
-                                cx.stop_propagation();
-                                view.dispatch(Action::ToggleNested(id), cx);
-                            }))
-                    }),
-            )
+            .children(nested_summary.as_ref().map(|(_, has_diverged, badge_text)| {
+                let (bg, border, fg) = if *has_diverged {
+                    (theme().warn_bg, theme().warn_border, theme().warning)
+                } else {
+                    (theme().card, theme().border_strong, theme().muted)
+                };
+                div()
+                    .id(("nested-pill", id.get() as usize))
+                    .flex_shrink_0()
+                    .px(px(5.5))
+                    .py(px(0.5))
+                    .rounded(px(4.))
+                    .bg(rgb(bg))
+                    .border_1()
+                    .border_color(rgb(border))
+                    .text_size(rems(0.66))
+                    .line_height(rems(0.92))
+                    .text_color(rgb(fg))
+                    .on_hover(window.listener_for(entity, move |view, hovered: &bool, _, cx| {
+                        let tip = hovered.then(|| {
+                            if nested_diverged > 0 {
+                                if is_zh() {
+                                    format!("{nested_total} 个子仓库 · {nested_diverged} 个待同步")
+                                } else {
+                                    format!("{nested_total} sub-repos · {nested_diverged} diverged")
+                                }
+                            } else if is_zh() {
+                                format!("{nested_total} 个子仓库 · 已同步")
+                            } else {
+                                format!("{nested_total} sub-repos · synced")
+                            }
+                        });
+                        view.set_hovered_hint(tip, cx);
+                    }))
+                    .hover(|s| s.border_color(rgb(theme().brand)))
+                    .child(badge_text.clone())
+                    .on_click(window.listener_for(entity, move |view, _, _, cx| {
+                        cx.stop_propagation();
+                        view.dispatch(Action::ToggleNested(id), cx);
+                    }))
+            }))
             .when_some(active_remote_pill, |row, pill| {
                 row.child(render_active_pill(pill))
             })
@@ -1970,9 +2495,9 @@ impl DesktopView {
             .child(more_btn);
 
         let branch_indent = if nested_summary.is_some() {
-            rems(2.3)
+            px(40.)
         } else {
-            rems(1.25)
+            px(18.)
         };
         let second =
             div()
@@ -2016,9 +2541,9 @@ impl DesktopView {
                 }));
 
         let row_pl = if nested_summary.is_some() {
-            px(6.)
+            px(8.)
         } else {
-            px(18.)
+            px(30.)
         };
         base_row
             .pl(row_pl)
@@ -2474,6 +2999,74 @@ impl DesktopView {
     }
 }
 
+fn sidebar_row_same_slot(a: &SidebarRow, b: &SidebarRow) -> bool {
+    match (a, b) {
+        (
+            SidebarRow::GroupHeader { group_id: ga, .. },
+            SidebarRow::GroupHeader { group_id: gb, .. },
+        ) => ga == gb,
+        (
+            SidebarRow::Repo {
+                id: ia,
+                group: ga,
+                nested_parent: pa,
+                nested_total: ta,
+                ..
+            },
+            SidebarRow::Repo {
+                id: ib,
+                group: gb,
+                nested_parent: pb,
+                nested_total: tb,
+                ..
+            },
+        ) => ia == ib && ga == gb && pa == pb && (*ta > 0) == (*tb > 0),
+        (
+            SidebarRow::ScanningNested {
+                parent_id: pa,
+                group: ga,
+            },
+            SidebarRow::ScanningNested {
+                parent_id: pb,
+                group: gb,
+            },
+        ) => pa == pb && ga == gb,
+        (
+            SidebarRow::DiscoveredNested {
+                parent_id: pa,
+                group: ga,
+                ..
+            },
+            SidebarRow::DiscoveredNested {
+                parent_id: pb,
+                group: gb,
+                ..
+            },
+        ) => pa == pb && ga == gb,
+        (
+            SidebarRow::NestedControls {
+                parent_id: pa,
+                group: ga,
+                ..
+            },
+            SidebarRow::NestedControls {
+                parent_id: pb,
+                group: gb,
+                ..
+            },
+        ) => pa == pb && ga == gb,
+        _ => false,
+    }
+}
+
+fn sidebar_row_shapes_match(old: &[SidebarRow], new: &[SidebarRow]) -> bool {
+    old.len() == new.len()
+        && old
+            .iter()
+            .zip(new.iter())
+            .all(|(a, b)| sidebar_row_same_slot(a, b))
+}
+
 fn repo_hover_summary(repo: &RepoRow) -> String {
     let branch = if repo.branch.is_empty() {
         "—"
@@ -2498,50 +3091,6 @@ fn repo_hover_summary(repo: &RepoRow) -> String {
     parts.join("  ·  ")
 }
 
-fn repo_description(repo: &RepoRow) -> String {
-    let mut detail = format!(
-        "{}\n{}  {}\n{}  {}",
-        repo.target.root.display(),
-        tr("分支", "Branch"),
-        if repo.branch.is_empty() {
-            "—"
-        } else {
-            &repo.branch
-        },
-        tr("上游", "Upstream"),
-        repo.upstream.as_deref().unwrap_or("—"),
-    );
-    if let Some(counts) = repo.counts {
-        detail.push_str(&format!(
-            "\n{}  {}    {}  {}",
-            tr("↓ 落后", "↓ Behind"),
-            counts.behind,
-            tr("↑ 领先", "↑ Ahead"),
-            counts.ahead
-        ));
-    }
-    if let Some(issue) = &repo.issue {
-        detail.push_str(&format!("\n{issue}"));
-    }
-    if let Some(time) = repo.historical_at {
-        detail.push_str(&format!(
-            "\n{}  {}",
-            tr("历史计数，获取于", "Cached counts, fetched at"),
-            format_fetch_time(time)
-        ));
-    }
-    if let Some(time) = repo.last_fetch {
-        detail.push_str(&format!(
-            "\n{}  {}",
-            tr("上次获取", "Last fetched"),
-            format_fetch_time(time)
-        ));
-    } else if repo.counts.is_some() && !repo.upstream_is_local {
-        detail.push_str(tr("\n远端刷新时间未知", "\nLast fetch time unknown"));
-    }
-    detail
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2563,6 +3112,8 @@ mod tests {
             path_revision: 1,
         });
         row.name = name.to_owned();
+        row.name_lower = name.to_lowercase();
+        row.path_lower = row.target.root.to_string_lossy().to_lowercase();
         row.branch = branch.to_owned();
         row.counts = counts;
         row.issue = issue.map(str::to_owned);

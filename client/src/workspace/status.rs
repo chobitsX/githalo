@@ -2,11 +2,50 @@ use super::*;
 use crate::registry::HistoricalCounts;
 use crate::worktree::{SyncCounts, SyncStatus, UpstreamStatus};
 use std::ffi::OsStr;
+use std::sync::atomic::AtomicBool;
+
+/// Snapshot of an in-flight group or parent+nested batch fetch operation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchFetchProgress {
+    pub label: String,
+    pub total: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub cancelling: bool,
+}
+
+pub(super) struct BatchFetchTracker {
+    pub(super) label: String,
+    pub(super) cancel: Arc<AtomicBool>,
+    pub(super) pending: BTreeSet<WorktreeId>,
+    pub(super) total: usize,
+    pub(super) completed: usize,
+    pub(super) failed: usize,
+    pub(super) skipped: usize,
+    pub(super) cancelled_count: usize,
+    pub(super) cancelling: bool,
+}
+
+impl BatchFetchTracker {
+    pub(super) fn snapshot(&self) -> BatchFetchProgress {
+        BatchFetchProgress {
+            label: self.label.clone(),
+            total: self.total,
+            completed: self.completed,
+            failed: self.failed,
+            skipped: self.skipped,
+            cancelling: self.cancelling,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct RepoRow {
     pub target: WorktreeTarget,
     pub name: String,
+    pub name_lower: String,
+    pub path_lower: String,
     pub branch: String,
     pub upstream: Option<String>,
     pub upstream_is_local: bool,
@@ -16,9 +55,12 @@ pub struct RepoRow {
     pub historical_at: Option<SystemTime>,
     pub loading: bool,
     pub fetching: bool,
+    pub stale: bool,
     pub last_fetch: Option<SystemTime>,
     snapshot: Option<SyncSnapshot>,
     common: Option<PathBuf>,
+    stamp: Option<git::RepoStateStamp>,
+    db_lookup_key: Option<(OsString, UpstreamConfig, OsString)>,
     read_again: bool,
     failure: Option<(SyncStatus, String)>,
     confirmed: Option<HistoricalCounts>,
@@ -93,9 +135,13 @@ impl RepoRow {
             .unwrap_or(target.root.as_os_str())
             .to_string_lossy()
             .into_owned();
+        let name_lower = name.to_lowercase();
+        let path_lower = target.root.to_string_lossy().to_lowercase();
         Self {
             target,
             name,
+            name_lower,
+            path_lower,
             branch: "—".into(),
             upstream: None,
             upstream_is_local: false,
@@ -105,9 +151,12 @@ impl RepoRow {
             historical_at: None,
             loading: false,
             fetching: false,
+            stale: false,
             last_fetch: None,
             snapshot: None,
             common: None,
+            stamp: None,
+            db_lookup_key: None,
             read_again: false,
             failure: None,
             confirmed: None,
@@ -182,27 +231,68 @@ impl RepoRow {
 
 impl Workspace {
     pub(super) fn start_status(&mut self, id: WorktreeId) {
+        self.start_status_inner(id, false);
+    }
+
+    /// Refreshes `id` only if its lightweight `.git` fingerprint changed since the last read.
+    pub(super) fn start_status_if_changed(&mut self, id: WorktreeId) {
+        self.start_status_inner(id, true);
+    }
+
+    fn start_status_inner(&mut self, id: WorktreeId, skip_if_unchanged: bool) {
         let Some(row) = self.repo_mut(id) else {
             return;
         };
+        row.stale = false;
         if row.loading {
             row.read_again = true;
             return;
         }
         row.loading = true;
         let target = row.target.clone();
-        self.runtime.status.run(move || Event::Status {
-            common: git::common_dir(&target.root).ok(),
-            snapshot: git::read_sync(&target),
+        let stamp = if skip_if_unchanged && row.has_status() {
+            row.stamp.clone()
+        } else {
+            None
+        };
+        self.runtime.status.run(move || {
+            if let Some(prev_stamp) = stamp
+                && prev_stamp.is_unchanged()
+            {
+                return Event::StatusUnchanged { target };
+            }
+            let result = git::read_sync_with_common(&target);
+            Event::Status {
+                common: result.common,
+                snapshot: result.snapshot,
+                stamp: result.stamp,
+            }
         });
     }
 
-    pub(super) fn apply_status(&mut self, snapshot: SyncSnapshot, common: Option<PathBuf>) {
+    pub(super) fn apply_status_unchanged(&mut self, target: WorktreeTarget) {
+        let Some(row) = self.repo_mut(target.id).filter(|r| r.target == target) else {
+            return;
+        };
+        row.loading = false;
+        row.stale = false;
+        if std::mem::take(&mut row.read_again) {
+            self.start_status(target.id);
+        }
+    }
+
+    pub(super) fn apply_status(
+        &mut self,
+        snapshot: SyncSnapshot,
+        common: Option<PathBuf>,
+        stamp: Option<git::RepoStateStamp>,
+    ) {
         let target = snapshot.worktree.clone();
         let Some(row) = self.repo_mut(target.id).filter(|r| r.target == target) else {
             return;
         };
         row.loading = false;
+        row.stale = false;
         if std::mem::take(&mut row.read_again) {
             self.start_status(target.id);
             return;
@@ -240,36 +330,55 @@ impl Workspace {
         let lookup = source(&snapshot.status)
             .and_then(|(branch, c, r)| r.map(|r| (branch.to_owned(), c.clone(), r.to_owned())));
         row.common = common;
+        row.stamp = stamp;
         row.snapshot = Some(snapshot);
         row.publish();
-        if let Some((branch, config, tracking)) = lookup {
-            self.runtime.store(move |db| {
-                if let Some(sample) = verified {
-                    db.record_comparison(
-                        &target,
-                        &branch,
-                        &config,
-                        &tracking,
-                        sample.at,
-                        sample.counts,
-                    )
-                    .map_err(|e| e.to_string())?;
+        self.bump_board_version();
+        match lookup {
+            Some(key) => {
+                let needs_db = verified.is_some()
+                    || self
+                        .repo(target.id)
+                        .is_none_or(|r| r.db_lookup_key.as_ref() != Some(&key));
+                if needs_db {
+                    if let Some(row) = self.repo_mut(target.id) {
+                        row.db_lookup_key = Some(key.clone());
+                    }
+                    let (branch, config, tracking) = key;
+                    self.runtime.store(move |db| {
+                        if let Some(sample) = verified {
+                            db.record_comparison(
+                                &target,
+                                &branch,
+                                &config,
+                                &tracking,
+                                sample.at,
+                                sample.counts,
+                            )
+                            .map_err(|e| e.to_string())?;
+                        }
+                        let at = db
+                            .last_fetch_success(&target, &config, &tracking)
+                            .map_err(|e| e.to_string())?;
+                        let comparison = db
+                            .last_comparison(&target, &branch, &config, &tracking)
+                            .map_err(|e| e.to_string())?
+                            .map(|sample| (branch, sample));
+                        Ok(Event::FetchTime {
+                            target,
+                            config,
+                            tracking,
+                            at,
+                            comparison,
+                        })
+                    });
                 }
-                let at = db
-                    .last_fetch_success(&target, &config, &tracking)
-                    .map_err(|e| e.to_string())?;
-                let comparison = db
-                    .last_comparison(&target, &branch, &config, &tracking)
-                    .map_err(|e| e.to_string())?
-                    .map(|sample| (branch, sample));
-                Ok(Event::FetchTime {
-                    target,
-                    config,
-                    tracking,
-                    at,
-                    comparison,
-                })
-            });
+            }
+            None => {
+                if let Some(row) = self.repo_mut(target.id) {
+                    row.db_lookup_key = None;
+                }
+            }
         }
     }
 
@@ -297,10 +406,163 @@ impl Workspace {
                 row.confirmed = Some(sample);
             }
             row.publish();
+            self.bump_board_version();
+        }
+    }
+
+    /// Current group/nested batch fetch progress, if any batch fetch is running.
+    pub fn batch_fetch_progress(&self) -> Option<BatchFetchProgress> {
+        self.batch_fetch.as_ref().map(BatchFetchTracker::snapshot)
+    }
+
+    /// Starts a tracked batch fetch for `ids` (group or parent + nested sub-repos), skipping
+    /// repositories known to be detached or without an upstream and supporting one-click cancel.
+    pub(super) fn start_batch_fetch(&mut self, label: String, ids: Vec<WorktreeId>) {
+        if ids.is_empty() {
+            return;
+        }
+        // Deduplicate while preserving order.
+        let mut unique = Vec::with_capacity(ids.len());
+        let mut seen = BTreeSet::new();
+        for id in ids {
+            if seen.insert(id) {
+                unique.push(id);
+            }
+        }
+
+        let reuse_active = self
+            .batch_fetch
+            .as_ref()
+            .is_some_and(|tracker| !tracker.cancelling);
+        let cancel = if reuse_active {
+            self.batch_fetch.as_ref().unwrap().cancel.clone()
+        } else {
+            Arc::new(AtomicBool::new(false))
+        };
+
+        let mut queued = Vec::new();
+        let mut skipped = 0usize;
+        for id in unique {
+            let skip_fetch = self
+                .repo(id)
+                .and_then(|row| row.snapshot.as_ref())
+                .is_some_and(|snap| {
+                    matches!(
+                        snap.status,
+                        SyncStatus::DetachedHead { .. }
+                            | SyncStatus::Branch {
+                                upstream: UpstreamStatus::NotConfigured,
+                                ..
+                            }
+                            | SyncStatus::UnbornBranch { upstream: None, .. }
+                    )
+                });
+            if skip_fetch {
+                skipped += 1;
+                self.start_status_if_changed(id);
+            } else if self.start_fetch_inner(id, Some(cancel.clone())) {
+                queued.push(id);
+            }
+        }
+
+        if queued.is_empty() {
+            return;
+        }
+
+        if let Some(tracker) = self.batch_fetch.as_mut().filter(|t| !t.cancelling) {
+            if tracker.label != label {
+                tracker.label = crate::i18n::tr("多个分组", "Multiple Groups").to_owned();
+            }
+            for id in queued {
+                if tracker.pending.insert(id) {
+                    tracker.total += 1;
+                }
+            }
+            tracker.skipped += skipped;
+        } else {
+            let total = queued.len();
+            self.batch_fetch = Some(BatchFetchTracker {
+                label,
+                cancel,
+                pending: queued.into_iter().collect(),
+                total,
+                completed: 0,
+                failed: 0,
+                skipped,
+                cancelled_count: 0,
+                cancelling: false,
+            });
+        }
+        self.bump_board_version();
+    }
+
+    pub(super) fn cancel_batch_fetch(&mut self) {
+        let Some(tracker) = self.batch_fetch.as_mut() else {
+            return;
+        };
+        if tracker.cancelling {
+            return;
+        }
+        tracker.cancelling = true;
+        tracker.cancel.store(true, Ordering::Relaxed);
+        self.bump_board_version();
+    }
+
+    pub(super) fn apply_fetch_cancelled(&mut self, target: WorktreeTarget) {
+        if let Some(row) = self.repo_mut(target.id).filter(|r| r.target == target) {
+            row.fetching = false;
+        }
+        self.record_batch_fetch_settlement(target.id, false, true);
+        self.bump_board_version();
+    }
+
+    fn record_batch_fetch_settlement(&mut self, id: WorktreeId, failed: bool, cancelled: bool) {
+        let finished_notice = if let Some(tracker) = self.batch_fetch.as_mut() {
+            if !tracker.pending.remove(&id) {
+                return;
+            }
+            if cancelled {
+                tracker.cancelled_count += 1;
+            } else {
+                tracker.completed += 1;
+                if failed {
+                    tracker.failed += 1;
+                }
+            }
+            if tracker.pending.is_empty() {
+                let notice = tracker.cancelling.then(|| {
+                    if crate::i18n::is_zh() {
+                        format!(
+                            "已取消批量刷新（已完成 {}/{}，跳过剩余 {} 个）",
+                            tracker.completed, tracker.total, tracker.cancelled_count
+                        )
+                    } else {
+                        format!(
+                            "Cancelled batch fetch ({}/{} finished, {} skipped)",
+                            tracker.completed, tracker.total, tracker.cancelled_count
+                        )
+                    }
+                });
+                Some(notice)
+            } else {
+                None
+            }
+        } else {
+            return;
+        };
+        if let Some(notice) = finished_notice {
+            self.batch_fetch = None;
+            if let Some(text) = notice {
+                self.message = Some(text);
+            }
         }
     }
 
     pub(super) fn start_fetch(&mut self, id: WorktreeId) {
+        let _ = self.start_fetch_inner(id, None);
+    }
+
+    fn start_fetch_inner(&mut self, id: WorktreeId, cancel: Option<Arc<AtomicBool>>) -> bool {
         let common = self.repo(id).and_then(|row| row.common.as_ref());
         if self.writes.iter().any(|(other, write)| {
             write.running()
@@ -311,21 +573,33 @@ impl Workspace {
             if self.selected == Some(id) {
                 self.message = Some("当前仓库的写操作结束后可再次刷新".into());
             }
-            return;
+            return false;
         }
         let Some(row) = self.repo_mut(id) else {
-            return;
+            return false;
         };
         if row.fetching {
-            return;
+            return false;
         }
         row.fetching = true;
         let target = row.target.clone();
+        self.bump_board_version();
         let fetch = self.runtime.fetch.clone();
+        let events = self.runtime.events_sender();
         self.runtime.status.execute(move || {
-            let before = git::read_sync(&target);
-            let common = git::common_dir(&target.root).ok();
+            if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                let _ = events.send_blocking(Update(Event::FetchCancelled { target }));
+                return;
+            }
+            let result = git::read_sync_with_common(&target);
+            let before = result.snapshot;
+            let common = result.common;
             fetch.run(move || {
+                if cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+                    return Event::FetchCancelled {
+                        target: before.worktree,
+                    };
+                }
                 let result = git::fetch_upstream(&before);
                 Event::Fetched {
                     before,
@@ -335,6 +609,7 @@ impl Workspace {
                 }
             });
         });
+        true
     }
 
     pub(super) fn related_worktrees(&self, target: &WorktreeTarget) -> Vec<WorktreeId> {
@@ -356,7 +631,9 @@ impl Workspace {
         at: SystemTime,
     ) {
         let target = before.worktree;
+        let failed = result.is_err();
         let Some(row) = self.repo_mut(target.id).filter(|r| r.target == target) else {
+            self.record_batch_fetch_settlement(target.id, failed, false);
             return;
         };
         row.fetching = false;
@@ -376,6 +653,7 @@ impl Workspace {
                 affected = self.record_fetch_outcome(&target, common.as_deref(), outcome, at)
             }
         }
+        self.record_batch_fetch_settlement(target.id, failed, false);
         if self.selected.is_some_and(|id| affected.contains(&id)) {
             self.load_history();
             self.load_branches();
@@ -383,6 +661,7 @@ impl Workspace {
         for id in affected {
             self.start_status(id);
         }
+        self.bump_board_version();
     }
     // Standalone Fetch and the network phase of Pull share exactly the same timestamp rules.
     pub(super) fn record_fetch_outcome(

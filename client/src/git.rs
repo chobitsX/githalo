@@ -1,12 +1,172 @@
 //! Git commands scoped to a registered worktree.
 
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::SystemTime;
 
 use crate::worktree::{
     SyncCounts, SyncSnapshot, SyncStatus, UpstreamConfig, UpstreamStatus, WorktreeTarget,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileStamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl FileStamp {
+    fn read(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        Some(Self {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
+}
+
+/// Lightweight filesystem fingerprint of a repository's HEAD, active refs, and config.
+/// Used to skip spawning `git` subprocesses when nothing in `.git` changed since the last read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoStateStamp {
+    root: PathBuf,
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+    head_bytes: Vec<u8>,
+    packed_refs: Option<FileStamp>,
+    config: Option<FileStamp>,
+    worktree_config: Option<FileStamp>,
+    branch_ref_path: Option<PathBuf>,
+    branch_ref_bytes: Option<Vec<u8>>,
+    tracking_ref_path: Option<PathBuf>,
+    tracking_ref_bytes: Option<Vec<u8>>,
+}
+
+impl RepoStateStamp {
+    /// Returns `true` only when every tracked `.git` file still matches the previous snapshot.
+    /// Any error, missing file, reftable repo, or byte/metadata change returns `false`.
+    pub fn is_unchanged(&self) -> bool {
+        if fs::symlink_metadata(self.root.join(".git")).is_err() {
+            return false;
+        }
+        if self.common_dir.join("reftable").exists() {
+            return false;
+        }
+        let Ok(head_bytes) = read_small_file(&self.git_dir.join("HEAD")) else {
+            return false;
+        };
+        if head_bytes != self.head_bytes {
+            return false;
+        }
+        if FileStamp::read(&self.common_dir.join("packed-refs")) != self.packed_refs {
+            return false;
+        }
+        if FileStamp::read(&self.common_dir.join("config")) != self.config {
+            return false;
+        }
+        if FileStamp::read(&self.git_dir.join("config.worktree")) != self.worktree_config {
+            return false;
+        }
+        if let Some(path) = &self.branch_ref_path
+            && read_small_file(path).ok() != self.branch_ref_bytes
+        {
+            return false;
+        }
+        if let Some(path) = &self.tracking_ref_path
+            && read_small_file(path).ok() != self.tracking_ref_bytes
+        {
+            return false;
+        }
+        true
+    }
+}
+
+fn read_small_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    let meta = fs::metadata(path)?;
+    if meta.len() > 4096 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ref file too large",
+        ));
+    }
+    fs::read(path)
+}
+
+fn loose_ref_path(common_dir: &Path, reference: &OsStr) -> Option<PathBuf> {
+    let text = reference.to_str()?;
+    if !text.starts_with("refs/") || text.contains("..") || text.contains('\\') {
+        return None;
+    }
+    Some(common_dir.join(text))
+}
+
+fn capture_state_stamp(
+    root: &Path,
+    git_dir: &Path,
+    common_dir: &Path,
+    status: &SyncStatus,
+) -> Option<RepoStateStamp> {
+    if common_dir.join("reftable").exists() {
+        return None;
+    }
+    let head_bytes = read_small_file(&git_dir.join("HEAD")).ok()?;
+    let (branch_ref_path, tracking_ref_path) = match status {
+        SyncStatus::Branch {
+            branch_ref,
+            upstream,
+            ..
+        } => {
+            let branch_path = loose_ref_path(common_dir, branch_ref);
+            let tracking_path = match upstream {
+                UpstreamStatus::Resolved { tracking_ref, .. } => {
+                    loose_ref_path(common_dir, tracking_ref)
+                }
+                UpstreamStatus::Unavailable {
+                    tracking_ref: Some(tracking_ref),
+                    ..
+                }
+                | UpstreamStatus::Deleted {
+                    tracking_ref: Some(tracking_ref),
+                    ..
+                } => loose_ref_path(common_dir, tracking_ref),
+                _ => None,
+            };
+            (branch_path, tracking_path)
+        }
+        SyncStatus::UnbornBranch { branch_ref, .. } => {
+            (loose_ref_path(common_dir, branch_ref), None)
+        }
+        SyncStatus::DetachedHead { .. } => (None, None),
+        SyncStatus::WorktreeUnavailable { .. } | SyncStatus::ReadFailed { .. } => return None,
+    };
+    let branch_ref_bytes = branch_ref_path
+        .as_deref()
+        .and_then(|p| read_small_file(p).ok());
+    let tracking_ref_bytes = tracking_ref_path
+        .as_deref()
+        .and_then(|p| read_small_file(p).ok());
+    Some(RepoStateStamp {
+        root: root.to_path_buf(),
+        git_dir: git_dir.to_path_buf(),
+        common_dir: common_dir.to_path_buf(),
+        head_bytes,
+        packed_refs: FileStamp::read(&common_dir.join("packed-refs")),
+        config: FileStamp::read(&common_dir.join("config")),
+        worktree_config: FileStamp::read(&git_dir.join("config.worktree")),
+        branch_ref_path,
+        branch_ref_bytes,
+        tracking_ref_path,
+        tracking_ref_bytes,
+    })
+}
+
+/// Combined result of reading a worktree's sync status, common Git directory, and state stamp.
+pub struct SyncReadResult {
+    pub snapshot: SyncSnapshot,
+    pub common: Option<PathBuf>,
+    pub stamp: Option<RepoStateStamp>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FetchOutcome {
@@ -28,25 +188,112 @@ pub fn discover(path: &Path) -> Result<PathBuf, String> {
 
 /// Find the canonical Git directory shared by linked worktrees.
 pub fn common_dir(root: &Path) -> Result<PathBuf, String> {
-    verify_root(root)?;
-    let output = checked(
-        read_command(root).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
-        "无法读取 Git 公共目录",
-    )?;
-    canonical_path(&output)
+    Ok(verify_and_resolve_dirs(root)?.common_dir)
 }
 
 pub fn read_sync(target: &WorktreeTarget) -> SyncSnapshot {
-    let status = match verify_root(&target.root) {
-        Ok(()) => {
-            read_status(&target.root).unwrap_or_else(|reason| SyncStatus::ReadFailed { reason })
+    read_sync_with_common(target).snapshot
+}
+
+/// Reads sync status, canonical common Git dir, and a lightweight state stamp in 1–2 git calls
+/// (down from 5–7 subprocesses).
+pub fn read_sync_with_common(target: &WorktreeTarget) -> SyncReadResult {
+    let resolved = match verify_and_resolve_dirs(&target.root) {
+        Ok(dirs) => dirs,
+        Err(reason) => {
+            return SyncReadResult {
+                snapshot: SyncSnapshot {
+                    worktree: target.clone(),
+                    status: SyncStatus::WorktreeUnavailable { reason },
+                },
+                common: None,
+                stamp: None,
+            };
         }
-        Err(reason) => SyncStatus::WorktreeUnavailable { reason },
     };
-    SyncSnapshot {
-        worktree: target.clone(),
-        status,
+    let status = read_status_fast(&target.root, &resolved.git_dir, &resolved.common_dir)
+        .unwrap_or_else(|reason| SyncStatus::ReadFailed { reason });
+    let stamp = capture_state_stamp(&target.root, &resolved.git_dir, &resolved.common_dir, &status);
+    SyncReadResult {
+        snapshot: SyncSnapshot {
+            worktree: target.clone(),
+            status,
+        },
+        common: Some(resolved.common_dir),
+        stamp,
     }
+}
+
+struct ResolvedRepoDirs {
+    git_dir: PathBuf,
+    common_dir: PathBuf,
+}
+
+fn verify_and_resolve_dirs(root: &Path) -> Result<ResolvedRepoDirs, String> {
+    // Fast 0-process rejection when the worktree root or its `.git` anchor disappeared.
+    if fs::symlink_metadata(root).is_err() {
+        return Err(format!("无法访问 {}", root.display()));
+    }
+    if fs::symlink_metadata(root.join(".git")).is_err() {
+        return Err("无法访问 Git 工作树（缺少 .git）".into());
+    }
+
+    let root_bytes = root.as_os_str().as_encoded_bytes();
+    if !root_bytes.contains(&b'\n') && !root_bytes.contains(&b'\r') {
+        let output = checked(
+            git_command(root).args([
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--git-common-dir",
+                "--git-dir",
+            ]),
+            "无法访问 Git 工作树",
+        )?;
+        if let Some(lines) = split_exact_lines::<3>(&output) {
+            let actual_root = canonicalize(&PathBuf::from(os_string(lines[0])?))?;
+            if actual_root != root {
+                return Err(format!("工作树根目录已变更为 {}", actual_root.display()));
+            }
+            let common_dir = canonicalize(&PathBuf::from(os_string(lines[1])?))?;
+            let git_dir = canonicalize(&PathBuf::from(os_string(lines[2])?))?;
+            return Ok(ResolvedRepoDirs {
+                git_dir,
+                common_dir,
+            });
+        }
+    }
+
+    // Fallback for exotic paths containing newline characters.
+    verify_root(root)?;
+    let common_dir = canonical_path(&checked(
+        read_command(root).args(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+        "无法读取 Git 公共目录",
+    )?)?;
+    let git_dir = canonical_path(&checked(
+        read_command(root).args(["rev-parse", "--absolute-git-dir"]),
+        "无法读取工作树的 Git 目录",
+    )?)?;
+    Ok(ResolvedRepoDirs {
+        git_dir,
+        common_dir,
+    })
+}
+
+fn split_exact_lines<const N: usize>(output: &[u8]) -> Option<[&[u8]; N]> {
+    let trimmed = output.strip_suffix(b"\n")?;
+    let mut parts = trimmed.split(|&b| b == b'\n');
+    let mut result = [&[][..]; N];
+    for slot in &mut result {
+        let line = parts.next()?;
+        #[cfg(windows)]
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        *slot = line;
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(result)
 }
 
 /// Fetch the upstream selected when the refresh started. The branch may now be
@@ -217,16 +464,81 @@ fn canonicalize(path: &Path) -> Result<PathBuf, String> {
         .map_err(|err| format!("无法访问 {}（{err}）", path.display()))
 }
 
-fn read_status(root: &Path) -> Result<SyncStatus, String> {
-    let head = run(read_command(root).args(["symbolic-ref", "--quiet", "HEAD"]))?;
-    let branch_ref = match head.status.code() {
-        Some(0) => os_string(line_content(&head.stdout)?)?,
-        Some(1) => {
-            return Ok(SyncStatus::DetachedHead {
-                head_oid: commit_oid(root, OsStr::new("HEAD"))?,
-            });
+enum FastHead {
+    Branch(OsString),
+    Detached(String),
+}
+
+fn try_read_head_file(git_dir: &Path, is_reftable: bool) -> Option<FastHead> {
+    if is_reftable {
+        return None;
+    }
+    let raw = read_small_file(&git_dir.join("HEAD")).ok()?;
+    let trimmed = raw
+        .strip_suffix(b"\n")
+        .unwrap_or(&raw)
+        .strip_suffix(b"\r")
+        .unwrap_or_else(|| raw.strip_suffix(b"\n").unwrap_or(&raw));
+    if let Some(target) = trimmed.strip_prefix(b"ref: ") {
+        let target = target.trim_ascii();
+        if target == b"refs/heads/.invalid" || !target.starts_with(b"refs/heads/") {
+            return None;
         }
-        _ => return Err(failure("无法读取 HEAD", &head)),
+        let branch = os_string(target).ok()?;
+        return Some(FastHead::Branch(branch));
+    }
+    if is_oid(trimmed) {
+        let oid = object_id(trimmed).ok()?;
+        return Some(FastHead::Detached(oid));
+    }
+    None
+}
+
+fn try_read_loose_ref_oid(
+    common_dir: &Path,
+    reference: &OsStr,
+    is_reftable: bool,
+) -> Option<String> {
+    if is_reftable {
+        return None;
+    }
+    let path = loose_ref_path(common_dir, reference)?;
+    let raw = read_small_file(&path).ok()?;
+    let trimmed = raw
+        .strip_suffix(b"\n")
+        .unwrap_or(&raw)
+        .strip_suffix(b"\r")
+        .unwrap_or_else(|| raw.strip_suffix(b"\n").unwrap_or(&raw));
+    // Never shortcut symbolic refs (`ref: ...`); let git resolve them.
+    if is_oid(trimmed) {
+        return object_id(trimmed).ok();
+    }
+    None
+}
+
+fn read_status_fast(
+    root: &Path,
+    git_dir: &Path,
+    common_dir: &Path,
+) -> Result<SyncStatus, String> {
+    let is_reftable = common_dir.join("reftable").exists();
+    let branch_ref = match try_read_head_file(git_dir, is_reftable) {
+        Some(FastHead::Detached(head_oid)) => {
+            return Ok(SyncStatus::DetachedHead { head_oid });
+        }
+        Some(FastHead::Branch(branch)) => branch,
+        None => {
+            let head = run(read_command(root).args(["symbolic-ref", "--quiet", "HEAD"]))?;
+            match head.status.code() {
+                Some(0) => os_string(line_content(&head.stdout)?)?,
+                Some(1) => {
+                    return Ok(SyncStatus::DetachedHead {
+                        head_oid: commit_oid(root, OsStr::new("HEAD"))?,
+                    });
+                }
+                _ => return Err(failure("无法读取 HEAD", &head)),
+            }
+        }
     };
     if !branch_ref.as_encoded_bytes().starts_with(b"refs/heads/") {
         return Err("HEAD 没有指向有效的本地分支".into());
@@ -242,7 +554,7 @@ fn read_status(root: &Path) -> Result<SyncStatus, String> {
             upstream,
         });
     };
-    let upstream = read_upstream(root, &branch_ref, &branch)
+    let upstream = read_upstream(root, common_dir, is_reftable, &branch_ref, &branch)
         .unwrap_or_else(|reason| UpstreamStatus::ReadFailed { reason });
     Ok(SyncStatus::Branch {
         branch_ref,
@@ -304,6 +616,8 @@ fn branch_details(root: &Path, branch_ref: &OsStr) -> Result<Option<BranchDetail
 
 fn read_upstream(
     root: &Path,
+    common_dir: &Path,
+    is_reftable: bool,
     branch_ref: &OsStr,
     branch: &BranchDetails,
 ) -> Result<UpstreamStatus, String> {
@@ -317,9 +631,29 @@ fn read_upstream(
         });
     };
 
-    match exact_ref_oid(root, tracking_ref) {
+    let (resolved_oid, from_loose_shortcut) =
+        match try_read_loose_ref_oid(common_dir, tracking_ref, is_reftable) {
+            Some(oid) => (Ok(oid), true),
+            None => (exact_ref_oid(root, tracking_ref), false),
+        };
+    match resolved_oid {
         Ok(oid) => {
-            let comparison = compare(root, &branch.oid, &oid);
+            // `branch.oid` was just verified by `for-each-ref` to be an existing commit object.
+            // If the tracking ref points to the exact same OID, ahead/behind is guaranteed 0/0.
+            let comparison = if branch.oid == oid {
+                Ok(SyncCounts {
+                    ahead: 0,
+                    behind: 0,
+                })
+            } else {
+                let cmp = compare(root, &branch.oid, &oid);
+                if cmp.is_err() && from_loose_shortcut {
+                    // Validate via git (e.g. missing promisor / broken object) so error
+                    // classification matches `exact_ref_oid` semantics identically.
+                    exact_ref_oid(root, tracking_ref)?;
+                }
+                cmp
+            };
             Ok(UpstreamStatus::Resolved {
                 config: config.clone(),
                 tracking_ref: tracking_ref.clone(),

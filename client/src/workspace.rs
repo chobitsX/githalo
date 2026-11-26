@@ -40,7 +40,7 @@ pub use repo_ops::{RepoOpAction, RepoOpPreview, RepoOpsState};
 use runtime::Runtime;
 pub use shelves::{ShelfAction, ShelfState};
 pub use stashes::{StashAction, StashState};
-pub use status::RepoRow;
+pub use status::{BatchFetchProgress, RepoRow};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Panel {
@@ -118,6 +118,11 @@ pub enum Action {
     ToggleGroup(Option<GroupId>),
     RefreshRepo(WorktreeId),
     RefreshGroup(Option<GroupId>),
+    /// Cancels any queued repositories remaining in the active group/nested batch fetch.
+    CancelBatchFetch,
+    /// Lightweight refresh on window activation: refreshes active repo details and checks
+    /// expanded/visible repositories via `.git` fingerprints while marking collapsed ones stale.
+    RefreshActive,
     Reload,
     AddRepo {
         path: PathBuf,
@@ -229,12 +234,20 @@ enum Event {
     Status {
         snapshot: SyncSnapshot,
         common: Option<PathBuf>,
+        stamp: Option<git::RepoStateStamp>,
     },
+    StatusUnchanged {
+        target: WorktreeTarget,
+    },
+    Noop,
     Fetched {
         before: SyncSnapshot,
         common: Option<PathBuf>,
         result: Result<FetchOutcome, String>,
         at: SystemTime,
+    },
+    FetchCancelled {
+        target: WorktreeTarget,
     },
     FetchTime {
         target: WorktreeTarget,
@@ -297,7 +310,9 @@ pub struct Workspace {
     pub shelves: ShelfState,
     pub last_commit: Option<CommitReceipt>,
     writes: BTreeMap<WorktreeId, daily::WriteRecord>,
+    batch_fetch: Option<status::BatchFetchTracker>,
     pub ready: bool,
+    pub board_version: u64,
     pub groups: Vec<GroupView>,
     pub repos: Vec<RepoRow>,
     pub nested: BTreeMap<WorktreeId, NestedChildrenView>,
@@ -378,7 +393,9 @@ impl Workspace {
                 shelves: ShelfState::default(),
                 last_commit: None,
                 writes: BTreeMap::new(),
+                batch_fetch: None,
                 ready: false,
+                board_version: 0,
                 groups: vec![],
                 repos: vec![],
                 nested: BTreeMap::new(),
@@ -390,7 +407,7 @@ impl Workspace {
                 selected: None,
                 panel: Panel::Repositories,
                 commits: vec![],
-                branch_filter: None,
+                branch_filter: Some("HEAD".to_owned()),
                 history_limit: crate::history::RECENT_LIMIT,
                 selected_commit: None,
                 selected_commits: vec![],
@@ -490,22 +507,26 @@ impl Workspace {
             members.iter().copied().collect()
         };
         if group.is_some() && !to_delete.is_empty() {
-            let edges = self.nested_edges();
-            loop {
-                let protected: Vec<WorktreeId> = to_delete
-                    .iter()
-                    .copied()
-                    .filter(|id| {
-                        edges
-                            .iter()
-                            .any(|(parent, child)| child == id && !to_delete.contains(parent))
-                    })
-                    .collect();
-                if protected.is_empty() {
-                    break;
+            let (children_by_parent, parents_by_child) = self.nested_adjacency();
+            let mut protected_queue = std::collections::VecDeque::new();
+            for &id in &to_delete {
+                if parents_by_child
+                    .get(&id)
+                    .is_some_and(|parents| parents.iter().any(|p| !to_delete.contains(p)))
+                {
+                    protected_queue.push_back(id);
                 }
-                for id in protected {
-                    to_delete.remove(&id);
+            }
+            while let Some(id) = protected_queue.pop_front() {
+                if !to_delete.remove(&id) {
+                    continue;
+                }
+                if let Some(children) = children_by_parent.get(&id) {
+                    for &child in children {
+                        if to_delete.contains(&child) {
+                            protected_queue.push_back(child);
+                        }
+                    }
                 }
             }
         }
@@ -535,14 +556,22 @@ impl Workspace {
         members
     }
 
-    fn nested_edges(&self) -> Vec<(WorktreeId, WorktreeId)> {
-        let mut edges = Vec::new();
+    fn nested_adjacency(
+        &self,
+    ) -> (
+        BTreeMap<WorktreeId, Vec<WorktreeId>>,
+        BTreeMap<WorktreeId, Vec<WorktreeId>>,
+    ) {
+        let mut children_by_parent: BTreeMap<WorktreeId, Vec<WorktreeId>> = BTreeMap::new();
+        let mut parents_by_child: BTreeMap<WorktreeId, Vec<WorktreeId>> = BTreeMap::new();
         for (&parent, entry) in &self.nested {
+            let slot = children_by_parent.entry(parent).or_default();
             for &child in &entry.children {
-                edges.push((parent, child));
+                slot.push(child);
+                parents_by_child.entry(child).or_default().push(parent);
             }
         }
-        edges
+        (children_by_parent, parents_by_child)
     }
 
     fn expand_exclusive_nested(
@@ -553,27 +582,24 @@ impl Workspace {
         if to_delete.is_empty() {
             return;
         }
-        let edges = self.nested_edges();
-        loop {
-            let mut next = Vec::new();
-            for &(parent, child) in &edges {
-                if !to_delete.contains(&parent)
-                    || to_delete.contains(&child)
-                    || grouped.contains(&child)
-                {
+        let (children_by_parent, parents_by_child) = self.nested_adjacency();
+        let mut queue: std::collections::VecDeque<WorktreeId> =
+            to_delete.iter().copied().collect();
+        while let Some(parent) = queue.pop_front() {
+            let Some(children) = children_by_parent.get(&parent) else {
+                continue;
+            };
+            for &child in children {
+                if to_delete.contains(&child) || grouped.contains(&child) {
                     continue;
                 }
-                let referenced_elsewhere = edges
-                    .iter()
-                    .any(|&(other_parent, c)| c == child && !to_delete.contains(&other_parent));
-                if !referenced_elsewhere {
-                    next.push(child);
+                let referenced_elsewhere = parents_by_child
+                    .get(&child)
+                    .is_some_and(|parents| parents.iter().any(|p| !to_delete.contains(p)));
+                if !referenced_elsewhere && to_delete.insert(child) {
+                    queue.push_back(child);
                 }
             }
-            if next.is_empty() {
-                break;
-            }
-            to_delete.extend(next);
         }
     }
 
@@ -592,6 +618,68 @@ impl Workspace {
         self.selected
             .and_then(|id| self.repo(id))
             .map(|r| r.target.clone())
+    }
+
+    pub(super) fn bump_board_version(&mut self) {
+        self.board_version = self.board_version.wrapping_add(1);
+    }
+
+    /// Returns the set of repositories currently visible in the sidebar (selected repo,
+    /// members of expanded groups, and children of expanded nested parents inside them).
+    fn visible_worktree_ids(&self) -> BTreeSet<WorktreeId> {
+        let mut visible = BTreeSet::new();
+        if let Some(selected) = self.selected {
+            visible.insert(selected);
+        }
+        for group in &self.groups {
+            if !group.expanded {
+                continue;
+            }
+            for &member in &group.members {
+                visible.insert(member);
+                if let Some(nested) = self.nested.get(&member)
+                    && nested.expanded
+                {
+                    visible.extend(nested.children.iter().copied());
+                }
+            }
+        }
+        visible
+    }
+
+    fn refresh_active_view(&mut self) {
+        if self.selected.is_some() {
+            self.load_history();
+            self.load_branches();
+            self.load_cherry_pick_state();
+            self.load_repo_op_states();
+            if self.panel == Panel::ProjectFiles {
+                self.refresh_tree_silently();
+            }
+            self.load_working_changes();
+            self.load_stashes();
+            self.load_shelves();
+        }
+        let visible = self.visible_worktree_ids();
+        let selected = self.selected;
+        let mut to_check = Vec::new();
+        for row in &mut self.repos {
+            let id = row.target.id;
+            if visible.contains(&id) {
+                to_check.push(id);
+            } else {
+                row.stale = true;
+            }
+        }
+        // Prioritize the currently selected worktree first so its status settles immediately.
+        if let Some(sel) = selected
+            && let Some(pos) = to_check.iter().position(|&id| id == sel)
+        {
+            to_check.swap(0, pos);
+        }
+        for id in to_check {
+            self.start_status_if_changed(id);
+        }
     }
 
     fn next_id(&mut self) -> u64 {
@@ -646,21 +734,62 @@ impl Workspace {
                     Panel::Repositories => {}
                 }
             }
-            Action::ToggleGroup(id) => self.edit_catalog(move |db| db.toggle_group_expanded(id)),
-            Action::RefreshRepo(id) => self.start_fetch(id),
-            Action::RefreshGroup(id) => {
-                if let Some(group) = self.groups.iter().find(|g| g.id == id) {
-                    let members = group.members.clone();
-                    for member in members {
-                        self.start_fetch(member);
-                        if let Some(nested) = self.nested.get(&member) {
-                            for child in nested.children.clone() {
-                                self.start_fetch(child);
+            Action::ToggleGroup(id) => {
+                let mut next_expanded = None;
+                let mut to_refresh = Vec::new();
+                if let Some(group) = self.groups.iter_mut().find(|g| g.id == id) {
+                    group.expanded = !group.expanded;
+                    next_expanded = Some(group.expanded);
+                    if group.expanded {
+                        for &member in &group.members {
+                            to_refresh.push(member);
+                            if let Some(nested) = self.nested.get(&member)
+                                && nested.expanded
+                            {
+                                to_refresh.extend(nested.children.iter().copied());
                             }
                         }
                     }
                 }
+                if let Some(expanded) = next_expanded {
+                    self.bump_board_version();
+                    self.runtime.store(move |db| {
+                        db.set_group_expanded(id, expanded)
+                            .map_err(|e| e.to_string())?;
+                        Ok(Event::Noop)
+                    });
+                    for repo_id in to_refresh {
+                        if self
+                            .repo(repo_id)
+                            .is_some_and(|r| r.stale || !r.has_status())
+                        {
+                            self.start_status_if_changed(repo_id);
+                        }
+                    }
+                } else {
+                    self.edit_catalog(move |db| db.toggle_group_expanded(id));
+                }
             }
+            Action::RefreshRepo(id) => self.start_fetch(id),
+            Action::RefreshGroup(id) => {
+                if let Some(group) = self.groups.iter().find(|g| g.id == id) {
+                    let label = if id.is_none() {
+                        crate::i18n::tr("未分组", "Ungrouped").to_owned()
+                    } else {
+                        group.name.clone()
+                    };
+                    let mut ids = Vec::with_capacity(group.members.len());
+                    for &member in &group.members {
+                        ids.push(member);
+                        if let Some(nested) = self.nested.get(&member) {
+                            ids.extend(nested.children.iter().copied());
+                        }
+                    }
+                    self.start_batch_fetch(label, ids);
+                }
+            }
+            Action::CancelBatchFetch => self.cancel_batch_fetch(),
+            Action::RefreshActive => self.refresh_active_view(),
             Action::Reload => self.runtime.store(|db| {
                 Ok(Event::Board {
                     board: db.board().map_err(|e| e.to_string())?,
@@ -713,7 +842,8 @@ impl Workspace {
                     return;
                 }
                 let scan_pool = self.runtime.scan.clone();
-                self.runtime.store(move |db| {
+                let store = self.runtime.store_handle();
+                self.runtime.status.execute(move || {
                     let mut roots = BTreeSet::new();
                     let mut non_git_dirs = Vec::new();
                     let mut skipped = 0usize;
@@ -754,50 +884,54 @@ impl Workspace {
                                     outcome,
                                 }
                             });
-                            return Ok(Event::Board {
-                                board: db.board().map_err(|e| e.to_string())?,
-                                reload: false,
-                                notice: Some(
-                                    crate::i18n::tr(
-                                        "正在扫描文件夹内的 Git 仓库…",
-                                        "Scanning folder for Git repositories…",
-                                    )
-                                    .to_owned(),
-                                ),
+                            store.run(move |db| {
+                                Ok(Event::Board {
+                                    board: db.board().map_err(|e| e.to_string())?,
+                                    reload: false,
+                                    notice: Some(
+                                        crate::i18n::tr(
+                                            "正在扫描文件夹内的 Git 仓库…",
+                                            "Scanning folder for Git repositories…",
+                                        )
+                                        .to_owned(),
+                                    ),
+                                })
                             });
+                            return;
                         }
-                        return Err(first_error.unwrap_or_else(|| {
+                        let err_msg = first_error.unwrap_or_else(|| {
                             crate::i18n::tr(
                                 "所选路径不是有效的 Git 仓库目录",
                                 "Dropped path is not a valid Git repository",
                             )
                             .to_owned()
-                        }));
+                        });
+                        store.run(move |_| Err(err_msg));
+                        return;
                     }
-                    for root in &roots {
-                        db.register(root, group).map_err(|e| e.to_string())?;
-                    }
-                    let _ = db.set_group_expanded(group, true);
-                    let notice = (skipped > 0).then(|| {
-                        if crate::i18n::is_zh() {
-                            format!(
-                                "已添加 {} 个仓库，跳过 {} 个非 Git 目录",
-                                roots.len(),
-                                skipped
-                            )
-                        } else {
-                            format!(
-                                "Added {} repositories; skipped {} non-Git item(s)",
-                                roots.len(),
-                                skipped
-                            )
-                        }
+                    let roots_vec: Vec<PathBuf> = roots.into_iter().collect();
+                    let root_count = roots_vec.len();
+                    store.run(move |db| {
+                        db.register_batch(&roots_vec, group)
+                            .map_err(|e| e.to_string())?;
+                        let _ = db.set_group_expanded(group, true);
+                        let notice = (skipped > 0).then(|| {
+                            if crate::i18n::is_zh() {
+                                format!(
+                                    "已添加 {root_count} 个仓库，跳过 {skipped} 个非 Git 目录"
+                                )
+                            } else {
+                                format!(
+                                    "Added {root_count} repositories; skipped {skipped} non-Git item(s)"
+                                )
+                            }
+                        });
+                        Ok(Event::Board {
+                            board: db.board().map_err(|e| e.to_string())?,
+                            reload: false,
+                            notice,
+                        })
                     });
-                    Ok(Event::Board {
-                        board: db.board().map_err(|e| e.to_string())?,
-                        reload: false,
-                        notice,
-                    })
                 });
             }
             Action::RepairRepo { id, .. } | Action::RemoveRepo(id) if self.writing(id) => {
@@ -869,13 +1003,37 @@ impl Workspace {
             Action::RenameProjectEntry { from, to } => self.rename_project_entry(from, to),
             Action::DeleteProjectEntry(path) => self.delete_project_entry(path),
             Action::ToggleNested(parent) => {
-                self.edit_catalog(move |db| db.toggle_nested_expanded(parent));
+                let mut next_expanded = None;
+                let mut children_to_refresh = Vec::new();
+                if let Some(entry) = self.nested.get_mut(&parent) {
+                    entry.expanded = !entry.expanded;
+                    next_expanded = Some(entry.expanded);
+                    if entry.expanded {
+                        children_to_refresh = entry.children.clone();
+                    }
+                }
+                if let Some(expanded) = next_expanded {
+                    self.bump_board_version();
+                    self.runtime.store(move |db| {
+                        db.set_nested_expanded(parent, expanded)
+                            .map_err(|e| e.to_string())?;
+                        Ok(Event::Noop)
+                    });
+                    for child in children_to_refresh {
+                        if self.repo(child).is_some_and(|r| r.stale || !r.has_status()) {
+                            self.start_status_if_changed(child);
+                        }
+                    }
+                } else {
+                    self.edit_catalog(move |db| db.toggle_nested_expanded(parent));
+                }
             }
             Action::ScanNested(parent) => {
                 if let Some(target) = self.repo(parent).map(|r| r.target.clone()) {
                     self.dismissed_nested.remove(&parent);
                     self.discovered_nested.remove(&parent);
                     self.scanning_nested.insert(parent);
+                    self.bump_board_version();
                     self.edit_catalog(move |db| db.clear_dismissed_nested(parent));
                     self.start_nested_scan(target, true);
                 }
@@ -889,48 +1047,46 @@ impl Workspace {
                     return;
                 }
                 self.discovered_nested.remove(&parent);
-                self.runtime.store(move |db| {
-                    let mut roots = Vec::new();
-                    let mut seen = BTreeSet::new();
-                    for path in paths {
-                        if let Ok(root) = git::discover(&path)
-                            && seen.insert(root.clone())
-                        {
-                            roots.push(root);
-                        }
-                    }
+                self.bump_board_version();
+                let store = self.runtime.store_handle();
+                self.runtime.status.execute(move || {
+                    let roots = discover_unique_roots(paths);
                     if roots.is_empty() {
-                        return Err(crate::i18n::tr(
-                            "没有可纳管的有效 Git 仓库",
-                            "No valid Git repositories to adopt",
-                        )
-                        .to_owned());
+                        store.run(|_| {
+                            Err(crate::i18n::tr(
+                                "没有可纳管的有效 Git 仓库",
+                                "No valid Git repositories to adopt",
+                            )
+                            .to_owned())
+                        });
+                        return;
                     }
-                    match mode {
-                        NestedAdoptMode::UnderParent => {
-                            db.attach_nested_repos(parent, &roots)
-                                .map_err(|e| e.to_string())?;
-                        }
-                        NestedAdoptMode::NewGroup(name) => {
-                            let group_id = db.create_group(&name).map_err(|e| e.to_string())?;
-                            for root in &roots {
-                                db.register(root, Some(group_id))
+                    store.run(move |db| {
+                        match mode {
+                            NestedAdoptMode::UnderParent => {
+                                db.attach_nested_repos(parent, &roots)
                                     .map_err(|e| e.to_string())?;
                             }
-                            let _ = db.set_group_expanded(Some(group_id), true);
-                            // Remember these paths as handled for the parent so the banner won't re-appear.
-                            let _ = db.dismiss_nested_paths(parent, &roots);
+                            NestedAdoptMode::NewGroup(name) => {
+                                let group_id = db.create_group(&name).map_err(|e| e.to_string())?;
+                                db.register_batch(&roots, Some(group_id))
+                                    .map_err(|e| e.to_string())?;
+                                let _ = db.set_group_expanded(Some(group_id), true);
+                                // Remember these paths as handled for the parent so the banner won't re-appear.
+                                let _ = db.dismiss_nested_paths(parent, &roots);
+                            }
                         }
-                    }
-                    Ok(Event::Board {
-                        board: db.board().map_err(|e| e.to_string())?,
-                        reload: false,
-                        notice: None,
-                    })
+                        Ok(Event::Board {
+                            board: db.board().map_err(|e| e.to_string())?,
+                            reload: false,
+                            notice: None,
+                        })
+                    });
                 });
             }
             Action::DismissNested { parent, paths } => {
                 self.discovered_nested.remove(&parent);
+                self.bump_board_version();
                 if !paths.is_empty() {
                     self.edit_catalog(move |db| db.dismiss_nested_paths(parent, &paths));
                 }
@@ -939,12 +1095,15 @@ impl Workspace {
                 self.edit_catalog(move |db| db.detach_nested_repo(parent, child));
             }
             Action::RefreshWithNested(parent) => {
-                self.start_fetch(parent);
+                let label = self
+                    .repo(parent)
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| crate::i18n::tr("子仓库", "Sub-repos").to_owned());
+                let mut ids = vec![parent];
                 if let Some(nested) = self.nested.get(&parent) {
-                    for child in nested.children.clone() {
-                        self.start_fetch(child);
-                    }
+                    ids.extend(nested.children.iter().copied());
                 }
+                self.start_batch_fetch(label, ids);
             }
             Action::ImportContainerRepos {
                 paths,
@@ -955,36 +1114,34 @@ impl Workspace {
                 if paths.is_empty() {
                     return;
                 }
-                self.runtime.store(move |db| {
-                    let target_group = if let Some(name) = new_group_name {
-                        Some(db.create_group(&name).map_err(|e| e.to_string())?)
-                    } else {
-                        group
-                    };
-                    let mut count = 0usize;
-                    let mut seen = BTreeSet::new();
-                    for path in paths {
-                        if let Ok(root) = git::discover(&path)
-                            && seen.insert(root.clone())
-                        {
-                            db.register(&root, target_group)
-                                .map_err(|e| e.to_string())?;
-                            count += 1;
-                        }
+                let store = self.runtime.store_handle();
+                self.runtime.status.execute(move || {
+                    let roots = discover_unique_roots(paths);
+                    if roots.is_empty() {
+                        store.run(|_| {
+                            Err(crate::i18n::tr(
+                                "没有可导入的有效 Git 仓库",
+                                "No valid Git repositories to import",
+                            )
+                            .to_owned())
+                        });
+                        return;
                     }
-                    if count == 0 {
-                        return Err(crate::i18n::tr(
-                            "没有可导入的有效 Git 仓库",
-                            "No valid Git repositories to import",
-                        )
-                        .to_owned());
-                    }
-                    let _ = db.set_group_expanded(target_group, true);
-                    Ok(Event::Board {
-                        board: db.board().map_err(|e| e.to_string())?,
-                        reload: false,
-                        notice: None,
-                    })
+                    store.run(move |db| {
+                        let target_group = if let Some(name) = new_group_name {
+                            Some(db.create_group(&name).map_err(|e| e.to_string())?)
+                        } else {
+                            group
+                        };
+                        db.register_batch(&roots, target_group)
+                            .map_err(|e| e.to_string())?;
+                        let _ = db.set_group_expanded(target_group, true);
+                        Ok(Event::Board {
+                            board: db.board().map_err(|e| e.to_string())?,
+                            reload: false,
+                            notice: None,
+                        })
+                    });
                 });
             }
             Action::ClearContainerDiscovery => {
@@ -1015,13 +1172,20 @@ impl Workspace {
                 self.ready = true;
                 self.message = Some(message);
             }
-            Event::Status { snapshot, common } => self.apply_status(snapshot, common),
+            Event::Status {
+                snapshot,
+                common,
+                stamp,
+            } => self.apply_status(snapshot, common, stamp),
+            Event::StatusUnchanged { target } => self.apply_status_unchanged(target),
+            Event::Noop => {}
             Event::Fetched {
                 before,
                 common,
                 result,
                 at,
             } => self.apply_fetch(before, common, result, at),
+            Event::FetchCancelled { target } => self.apply_fetch_cancelled(target),
             Event::FetchTime {
                 target,
                 config,
@@ -1115,6 +1279,14 @@ impl Workspace {
                 .ok()
                 .is_some_and(|i| self.repos[i].target == record.target)
         });
+        if let Some(tracker) = &mut self.batch_fetch {
+            tracker
+                .pending
+                .retain(|id| self.repos.binary_search_by_key(id, |r| r.target.id).is_ok());
+            if tracker.pending.is_empty() {
+                self.batch_fetch = None;
+            }
+        }
         let mut assigned = BTreeSet::new();
         self.groups = board
             .groups
@@ -1214,9 +1386,21 @@ impl Workspace {
             self.load_stashes();
             self.load_shelves();
         }
+        let visible = self.visible_worktree_ids();
+        let selected = self.selected;
+        reads.sort_by_key(|&id| {
+            if Some(id) == selected {
+                0u8
+            } else if visible.contains(&id) {
+                1u8
+            } else {
+                2u8
+            }
+        });
         for id in reads {
             self.start_status(id);
         }
+        self.bump_board_version();
         // Trigger low-priority async nested scan once per top-level worktree revision.
         let targets_to_scan: Vec<WorktreeTarget> = self
             .repos
@@ -1304,6 +1488,7 @@ impl Workspace {
         } else {
             self.discovered_nested.insert(target.id, fresh);
         }
+        self.bump_board_version();
     }
 
     fn apply_container_scan(
@@ -1336,4 +1521,53 @@ impl Workspace {
             truncated: outcome.truncated,
         });
     }
+}
+
+/// Resolves and deduplicates repository roots, parallelizing across worker threads when importing
+/// large batches so discovery never blocks the single-threaded SQLite registry worker.
+fn discover_unique_roots(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    if paths.len() <= 8 {
+        let mut roots = Vec::with_capacity(paths.len());
+        let mut seen = BTreeSet::new();
+        for path in paths {
+            if let Ok(root) = git::discover(&path)
+                && seen.insert(root.clone())
+            {
+                roots.push(root);
+            }
+        }
+        return roots;
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .clamp(2, 6)
+        .min(paths.len());
+    let chunk_size = paths.len().div_ceil(workers);
+    let per_chunk: Vec<Vec<PathBuf>> = std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for chunk in paths.chunks(chunk_size) {
+            handles.push(scope.spawn(move || {
+                chunk
+                    .iter()
+                    .filter_map(|path| git::discover(path).ok())
+                    .collect::<Vec<_>>()
+            }));
+        }
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    let mut roots = Vec::with_capacity(paths.len());
+    let mut seen = BTreeSet::new();
+    for chunk in per_chunk {
+        for root in chunk {
+            if seen.insert(root.clone()) {
+                roots.push(root);
+            }
+        }
+    }
+    roots
 }

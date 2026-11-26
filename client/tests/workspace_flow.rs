@@ -210,6 +210,7 @@ fn clone_worktree(directory: &Path, source: &Path, name: &str, branch: &str) -> 
 fn settled(workspace: &Workspace) -> bool {
     !workspace.history_loading
         && !workspace.changes_loading
+        && !workspace.commit_refs_loading
         && !workspace.diff_loading
         && !workspace.tree_loading
         && !workspace.daily.changes_loading
@@ -1288,4 +1289,186 @@ fn init_plain_repo(base: &Path, name: &str) -> PathBuf {
     fs::create_dir_all(&path).unwrap();
     git(&path, &["init", "-q"]);
     path
+}
+
+#[test]
+fn refresh_active_defers_collapsed_repos_and_refreshes_on_expand_with_fingerprint() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let remote = bare_remote(&root);
+    let visible_repo = clone_worktree(&root, &remote, "visible-repo", "base");
+    let hidden_repo = clone_worktree(&root, &remote, "hidden-repo", "base");
+
+    let mut harness = Harness::open(&root.join("workspace.sqlite3"));
+    let visible_group = harness.create_group("Visible");
+    let hidden_group = harness.create_group("Collapsed");
+    let visible_id = harness.add_repo(&visible_repo, Some(visible_group));
+    let hidden_id = harness.add_repo(&hidden_repo, Some(hidden_group));
+    harness.wait("settle initial reads", settled);
+
+    // Collapse the second group (optimistic immediate update).
+    harness
+        .workspace
+        .dispatch(Action::ToggleGroup(Some(hidden_group)));
+    assert!(!harness.group(Some(hidden_group)).expanded);
+
+    // Mutate local refs in both repos externally (using existing commit `base~1` -> behind 1).
+    git(&visible_repo, &["update-ref", "refs/heads/base", "base~1"]);
+    git(&hidden_repo, &["update-ref", "refs/heads/base", "base~1"]);
+
+    // Window activation triggers RefreshActive: visible repo refreshes via fingerprint mismatch,
+    // collapsed repo is marked stale without spawning git processes.
+    harness.workspace.dispatch(Action::RefreshActive);
+    assert!(harness.workspace.repo(hidden_id).unwrap().stale);
+    assert!(!harness.workspace.repo(hidden_id).unwrap().loading);
+
+    harness.wait("refresh visible repo on activation", |ws| {
+        settled(ws) && ws.repo(visible_id).unwrap().counts == behind(1)
+    });
+    // Hidden repo still has old cached count until its group is expanded.
+    assert_eq!(harness.workspace.repo(hidden_id).unwrap().counts, behind(0));
+    assert!(harness.workspace.repo(hidden_id).unwrap().stale);
+
+    // Expanding the collapsed group optimistically flips expanded and triggers on-demand refresh.
+    harness
+        .workspace
+        .dispatch(Action::ToggleGroup(Some(hidden_group)));
+    assert!(harness.group(Some(hidden_group)).expanded);
+    harness.wait("refresh stale repo upon group expansion", |ws| {
+        settled(ws) && ws.repo(hidden_id).unwrap().counts == behind(1)
+    });
+    assert!(!harness.workspace.repo(hidden_id).unwrap().stale);
+}
+
+#[test]
+fn group_fetch_fast_path_skips_detached_subrepos_and_batch_imports_many_repos() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let remote = bare_remote(&root);
+    let container = root.join("many-subrepos");
+    fs::create_dir_all(&container).unwrap();
+
+    // Create 12 repos (> 8 threshold to exercise parallel discovery + single-tx register_batch).
+    let mut paths = Vec::new();
+    for i in 0..12 {
+        let repo = clone_worktree(&container, &remote, &format!("svc-{i:02}"), "base");
+        if i >= 2 {
+            git(&repo, &["switch", "--quiet", "--detach", BASE]);
+        }
+        paths.push(repo);
+    }
+
+    let mut harness = Harness::open(&root.join("workspace.sqlite3"));
+    harness.workspace.dispatch(Action::ImportContainerRepos {
+        paths: paths.clone(),
+        new_group_name: Some("BatchImport".into()),
+        group: None,
+    });
+    harness.wait("batch import all 12 repos and load their statuses", |ws| {
+        ws.repos.len() == 12 && settled(ws)
+    });
+    let group_id = harness
+        .workspace
+        .groups
+        .iter()
+        .find(|g| g.name == "BatchImport")
+        .and_then(|g| g.id)
+        .expect("BatchImport group");
+
+    // Advance remote and trigger RefreshGroup: detached repos use lightweight fast-path while
+    // tracked branch repos fetch normally.
+    git(&remote, &["update-ref", "refs/heads/base", UPSTREAM]);
+    harness
+        .workspace
+        .dispatch(Action::RefreshGroup(Some(group_id)));
+    // Tracked repos (svc-00, svc-01) enter fetching; detached repos (svc-02..svc-11) skip fetch.
+    let fetching_count = harness
+        .workspace
+        .repos
+        .iter()
+        .filter(|r| r.fetching)
+        .count();
+    assert_eq!(fetching_count, 2);
+
+    harness.wait("finish group fetch on tracked repos", |ws| {
+        settled(ws)
+            && ws
+                .repos
+                .iter()
+                .filter(|r| r.counts == behind(1))
+                .count()
+                == 2
+    });
+    assert_eq!(harness.workspace.batch_fetch_progress(), None);
+}
+
+#[test]
+fn batch_fetch_reports_progress_and_can_cancel_queued_repos() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let remote = bare_remote(&root);
+    let container = root.join("cancel-batch");
+    fs::create_dir_all(&container).unwrap();
+
+    // Create 10 tracked repos + 2 detached repos.
+    let mut paths = Vec::new();
+    for i in 0..12 {
+        let repo = clone_worktree(&container, &remote, &format!("repo-{i:02}"), "base");
+        if i >= 10 {
+            git(&repo, &["switch", "--quiet", "--detach", BASE]);
+        }
+        paths.push(repo);
+    }
+
+    let mut harness = Harness::open(&root.join("workspace.sqlite3"));
+    harness.workspace.dispatch(Action::ImportContainerRepos {
+        paths,
+        new_group_name: Some("CancelGroup".into()),
+        group: None,
+    });
+    harness.wait("import and settle all 12 repos", |ws| {
+        ws.repos.len() == 12 && settled(ws)
+    });
+    let group_id = harness
+        .workspace
+        .groups
+        .iter()
+        .find(|g| g.name == "CancelGroup")
+        .and_then(|g| g.id)
+        .expect("CancelGroup");
+
+    git(&remote, &["update-ref", "refs/heads/base", UPSTREAM]);
+    harness
+        .workspace
+        .dispatch(Action::RefreshGroup(Some(group_id)));
+
+    let progress = harness
+        .workspace
+        .batch_fetch_progress()
+        .expect("active batch fetch progress");
+    assert_eq!(progress.label, "CancelGroup");
+    assert_eq!(progress.total, 10);
+    assert_eq!(progress.skipped, 2);
+    assert!(!progress.cancelling);
+
+    // Immediately cancel the batch fetch and confirm all rows cleanly exit `fetching`.
+    harness.workspace.dispatch(Action::CancelBatchFetch);
+    assert!(
+        harness
+            .workspace
+            .batch_fetch_progress()
+            .is_some_and(|p| p.cancelling)
+    );
+
+    harness.wait("settle cancelled batch fetch", |ws| {
+        ws.batch_fetch_progress().is_none() && settled(ws)
+    });
+    assert!(harness.workspace.repos.iter().all(|r| !r.fetching));
+    assert!(
+        harness
+            .workspace
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("取消") || m.to_lowercase().contains("cancel"))
+    );
 }

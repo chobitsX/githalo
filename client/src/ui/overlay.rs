@@ -479,6 +479,8 @@ impl DesktopView {
             MenuKind::Commits(oids) => self.multi_commit_menu_items(oids, cx),
             MenuKind::RepoAdmin => self.repo_admin_menu_items(cx),
             MenuKind::Worktrees => {
+                const MENU_WORKTREE_CAP: usize = 60;
+                let total_repos = self.workspace.repos.len();
                 let nested_children: std::collections::BTreeSet<WorktreeId> = self
                     .workspace
                     .nested
@@ -486,41 +488,111 @@ impl DesktopView {
                     .flat_map(|n| n.children.iter().copied())
                     .collect();
                 let mut items = Vec::new();
-                let mut push_repo =
-                    |repo: &githalo::workspace::RepoRow, indent: bool, idx_salt: usize| {
-                        let id = repo.target.id;
-                        let path = repo.target.root.to_string_lossy().into_owned();
-                        let selected = self.workspace.selected == Some(id);
-                        let prefix = match (selected, indent) {
-                            (true, true) => "✓  ↳ ",
-                            (true, false) => "✓   ",
-                            (false, true) => "    ↳ ",
-                            (false, false) => "",
-                        };
-                        let label = format!("{prefix}{}", repo.name);
-                        items.push(menu_item(
-                            ("worktree-option", (id.get() as usize) * 2 + idx_salt),
-                            label,
-                            Some(path),
-                            cx,
-                            move |view, _, window, cx| {
-                                view.close_overlay(window, cx);
-                                view.select_repo(id, None, window, cx);
-                            },
-                        ));
-                    };
-
-                for repo in &self.workspace.repos {
-                    if nested_children.contains(&repo.target.id) {
-                        continue;
+                let mut shown_ids = std::collections::BTreeSet::new();
+                let mut push_repo = |repo: &githalo::workspace::RepoRow,
+                                     indent: bool,
+                                     idx_salt: usize,
+                                     cap: Option<usize>|
+                 -> bool {
+                    if let Some(limit) = cap
+                        && items.len() >= limit
+                    {
+                        return false;
                     }
-                    push_repo(repo, false, 0);
-                    if let Some(nested) = self.workspace.nested.get(&repo.target.id) {
-                        for child_id in &nested.children {
-                            if let Some(child) = self.workspace.repo(*child_id) {
-                                push_repo(child, true, 1);
+                    let id = repo.target.id;
+                    if !shown_ids.insert(id) {
+                        return true;
+                    }
+                    let path = super::abbreviate_home_path(&repo.target.root.to_string_lossy());
+                    let selected = self.workspace.selected == Some(id);
+                    let prefix = match (selected, indent) {
+                        (true, true) => "✓  ↳ ",
+                        (true, false) => "✓   ",
+                        (false, true) => "    ↳ ",
+                        (false, false) => "",
+                    };
+                    let label = format!("{prefix}{}", repo.name);
+                    items.push(menu_item(
+                        ("worktree-option", (id.get() as usize) * 2 + idx_salt),
+                        label,
+                        Some(path),
+                        cx,
+                        move |view, _, window, cx| {
+                            view.close_overlay(window, cx);
+                            view.select_repo(id, None, window, cx);
+                        },
+                    ));
+                    true
+                };
+
+                if total_repos <= MENU_WORKTREE_CAP {
+                    for repo in &self.workspace.repos {
+                        if nested_children.contains(&repo.target.id) {
+                            continue;
+                        }
+                        push_repo(repo, false, 0, None);
+                        if let Some(nested) = self.workspace.nested.get(&repo.target.id) {
+                            for child_id in &nested.children {
+                                if let Some(child) = self.workspace.repo(*child_id) {
+                                    push_repo(child, true, 1, None);
+                                }
                             }
                         }
+                    }
+                } else {
+                    // For large multi-repo workspaces, cap the dropdown to keep menu layout instant
+                    // while prioritizing the active repo, top-level repos, and diverged sub-repos.
+                    if let Some(selected_id) = self.workspace.selected
+                        && let Some(selected_repo) = self.workspace.repo(selected_id)
+                    {
+                        push_repo(
+                            selected_repo,
+                            nested_children.contains(&selected_id),
+                            0,
+                            Some(MENU_WORKTREE_CAP),
+                        );
+                    }
+                    'outer: for repo in &self.workspace.repos {
+                        if nested_children.contains(&repo.target.id) {
+                            continue;
+                        }
+                        if !push_repo(repo, false, 0, Some(MENU_WORKTREE_CAP)) {
+                            break 'outer;
+                        }
+                        if let Some(nested) = self.workspace.nested.get(&repo.target.id) {
+                            for child_id in &nested.children {
+                                if let Some(child) = self.workspace.repo(*child_id)
+                                    && child
+                                        .counts
+                                        .is_some_and(|c| c.ahead > 0 || c.behind > 0)
+                                    && !push_repo(child, true, 1, Some(MENU_WORKTREE_CAP))
+                                {
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                    let hidden = total_repos.saturating_sub(shown_ids.len());
+                    if hidden > 0 {
+                        items.push(menu_rule());
+                        let search_label = if is_zh() {
+                            format!("搜索全部 {total_repos} 个仓库（还有 {hidden} 个）…")
+                        } else {
+                            format!("Search all {total_repos} repositories ({hidden} more)…")
+                        };
+                        items.push(menu_item(
+                            "worktree-open-palette",
+                            search_label,
+                            Some(if cfg!(target_os = "macos") {
+                                "⇧⌘P".to_owned()
+                            } else {
+                                "Ctrl+Shift+P".to_owned()
+                            }),
+                            cx,
+                            |view, _, window, cx| {
+                                view.open_command_palette(window, cx);
+                            },
+                        ));
                     }
                 }
                 if !items.is_empty() {
