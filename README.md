@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>A fast, native desktop Git client built with Rust and GPUI.</strong><br />
-  Complete JetBrains-style Git workflows paired with a multi-repo grouped sync dashboard — without JVM or Electron overhead.
+  Complete JetBrains-style Git workflows, a multi-repo grouped sync dashboard, and instant diffs even on massive multi-hunk files — without JVM or Electron overhead.
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
 
 Modern developers rarely work on a single repository. Between microservices, frontend/backend splits, shared libraries, and multiple `git worktree` checkouts, choosing a desktop Git client usually forces an uncomfortable trade-off:
 
-- **JVM & Electron clients** offer rich visuals, yet consume hundreds of megabytes to gigabytes of RAM and lag when switching across many repositories.
+- **JVM & Electron clients** offer rich visuals, yet consume hundreds of megabytes to gigabytes of RAM, lag across large multi-repo workspaces, and frequently freeze when opening heavily modified files with tens of thousands of diff lines.
 - **Lightweight open-source GUIs** stay minimal, but drop out when you need interactive rebase, a built-in 3-way conflict editor, hunk-level partial commits, or an independent patch shelf.
 - **Fast native clients** are largely closed-source and locked behind paid subscriptions.
 
@@ -50,7 +50,8 @@ Modern developers rarely work on a single repository. Between microservices, fro
 | **Hunk Staging & Partial Hunk Commit** | **Full** | Full | Pro | Full | Line-level |
 | **Interactive Rebase & 3-Way Resolver** | **Full** | Full | Pro | Full | None |
 | **Independent Patch Shelf (Non-Stash)** | **Full** | Full | None | None | None |
-| **Side-by-Side Word-Level Diff** | **Full** | Full | Full | Full | Basic |
+| **Large Multi-Hunk File Diff** | **Instant (~52 ms · Zero Freeze)** | Full | Often lags | Fast | Basic |
+| **Multi-Commit Net Diff & Batch Ops** | **Full (Batch CLI)** | Full | Limited | Full | None |
 | **Native Git CLI (Hooks / SSH / GPG)** | **100% Native** | Native | libgit2 | Native | Native |
 | **Bilingual UI (English & Chinese)** | **Built-in** | Plugin | English | English | English |
 
@@ -79,14 +80,17 @@ Modern developers rarely work on a single repository. Between microservices, fro
   - **Shelf**: Patch-based shelving stored under `<git-common-dir>/githalo-shelf/` without touching `refs/stash` — selectively shelve files, preview patches, unshelve (keep or remove), and delete.
 - **Remotes, Branches & Tags**: Clone, Init, manage multiple Remotes, configure branch upstream tracking (including one-click binding from the sidebar footer), create/push/delete lightweight & annotated Tags, Pull with strategy selection (`--ff-only`, `Merge`, `Rebase --autostash`), safe force push (`--force-with-lease`), and `Push up to commit`.
 
-### 3. Code-Review-Grade Diff, Integrated Code Editor & Deep History Inspection
-- **Side-by-Side Syntax-Highlighted Diff**: Powered by `syntect` across Commit Diff, Working Tree Diff, Stash Diff, and Shelf Diff, layering multi-language TextMate syntax colors cleanly with word-level inline diff highlights. Click any changed file for an inline preview below the Commit Summary card, or double-click to open a full-width **Commit Diff** tab and step through files with `← / →`.
-- **Integrated Native Code Editor & Git Gutter**: Double-click any project file (with 30+ color-coded vector file icons) to open it directly in an editable GPUI code view featuring `syntect` syntax highlighting (50+ languages including embedded HTML `<style>`/`<script>`), undo/redo, smart indentation, IME input, in-file Find & Replace (`⌘F`/`⌥⌘F`), Go to Line (`⌘G`), Soft-Wrap, bookmarks (`F3`), **inline Git Blame gutter**, and **real-time Git change markers with single-hunk diff preview & undoable rollback**.
+### 3. Instant Large-File Diff, Multi-Commit Analysis & Integrated Code Editor
+- **Instant Large-File Side-by-Side Diff (Zero UI Freeze)**: Across Commit, Working Tree, Stash, and Shelf diffs, GitHalo renders viewport-virtualized diff text and word-level highlights **immediately**, then streams `syntect` TextMate syntax colors from a background thread pool with zero main-thread blocking. Separate left/right parse streams, per-hunk state resets, and scope-depth/time-budget circuit breakers guarantee that even massive 17,000+ line multi-hunk diffs or minified bundles open in milliseconds without ever freezing the UI.
+- **Modern Three-Tone Split Diff & Smooth Navigation**: Clean three-tone semantics (modified blue, added green, removed rose) with centered dual line numbers, vector cubic-bezier connector bands, an interactive overview diff ruler, synchronized horizontal scrolling, and `↑ / ↓` hunk jumping. Click any changed file for an inline preview or double-click to open a full-width **Commit Diff** tab (`← / →` file stepping).
+- **Multi-Commit Selection, Net Diff & Batch Operations**: Select contiguous or non-contiguous commits in the Log (`Shift+Click`, `Cmd/Ctrl+Click`, `Shift+↑/↓`, `Cmd+A`) to inspect true net changes or aggregated diffs in milliseconds via batched single-process `git --stdin` pipelines — plus one-click batch Cherry-pick, Revert, Compare, and Copy, and async containing branches/tags badges on every commit.
+- **Integrated Native Code Editor & Git Gutter**: Double-click any project file (with 30+ color-coded vector file icons) to open it directly in an editable GPUI code view featuring debounced async `syntect` syntax highlighting (50+ languages including embedded HTML `<style>`/`<script>`), undo/redo, smart indentation, IME input, in-file Find & Replace (`⌘F`/`⌥⌘F`), Go to Line (`⌘G`), Soft-Wrap, bookmarks (`F3`), **inline Git Blame gutter**, and **real-time Git change markers with single-hunk diff preview & undoable rollback**.
 - **Smooth Commit Graph, Author Avatars & Structured History Search**: Inspect smooth cubic-bezier branch curves, a double-ring `HEAD` indicator, muted Conventional Commit prefixes, deterministic author initials avatars, and relative timestamps; filter by keywords or structured syntax (`author:`, `branch:`, `after:`, `before:`), and paginate seamlessly beyond the initial 200 commits.
 - **File History, Blame & Revision Compare**: Open tabbed **File History / Line-by-Line Blame** right from the Diff header, or mark any commit as a comparison base to diff arbitrary revisions.
 
 ### 4. Built for Speed, Safety & Native Desktop Craft
-- **Native macOS Craft & Adaptive UI Scaling**: Complete 7-group native macOS application menu bar, unobtrusive status-bar hover previews (no obscuring multi-line tooltips over lists), native HIG arrow cursors, and persisted adaptive UI scaling (`90%`–`130%` via `⌘=` / `⌘-` / `⌘0`).
+- **Performance-First Architecture & Live Pull/Push Progress**: Every Git subprocess, disk read, and syntax highlight pass runs off the UI thread with generation-based stale-task cancellation. Pull and Push run concurrently across independent repositories (with per-repo mutual exclusion) and stream live `git --progress` phases & percentages to the top bar, progress banner, sidebar badges, and status bar.
+- **Native macOS Craft & Adaptive UI Scaling**: Complete 7-group native macOS application menu bar, native outbound folder drag from sidebar repos into Terminal/Finder/editors, unobtrusive status-bar hover previews, native HIG arrow cursors, and persisted adaptive UI scaling (`90%`–`130%` via `⌘=` / `⌘-` / `⌘0`).
 - **100% Native Git CLI Execution**: Because GitHalo invokes your system `git` binary instead of reimplementing Git via `libgit2`, your existing SSH agents, GPG signing, `pre-commit` / `pre-push` hooks, `.gitconfig` `includeIf` rules, and credential helpers work out of the box.
 - **Explicit Confirmation Before Destructive or Remote Actions**: Commits, Pushes (clearly distinguishing fork push targets from pull upstreams), `--force-with-lease`, Hard Reset, and Abort dialogs always show the exact worktree, branch, target remote, and affected files before running.
 - **Bilingual Out of the Box**: Automatically follows your OS language (English / Simplified Chinese) and can be switched in Preferences or via `GITHALO_LANG=en|zh`.
@@ -114,11 +118,13 @@ Modern developers rarely work on a single repository. Between microservices, fro
 
 ## Performance
 
-GitHalo is engineered to stay responsive even across large workspaces and 10,000-file change trees (via viewport-virtualized rows and cached diff/tree indices).
+**Performance and zero-jank responsiveness are GitHalo's #1 engineering rule.** All Git subprocesses, file I/O, and syntax highlighting run off the UI thread; long commit graphs, 10,000-file change trees, and massive diffs use viewport virtualization (`uniform_list`) plus precomputed diff-block and ruler indices — never per-frame full scans.
 
 ### Measured Samples (macOS Apple Silicon)
 
 - **Compact Installer & Native Binary**: **6.6 MiB** compressed `.dmg` installer (**15 MiB** self-contained Mach-O arm64 executable) — no Electron bundle, no JVM runtime.
+- **Instant Large Multi-Hunk Diff (Zero Main-Thread Freeze)**: Where many desktop Git clients stall or lock up on huge diffs, GitHalo opens a real-world **17,500+ line / 30-hunk** heavily modified JavaScript file **instantly** (viewport-virtualized code + word-level diff on frame 1) and completes full background `syntect` syntax highlighting in **~52 ms** — backed by separate left/right parse streams, per-hunk state resets, and parser circuit breakers for minified/complex files.
+- **Multi-Commit Aggregated Diff (~100× Faster Batching)**: Selecting **30+ cross-branch commits** aggregates all changed files and diffs via single-process `git log --stdin` + `git diff-tree --stdin` pipelines in **~15 ms** (down from ~1.6 s across 90+ per-commit subprocesses), with instant stale-request skipping during rapid selection.
 - **Native Window (Debug build)**: First interactive frame in **232–402 ms**, steady-state RSS **68.7–69.4 MiB** (with loaded worktrees).
 - **8-Repository Grouped Workspace (Release data-layer benchmark, warm cache, 3-round median)**:
   - Reopen persisted SQLite registry & groups: **3.1 ms**
