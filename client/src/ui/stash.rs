@@ -81,7 +81,7 @@ impl StashReview {
 }
 
 impl DesktopView {
-    pub(super) fn sync_stash_view(&mut self) {
+    pub(super) fn sync_stash_view(&mut self, cx: &mut Context<Self>) {
         let worktree = self.active_worktree();
         if self.stash_ui.worktree.as_ref() != worktree {
             self.stash_ui.worktree = worktree.cloned();
@@ -103,8 +103,14 @@ impl DesktopView {
             (None, None) => {}
             (diff, _) => {
                 self.stash_ui.diff_scroll = UniformListScrollHandle::new();
-                self.stash_ui.patch =
-                    diff.map(|diff| (diff.clone(), Rc::new(ParsedPatch::new(diff))));
+                if let Some(diff) = diff {
+                    let (patch, job) = ParsedPatch::new_async(diff);
+                    let patch = Rc::new(patch);
+                    self.schedule_patch_highlight(&patch, job, cx);
+                    self.stash_ui.patch = Some((diff.clone(), patch));
+                } else {
+                    self.stash_ui.patch = None;
+                }
             }
         }
     }

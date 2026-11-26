@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use githalo::project_files::{
     GutterDiffHunk, GutterDiffKind, GutterDiffMap, rollback_hunk_in_text,
@@ -11,8 +12,8 @@ use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementInputHandler,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, Font, FontStyle, FontWeight,
     KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels, Point, Role, ScrollWheelEvent,
-    SharedString, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine, actions,
-    canvas, div, fill, point, prelude::*, px, rems, rgb, rgba, size,
+    SharedString, Task, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window, WrappedLine,
+    actions, canvas, div, fill, point, prelude::*, px, rems, rgb, rgba, size,
 };
 
 use super::components::theme;
@@ -249,6 +250,8 @@ pub(super) struct CodeEditor {
     text_version: u64,
     line_starts: Vec<usize>,
     highlights: Vec<Vec<SyntaxSpan>>,
+    highlight_generation: u64,
+    highlight_task: Option<Task<()>>,
     anchor: usize,
     caret: usize,
     marked: Option<Range<usize>>,
@@ -288,9 +291,8 @@ impl CodeEditor {
         let normalized = normalize_newlines(&raw_content);
         let indent_spaces = detect_indent_spaces(&path, &normalized);
         let line_starts = compute_line_starts(&normalized);
-        let highlights = syntax::highlight_document(&path, &normalized);
 
-        Self {
+        let mut editor = Self {
             focus: cx.focus_handle(),
             path,
             read_only,
@@ -301,7 +303,9 @@ impl CodeEditor {
             base_revision: revision,
             text_version: 1,
             line_starts,
-            highlights,
+            highlights: Vec::new(),
+            highlight_generation: 0,
+            highlight_task: None,
             anchor: 0,
             caret: 0,
             marked: None,
@@ -327,7 +331,9 @@ impl CodeEditor {
             scroll_drag: None,
             wrap_cache: None,
             layout: None,
-        }
+        };
+        editor.schedule_highlight(false, cx);
+        editor
     }
 
     pub(super) fn base_revision(&self) -> u64 {
@@ -353,7 +359,7 @@ impl CodeEditor {
                 self.caret = self.caret.min(self.text.len());
                 self.snap_caret_to_char_boundary();
                 self.marked = None;
-                self.rebuild_text_caches();
+                self.rebuild_text_caches(false, cx);
             }
             if force_replace {
                 self.undo_stack.clear();
@@ -646,7 +652,7 @@ impl CodeEditor {
         self.anchor = new_pos;
         self.caret = new_pos;
         self.marked = None;
-        self.rebuild_text_caches();
+        self.rebuild_text_caches(true, cx);
         if !self.find_matches.is_empty() {
             self.active_match = self
                 .find_matches
@@ -685,7 +691,7 @@ impl CodeEditor {
         self.caret = self.caret.min(self.text.len());
         self.snap_caret_to_char_boundary();
         self.marked = None;
-        self.rebuild_text_caches();
+        self.rebuild_text_caches(true, cx);
         self.emit_changed(window, cx);
         count
     }
@@ -706,7 +712,7 @@ impl CodeEditor {
         }
         self.push_undo();
         self.text = updated;
-        self.rebuild_text_caches();
+        self.rebuild_text_caches(true, cx);
         let target_line = hunk.new_start.min(self.line_starts.len().saturating_sub(1));
         let offset = self.line_starts[target_line];
         self.anchor = offset;
@@ -718,19 +724,56 @@ impl CodeEditor {
     }
 
     pub(super) fn rehighlight(&mut self, cx: &mut Context<Self>) {
-        self.highlights = syntax::highlight_document(&self.path, &self.text);
         self.wrap_cache = None;
+        self.schedule_highlight(false, cx);
         cx.notify();
     }
 
-    fn rebuild_text_caches(&mut self) {
+    /// Run `syntect` full-document highlighting off the UI thread with optional debounce during
+    /// rapid typing. Stale jobs are discarded by generation/version check when applying back.
+    fn schedule_highlight(&mut self, debounce: bool, cx: &mut Context<Self>) {
+        self.highlight_generation = self.highlight_generation.wrapping_add(1);
+        let generation = self.highlight_generation;
+        let version = self.text_version;
+        let path = self.path.clone();
+        let text = self.text.clone();
+        let light = githalo::theme::is_light();
+        let executor = cx.background_executor().clone();
+        self.highlight_task = Some(cx.spawn(async move |entity, cx| {
+            if debounce {
+                executor.timer(Duration::from_millis(40)).await;
+            }
+            let spans = executor
+                .spawn(async move { syntax::highlight_document_for_theme(&path, &text, light) })
+                .await;
+            let _ = entity.update(cx, |editor, cx| {
+                if editor.highlight_generation == generation && editor.text_version == version {
+                    editor.highlights = spans;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn rebuild_text_caches(&mut self, debounce_highlight: bool, cx: &mut Context<Self>) {
+        let prev_line_count = self.line_starts.len();
         self.text_version = self.text_version.wrapping_add(1);
         self.line_starts = compute_line_starts(&self.text);
-        self.highlights = syntax::highlight_document(&self.path, &self.text);
+        if !self.highlights.is_empty() {
+            let caret_line = self.line_index_at(self.caret.min(self.text.len()));
+            if self.line_starts.len() != prev_line_count {
+                // Keep highlights above the edited line intact to avoid flicker while background
+                // re-highlighting catches up on shifted lines below.
+                self.highlights.truncate(caret_line);
+            } else if let Some(slot) = self.highlights.get_mut(caret_line) {
+                slot.clear();
+            }
+        }
         self.wrap_cache = None;
         self.recompute_find_matches();
         let max_line = self.line_starts.len().saturating_sub(1);
         self.bookmarks.retain(|&idx| idx <= max_line);
+        self.schedule_highlight(debounce_highlight, cx);
     }
 
     fn recompute_find_matches(&mut self) {
@@ -771,7 +814,7 @@ impl CodeEditor {
         self.snap_caret_to_char_boundary();
         self.marked = None;
         self.follow_caret = true;
-        self.rebuild_text_caches();
+        self.rebuild_text_caches(true, cx);
         self.emit_changed(window, cx);
     }
 
@@ -793,7 +836,7 @@ impl CodeEditor {
         self.snap_caret_to_char_boundary();
         self.marked = None;
         self.follow_caret = true;
-        self.rebuild_text_caches();
+        self.rebuild_text_caches(true, cx);
         self.emit_changed(window, cx);
     }
 
@@ -1091,7 +1134,7 @@ impl CodeEditor {
             self.text.insert_str(self.caret, &pad);
             self.caret += pad.len();
             self.anchor = self.caret;
-            self.rebuild_text_caches();
+            self.rebuild_text_caches(true, cx);
             self.follow_caret = true;
             self.emit_changed(window, cx);
             return;
@@ -1111,7 +1154,7 @@ impl CodeEditor {
             self.text = updated;
             self.anchor = new_anchor;
             self.caret = new_caret;
-            self.rebuild_text_caches();
+            self.rebuild_text_caches(true, cx);
             self.follow_caret = true;
             self.emit_changed(window, cx);
         }
@@ -1177,7 +1220,7 @@ impl CodeEditor {
             self.text.replace_range(cut_start..end, "");
             self.anchor = cut_start.min(self.text.len());
             self.caret = self.anchor;
-            self.rebuild_text_caches();
+            self.rebuild_text_caches(true, cx);
             self.follow_caret = true;
             self.emit_changed(window, cx);
         }
@@ -1377,6 +1420,7 @@ impl CodeEditor {
         cuts.dedup();
 
         let mut runs = Vec::with_capacity(cuts.len().saturating_sub(1));
+        let mut span_cursor = 0usize;
         for win in cuts.windows(2) {
             let (a, b) = (win[0], win[1]);
             if a >= b {
@@ -1385,7 +1429,13 @@ impl CodeEditor {
             let mut color = theme().text;
             let mut bold = false;
             let mut italic = false;
-            if let Some(span) = syntax_spans.iter().find(|s| s.start <= a && b <= s.end) {
+            while span_cursor < syntax_spans.len() && syntax_spans[span_cursor].end <= a {
+                span_cursor += 1;
+            }
+            if let Some(span) = syntax_spans
+                .get(span_cursor)
+                .filter(|s| s.start <= a && b <= s.end)
+            {
                 color = span.color;
                 bold = span.bold;
                 italic = span.italic;
@@ -2035,7 +2085,7 @@ impl EntityInputHandler for CodeEditor {
         self.marked = None;
         self.preferred_x = None;
         self.follow_caret = true;
-        self.rebuild_text_caches();
+        self.rebuild_text_caches(true, cx);
         self.emit_changed(window, cx);
     }
 
@@ -2073,7 +2123,7 @@ impl EntityInputHandler for CodeEditor {
         self.anchor = bytes.start;
         self.caret = bytes.end;
         self.follow_caret = true;
-        self.rebuild_text_caches();
+        self.rebuild_text_caches(true, cx);
         window.notify_text_input_changed(&self.focus);
         cx.emit(EditorEvent::CursorMoved);
         cx.notify();

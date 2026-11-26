@@ -121,9 +121,26 @@ pub struct DailyState {
     review_request: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteKind {
+    Pull,
+    Push,
+    Commit,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveWrite {
+    pub kind: WriteKind,
+    pub label: String,
+    pub progress: Option<String>,
+    pub percent: Option<u8>,
+}
+
 pub(super) struct WriteRecord {
     pub(super) target: WorktreeTarget,
     serial: u64,
+    active: ActiveWrite,
     // A pending operation has no result. Keep its final feedback with the originating worktree.
     result: Option<Result<String, String>>,
 }
@@ -154,6 +171,12 @@ pub(super) enum DailyEvent {
     Diff(u64, Result<ChangeDiff, String>),
     Branches(u64, Result<BranchSnapshot, String>),
     Prepared(u64, Result<ReviewKind, String>),
+    Progress {
+        serial: u64,
+        worktree_id: WorktreeId,
+        progress: String,
+        percent: Option<u8>,
+    },
     Written {
         serial: u64,
         target: WorktreeTarget,
@@ -172,6 +195,13 @@ fn same<T>(held: &Option<Arc<T>>, supplied: &Arc<T>) -> bool {
 impl Workspace {
     pub fn writing(&self, id: WorktreeId) -> bool {
         self.writes.get(&id).is_some_and(WriteRecord::running)
+    }
+
+    pub fn active_write(&self, id: WorktreeId) -> Option<&ActiveWrite> {
+        self.writes
+            .get(&id)
+            .filter(|record| record.running())
+            .map(|record| &record.active)
     }
 
     pub(super) fn reset_daily(&mut self) {
@@ -303,7 +333,32 @@ impl Workspace {
         target: WorktreeTarget,
         f: impl FnOnce() -> Result<Effect, String> + Send + 'static,
     ) {
+        self.write_with_progress(
+            target,
+            WriteKind::Other,
+            crate::i18n::tr("正在执行 Git 操作…", "Running Git operation…").to_owned(),
+            move |_| f(),
+        );
+    }
+
+    pub(super) fn write_with_progress(
+        &mut self,
+        target: WorktreeTarget,
+        kind: WriteKind,
+        label: String,
+        f: impl FnOnce(Box<dyn FnMut(String, Option<u8>) + Send>) -> Result<Effect, String>
+        + Send
+        + 'static,
+    ) {
         if !self.valid_target(&target) {
+            return;
+        }
+        if self
+            .related_worktrees(&target)
+            .iter()
+            .any(|id| self.writing(*id))
+        {
+            self.daily_error("此仓库的关联工作树正在执行 Git 操作，请稍后重试");
             return;
         }
         if self
@@ -326,17 +381,35 @@ impl Workspace {
             WriteRecord {
                 target: target.clone(),
                 serial,
+                active: ActiveWrite {
+                    kind,
+                    label,
+                    progress: None,
+                    percent: None,
+                },
                 result: None,
             },
         );
         let db_path = self.runtime.db_path.clone();
+        let events = self.runtime.events_sender();
+        let worktree_id = target.id;
         self.runtime.write.run(move || {
             let result = Registry::open(&db_path)
                 .and_then(|db| db.worktree(target.id))
                 .map_err(|e| e.to_string())
                 .and_then(|current| {
                     if current.as_ref() == Some(&target) {
-                        f()
+                        let reporter: Box<dyn FnMut(String, Option<u8>) + Send> =
+                            Box::new(move |progress, percent| {
+                                let _ =
+                                    events.try_send(super::Update(event(DailyEvent::Progress {
+                                        serial,
+                                        worktree_id,
+                                        progress,
+                                        percent,
+                                    })));
+                            });
+                        f(reporter)
                     } else {
                         Err("工作树登记或路径已变化，请重新选择".into())
                     }
@@ -596,10 +669,15 @@ impl Workspace {
         } = review.kind
         {
             let target = preview.worktree.clone();
-            self.write(target.clone(), move || {
-                let oid = staging::commit_with_options(&target, &preview, &message, options)?;
-                Ok(Effect::Committed { message, oid })
-            });
+            self.write_with_progress(
+                target.clone(),
+                WriteKind::Commit,
+                crate::i18n::tr("正在提交…", "Committing…").to_owned(),
+                move |_| {
+                    let oid = staging::commit_with_options(&target, &preview, &message, options)?;
+                    Ok(Effect::Committed { message, oid })
+                },
+            );
         }
     }
 
@@ -612,54 +690,96 @@ impl Workspace {
                 preview, message, ..
             } => {
                 let target = preview.worktree.clone();
-                self.write(target.clone(), move || {
-                    let oid = staging::commit(&target, &preview, &message)?;
-                    Ok(Effect::Committed { message, oid })
-                });
+                self.write_with_progress(
+                    target.clone(),
+                    WriteKind::Commit,
+                    crate::i18n::tr("正在提交…", "Committing…").to_owned(),
+                    move |_| {
+                        let oid = staging::commit(&target, &preview, &message)?;
+                        Ok(Effect::Committed { message, oid })
+                    },
+                );
             }
             ReviewKind::Remote(preview) => {
-                self.write(preview.worktree().clone(), move || {
-                    match branch_ops::run_remote_with_options(&preview, pull, &push) {
-                        Ok(RemoteOutcome::Pulled { head_oid, fetched }) => Ok(Effect::Pulled {
-                            head: Ok(head_oid),
-                            conflict: None,
-                            fetched,
-                            at: SystemTime::now(),
-                        }),
-                        Ok(RemoteOutcome::PulledWithConflict { strategy, fetched }) => {
-                            Ok(Effect::Pulled {
-                                head: Ok(String::new()),
-                                conflict: Some(strategy),
+                let remote_name = preview.remote().to_string_lossy();
+                let short_ref = preview
+                    .remote_ref()
+                    .to_string_lossy()
+                    .trim_start_matches("refs/heads/")
+                    .to_owned();
+                let target_desc = if remote_name == "." {
+                    short_ref
+                } else {
+                    format!("{remote_name}/{short_ref}")
+                };
+                let (kind, label) = match preview.kind() {
+                    RemoteOperation::Pull => (
+                        WriteKind::Pull,
+                        if crate::i18n::is_zh() {
+                            format!("正在拉取 {target_desc}")
+                        } else {
+                            format!("Pulling {target_desc}")
+                        },
+                    ),
+                    RemoteOperation::Push => (
+                        WriteKind::Push,
+                        if crate::i18n::is_zh() {
+                            format!("正在推送至 {target_desc}")
+                        } else {
+                            format!("Pushing to {target_desc}")
+                        },
+                    ),
+                };
+                self.write_with_progress(
+                    preview.worktree().clone(),
+                    kind,
+                    label,
+                    move |mut report| {
+                        let mut cb = |progress: branch_ops::RemoteProgress| {
+                            report(progress.detail, progress.percent);
+                        };
+                        match branch_ops::run_remote_with_progress(&preview, pull, &push, &mut cb) {
+                            Ok(RemoteOutcome::Pulled { head_oid, fetched }) => Ok(Effect::Pulled {
+                                head: Ok(head_oid),
+                                conflict: None,
                                 fetched,
                                 at: SystemTime::now(),
-                            })
+                            }),
+                            Ok(RemoteOutcome::PulledWithConflict { strategy, fetched }) => {
+                                Ok(Effect::Pulled {
+                                    head: Ok(String::new()),
+                                    conflict: Some(strategy),
+                                    fetched,
+                                    at: SystemTime::now(),
+                                })
+                            }
+                            Ok(RemoteOutcome::Pushed) => {
+                                let mode = if push.force_with_lease {
+                                    "（安全强推）"
+                                } else {
+                                    ""
+                                };
+                                let suffix = push
+                                    .up_to_oid
+                                    .as_deref()
+                                    .map(|oid| format!("，上界 {}", short_oid(oid)))
+                                    .unwrap_or_default();
+                                Ok(Effect::Changed(format!(
+                                    "已推送{mode}到 {} 的 {}{suffix}",
+                                    preview.remote().to_string_lossy(),
+                                    preview.remote_ref().to_string_lossy()
+                                )))
+                            }
+                            Err(error) if error.fetched.is_some() => Ok(Effect::Pulled {
+                                head: Err(error.message),
+                                conflict: None,
+                                fetched: error.fetched,
+                                at: SystemTime::now(),
+                            }),
+                            Err(error) => Err(error.message),
                         }
-                        Ok(RemoteOutcome::Pushed) => {
-                            let mode = if push.force_with_lease {
-                                "（安全强推）"
-                            } else {
-                                ""
-                            };
-                            let suffix = push
-                                .up_to_oid
-                                .as_deref()
-                                .map(|oid| format!("，上界 {}", short_oid(oid)))
-                                .unwrap_or_default();
-                            Ok(Effect::Changed(format!(
-                                "已推送{mode}到 {} 的 {}{suffix}",
-                                preview.remote().to_string_lossy(),
-                                preview.remote_ref().to_string_lossy()
-                            )))
-                        }
-                        Err(error) if error.fetched.is_some() => Ok(Effect::Pulled {
-                            head: Err(error.message),
-                            conflict: None,
-                            fetched: error.fetched,
-                            at: SystemTime::now(),
-                        }),
-                        Err(error) => Err(error.message),
-                    }
-                });
+                    },
+                );
             }
         }
     }
@@ -715,6 +835,21 @@ impl Workspace {
                 match result {
                     Ok(kind) => self.daily.review = Some(DailyReview { id: tag, kind }),
                     Err(error) => self.daily_error(error),
+                }
+            }
+            DailyEvent::Progress {
+                serial,
+                worktree_id,
+                progress,
+                percent,
+            } => {
+                if let Some(record) = self
+                    .writes
+                    .get_mut(&worktree_id)
+                    .filter(|w| w.serial == serial && w.running())
+                {
+                    record.active.progress = Some(progress);
+                    record.active.percent = percent;
                 }
             }
             DailyEvent::Written {

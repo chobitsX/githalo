@@ -9,7 +9,11 @@ impl Workspace {
         self.selected = id;
         self.history_request = self.next_id();
         self.changes_request = self.next_id();
+        self.latest_changes_request
+            .store(self.changes_request, Ordering::Relaxed);
         self.commit_refs_request = self.next_id();
+        self.latest_commit_refs_request
+            .store(self.commit_refs_request, Ordering::Relaxed);
         self.close_diff();
         self.selected_commit = None;
         self.selected_commits.clear();
@@ -117,8 +121,12 @@ impl Workspace {
             self.selected_commit_bodies.clear();
             self.selected_commit_refs.clear();
             self.commit_refs_request = self.next_id();
+            self.latest_commit_refs_request
+                .store(self.commit_refs_request, Ordering::Relaxed);
             self.commit_refs_loading = false;
             self.changes_request = self.next_id();
+            self.latest_changes_request
+                .store(self.changes_request, Ordering::Relaxed);
             self.changes_loading = false;
             self.changes.clear();
             self.changes_contiguous = true;
@@ -172,10 +180,15 @@ impl Workspace {
         self.message = None;
         let tag = self.next_id();
         self.changes_request = tag;
+        self.latest_changes_request.store(tag, Ordering::Relaxed);
         self.changes_loading = !same_selection || self.changes.is_empty();
         let changes_root = root.clone();
         let changes_oids = ordered.clone();
+        let latest_changes = self.latest_changes_request.clone();
         self.runtime.detail.run(move || {
+            if latest_changes.load(Ordering::Relaxed) != tag {
+                return Event::Changes(tag, Ok(CommitChangesBundle::default()));
+            }
             Event::Changes(
                 tag,
                 history::changed_files_for_commits(&changes_root, &changes_oids),
@@ -184,10 +197,16 @@ impl Workspace {
 
         let refs_tag = self.next_id();
         self.commit_refs_request = refs_tag;
+        self.latest_commit_refs_request
+            .store(refs_tag, Ordering::Relaxed);
         if ordered.len() == 1 {
             self.commit_refs_loading = !same_selection || self.selected_commit_refs.is_empty();
             let single_oid = ordered[0].clone();
+            let latest_refs = self.latest_commit_refs_request.clone();
             self.runtime.detail.run(move || {
+                if latest_refs.load(Ordering::Relaxed) != refs_tag {
+                    return Event::CommitRefs(refs_tag, Ok(Vec::new()));
+                }
                 Event::CommitRefs(refs_tag, history::containing_refs(&root, &single_oid))
             });
         } else {
@@ -240,7 +259,12 @@ impl Workspace {
         self.diff_loading = true;
         let tag = self.next_id();
         self.patch_request = tag;
+        self.latest_patch_request.store(tag, Ordering::Relaxed);
+        let latest_patch = self.latest_patch_request.clone();
         self.runtime.detail.run(move || {
+            if latest_patch.load(Ordering::Relaxed) != tag {
+                return Event::Patch(tag, Ok(String::new()));
+            }
             Event::Patch(
                 tag,
                 history::file_diff_for_commits(&target.root, &oids, &file),
@@ -250,6 +274,8 @@ impl Workspace {
 
     pub(super) fn close_diff(&mut self) {
         self.patch_request = self.next_id();
+        self.latest_patch_request
+            .store(self.patch_request, Ordering::Relaxed);
         self.selected_file = None;
         self.diff = None;
         self.diff_loading = false;

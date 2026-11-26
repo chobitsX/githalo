@@ -1530,8 +1530,51 @@ impl DesktopView {
     ) -> AnyElement {
         let id = repo.target.id;
         let details = repo_description(repo);
-        let status_label = if repo.fetching {
-            Some(tr("正在刷新…", "Fetching…").to_owned())
+        let active_write = self.workspace.active_write(id);
+        let active_remote_pill: Option<(String, u32, u32, u32)> = if let Some(active) = active_write
+        {
+            match active.kind {
+                githalo::workspace::WriteKind::Pull => {
+                    let text = match active.percent {
+                        Some(p) if is_zh() => format!("拉取 {p}%"),
+                        Some(p) => format!("Pull {p}%"),
+                        None => tr("拉取中…", "Pulling…").to_owned(),
+                    };
+                    Some((text, theme().accent_bg, theme().accent_border, theme().link))
+                }
+                githalo::workspace::WriteKind::Push => {
+                    let text = match active.percent {
+                        Some(p) if is_zh() => format!("推送 {p}%"),
+                        Some(p) => format!("Push {p}%"),
+                        None => tr("推送中…", "Pushing…").to_owned(),
+                    };
+                    Some((
+                        text,
+                        theme().success_bg,
+                        theme().success_border,
+                        theme().success,
+                    ))
+                }
+                githalo::workspace::WriteKind::Commit => Some((
+                    tr("提交中…", "Committing…").to_owned(),
+                    theme().brand_bg,
+                    theme().brand_border,
+                    theme().brand_text,
+                )),
+                githalo::workspace::WriteKind::Other => None,
+            }
+        } else if repo.fetching {
+            Some((
+                tr("获取中…", "Fetching…").to_owned(),
+                theme().brand_bg,
+                theme().brand_border,
+                theme().brand_text,
+            ))
+        } else {
+            None
+        };
+        let status_label = if active_remote_pill.is_some() {
+            None
         } else if repo.loading && !repo.has_status() {
             Some(tr("正在读取状态…", "Loading status…").to_owned())
         } else {
@@ -1739,6 +1782,23 @@ impl DesktopView {
                 }),
             );
 
+        let render_active_pill = |pill: (String, u32, u32, u32)| {
+            let (text, bg, border, fg) = pill;
+            div()
+                .flex_shrink_0()
+                .px(px(5.))
+                .py(px(0.5))
+                .rounded(px(4.))
+                .bg(rgb(bg))
+                .border_1()
+                .border_color(rgb(border))
+                .text_size(rems(0.64))
+                .line_height(rems(0.9))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(fg))
+                .child(text)
+        };
+
         if single_line {
             let pl = if nested_parent.is_some() {
                 px(7.)
@@ -1791,6 +1851,9 @@ impl DesktopView {
                             theme().subtle
                         })),
                 )
+                .when_some(active_remote_pill, |r, pill| {
+                    r.child(render_active_pill(pill))
+                })
                 .when_some(status_label, |r, _| {
                     r.child(
                         div()
@@ -1900,6 +1963,9 @@ impl DesktopView {
                             }))
                     }),
             )
+            .when_some(active_remote_pill, |row, pill| {
+                row.child(render_active_pill(pill))
+            })
             .children(sync_badges)
             .child(more_btn);
 

@@ -289,13 +289,13 @@ impl DesktopView {
                 if view
                     .update(cx, |view, cx| {
                         view.workspace.apply(update);
-                        view.sync_history_view();
+                        view.sync_history_view(cx);
                         view.sync_branches_panel(None, cx);
                         view.ensure_branches_loaded_if_visible(cx);
                         view.sync_file_viewer(None, cx);
                         view.sync_daily_view(cx);
-                        view.sync_stash_view();
-                        view.sync_shelf_view();
+                        view.sync_stash_view(cx);
+                        view.sync_shelf_view(cx);
                         view.sync_rebase_dialog(cx);
                         cx.notify();
                     })
@@ -584,13 +584,13 @@ impl DesktopView {
         app_theme::set_theme(mode);
         self.file_viewer_ui.rehighlight_all(cx);
         self.history_details.invalidate_patch();
-        self.sync_history_view();
+        self.sync_history_view(cx);
         self.daily_ui.invalidate_patches();
         self.sync_daily_view(cx);
         self.stash_ui.invalidate_patch();
-        self.sync_stash_view();
+        self.sync_stash_view(cx);
         self.shelf_ui.invalidate_patch();
-        self.sync_shelf_view();
+        self.sync_shelf_view(cx);
         cx.notify();
     }
 
@@ -619,19 +619,22 @@ impl DesktopView {
 
     fn dispatch(&mut self, action: Action, cx: &mut Context<Self>) {
         self.workspace.dispatch(action);
-        self.sync_history_view();
+        self.sync_history_view(cx);
         self.sync_branches_panel(None, cx);
         self.ensure_branches_loaded_if_visible(cx);
         self.sync_file_viewer(None, cx);
         self.sync_daily_view(cx);
-        self.sync_stash_view();
-        self.sync_shelf_view();
+        self.sync_stash_view(cx);
+        self.sync_shelf_view(cx);
         self.sync_rebase_dialog(cx);
         cx.notify();
     }
 
-    fn sync_history_view(&mut self) {
-        let selection = self.history_details.update(&self.workspace);
+    fn sync_history_view(&mut self, cx: &mut Context<Self>) {
+        let (selection, job) = self.history_details.update_async(&self.workspace);
+        if let Some(patch) = self.history_details.patch_ref() {
+            self.schedule_patch_highlight(patch, job, cx);
+        }
         if selection.worktree {
             self.log_scroll = UniformListScrollHandle::new();
             self.project_scroll = UniformListScrollHandle::new();
@@ -1455,7 +1458,42 @@ impl DesktopView {
                 (text, bg, border, fg)
             });
 
-            let pull_tip = if behind > 0 && historical {
+            let active_write = self.workspace.active_write(repo_id);
+            let pulling =
+                active_write.is_some_and(|w| w.kind == githalo::workspace::WriteKind::Pull);
+            let pushing =
+                active_write.is_some_and(|w| w.kind == githalo::workspace::WriteKind::Push);
+
+            let pull_label: String = if pulling {
+                match active_write.and_then(|w| w.percent) {
+                    Some(p) if i18n::is_zh() => format!("拉取 {p}%"),
+                    Some(p) => format!("Pull {p}%"),
+                    None => tr("拉取中…", "Pulling…").to_owned(),
+                }
+            } else {
+                tr("拉取", "Pull").to_owned()
+            };
+            let push_label: String = if pushing {
+                match active_write.and_then(|w| w.percent) {
+                    Some(p) if i18n::is_zh() => format!("推送 {p}%"),
+                    Some(p) => format!("Push {p}%"),
+                    None => tr("推送中…", "Pushing…").to_owned(),
+                }
+            } else {
+                tr("推送", "Push").to_owned()
+            };
+
+            let pull_tip = if pulling {
+                match active_write.and_then(|w| w.progress.as_deref()) {
+                    Some(detail) => format!(
+                        "{} · {detail}",
+                        active_write.map_or("", |w| w.label.as_str())
+                    ),
+                    None => active_write.map(|w| w.label.clone()).unwrap_or_else(|| {
+                        tr("正在拉取远端更新…", "Pulling from remote…").to_owned()
+                    }),
+                }
+            } else if behind > 0 && historical {
                 if i18n::is_zh() {
                     format!("拉取当前分支 (⌘T) · 上次缓存 {behind} 个待拉取")
                 } else {
@@ -1477,7 +1515,17 @@ impl DesktopView {
                 tr("拉取当前分支 (⌘T)", "Pull Current Branch (⌘T)").to_owned()
             };
 
-            let push_tip = if ahead > 0 && historical {
+            let push_tip = if pushing {
+                match active_write.and_then(|w| w.progress.as_deref()) {
+                    Some(detail) => format!(
+                        "{} · {detail}",
+                        active_write.map_or("", |w| w.label.as_str())
+                    ),
+                    None => active_write
+                        .map(|w| w.label.clone())
+                        .unwrap_or_else(|| tr("正在推送至远端…", "Pushing to remote…").to_owned()),
+                }
+            } else if ahead > 0 && historical {
                 if i18n::is_zh() {
                     format!("推送当前分支 (⇧⌘K) · 上次缓存 {ahead} 个待推送")
                 } else {
@@ -1499,7 +1547,9 @@ impl DesktopView {
                 tr("推送当前分支 (⇧⌘K)", "Push Current Branch (⇧⌘K)").to_owned()
             };
 
-            let pull_icon_tint = if behind > 0 {
+            let pull_icon_tint = if pulling {
+                Some(theme().link)
+            } else if behind > 0 {
                 Some(if historical {
                     theme().warning
                 } else {
@@ -1508,7 +1558,9 @@ impl DesktopView {
             } else {
                 None
             };
-            let push_icon_tint = if ahead > 0 {
+            let push_icon_tint = if pushing {
+                Some(theme().success)
+            } else if ahead > 0 {
                 Some(if historical {
                     theme().warning
                 } else {
@@ -1520,9 +1572,10 @@ impl DesktopView {
 
             let seg = |id: &'static str,
                        ico: Icon,
-                       label: &'static str,
+                       label: String,
                        tip: String,
                        enabled: bool,
+                       active_bg: Option<u32>,
                        text_tint: Option<u32>,
                        icon_tint: Option<u32>,
                        badge: Option<(String, u32, u32, u32)>| {
@@ -1536,20 +1589,22 @@ impl DesktopView {
                     .flex()
                     .items_center()
                     .gap(px(5.))
+                    .when_some(active_bg, |b, bg| b.bg(rgb(bg)))
                     .text_size(rems(0.76))
-                    .text_color(rgb(if !enabled {
-                        theme().subtle
-                    } else if let Some(c) = text_tint {
+                    .when(active_bg.is_some(), |b| b.font_weight(FontWeight::MEDIUM))
+                    .text_color(rgb(if let Some(c) = text_tint {
                         c
+                    } else if !enabled {
+                        theme().subtle
                     } else {
                         theme().text
                     }))
                     .child(icon(
                         ico,
-                        if !enabled {
-                            theme().subtle
-                        } else if let Some(c) = icon_tint.or(text_tint) {
+                        if let Some(c) = icon_tint.or(text_tint) {
                             c
+                        } else if !enabled {
+                            theme().subtle
                         } else {
                             theme().muted
                         },
@@ -1589,12 +1644,13 @@ impl DesktopView {
                         "refresh-current",
                         Icon::Refresh,
                         if fetching {
-                            tr("获取中…", "Fetching…")
+                            tr("获取中…", "Fetching…").to_owned()
                         } else {
-                            tr("获取", "Fetch")
+                            tr("获取", "Fetch").to_owned()
                         },
                         tr("获取远端更新 (⇧⌘T)", "Fetch Remote Updates (⇧⌘T)").to_owned(),
                         !fetching,
+                        fetching.then_some(theme().brand_bg),
                         fetching.then_some(theme().brand_text),
                         None,
                         None,
@@ -1610,12 +1666,13 @@ impl DesktopView {
                     seg(
                         "pull-current",
                         Icon::Download,
-                        tr("拉取", "Pull"),
+                        pull_label,
                         pull_tip,
                         writable,
-                        None,
+                        pulling.then_some(theme().accent_bg),
+                        pulling.then_some(theme().link),
                         pull_icon_tint,
-                        pull_badge,
+                        if pulling { None } else { pull_badge },
                     )
                     .when(writable, |b| {
                         b.on_click(cx.listener(|view, _, window, cx| {
@@ -1628,12 +1685,13 @@ impl DesktopView {
                     seg(
                         "push-current",
                         Icon::Upload,
-                        tr("推送", "Push"),
+                        push_label,
                         push_tip,
                         writable,
-                        None,
+                        pushing.then_some(theme().success_bg),
+                        pushing.then_some(theme().success),
                         push_icon_tint,
-                        push_badge,
+                        if pushing { None } else { push_badge },
                     )
                     .when(writable, |b| {
                         b.on_click(cx.listener(|view, _, window, cx| {
@@ -1888,28 +1946,150 @@ impl DesktopView {
             )
     }
 
+    fn remote_progress_banner(&self) -> Option<gpui::AnyElement> {
+        let id = self.workspace.selected?;
+        let active = self.workspace.active_write(id)?;
+        if !matches!(
+            active.kind,
+            githalo::workspace::WriteKind::Pull | githalo::workspace::WriteKind::Push
+        ) {
+            return None;
+        }
+        let is_pull = active.kind == githalo::workspace::WriteKind::Pull;
+        let (bg, border, accent, track_bg, ico) = if is_pull {
+            (
+                theme().accent_bg,
+                theme().accent_border,
+                theme().link,
+                theme().card,
+                Icon::Download,
+            )
+        } else {
+            (
+                theme().success_bg,
+                theme().success_border,
+                theme().success,
+                theme().card,
+                Icon::Upload,
+            )
+        };
+        let detail = active.progress.as_deref().unwrap_or_else(|| {
+            if is_pull {
+                tr("正在连接远端并拉取数据…", "Connecting to remote…")
+            } else {
+                tr("正在连接远端并推送提交…", "Connecting to remote…")
+            }
+        });
+        let pct = active.percent;
+
+        Some(
+            div()
+                .id("remote-progress-banner")
+                .h(rems(1.75))
+                .flex_shrink_0()
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .bg(rgb(bg))
+                .border_t_1()
+                .border_color(rgb(border))
+                .text_size(rems(0.74))
+                .child(div().size(px(6.5)).rounded(px(999.)).bg(rgb(accent)))
+                .child(icon(ico, accent))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(accent))
+                        .child(active.label.clone()),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme().muted))
+                        .min_w_0()
+                        .flex_1()
+                        .child(elide(detail.to_owned())),
+                )
+                .child(if let Some(p) = pct {
+                    let fill_w = (f32::from(p.min(100)) / 100.0) * 132.0;
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .child(
+                            div()
+                                .w(px(132.))
+                                .h(px(5.))
+                                .rounded(px(999.))
+                                .bg(rgb(track_bg))
+                                .border_1()
+                                .border_color(rgb(border))
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .w(px(fill_w.max(4.)))
+                                        .h_full()
+                                        .rounded(px(999.))
+                                        .bg(rgb(accent)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w(px(32.))
+                                .text_align(gpui::TextAlign::Right)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(accent))
+                                .child(format!("{p}%")),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_shrink_0()
+                        .px(px(7.))
+                        .py(px(1.))
+                        .rounded(px(999.))
+                        .bg(rgb(track_bg))
+                        .border_1()
+                        .border_color(rgb(border))
+                        .text_size(rems(0.68))
+                        .text_color(rgb(accent))
+                        .child(tr("进行中…", "In progress…"))
+                        .into_any_element()
+                })
+                .into_any_element(),
+        )
+    }
+
     fn status_bar(&self, cx: &mut Context<Self>) -> Div {
         let state = &self.workspace.daily;
-        let running = self
+        let active_write = self
             .workspace
             .selected
-            .is_some_and(|id| self.workspace.writing(id));
-        let message = if running {
-            Some((
-                tr("正在执行 Git 操作…", "Running Git operation…"),
-                theme().brand_text,
-                false,
-            ))
+            .and_then(|id| self.workspace.active_write(id));
+        let running = active_write.is_some();
+        let active_msg = active_write.map(|active| match active.progress.as_deref() {
+            Some(detail) => format!("{} · {detail}", active.label),
+            None => active.label.clone(),
+        });
+        let active_color = active_write.map_or(theme().brand_text, |active| match active.kind {
+            githalo::workspace::WriteKind::Pull => theme().link,
+            githalo::workspace::WriteKind::Push => theme().success,
+            _ => theme().brand_text,
+        });
+        let message: Option<(String, u32, bool)> = if let Some(text) = active_msg {
+            Some((text, active_color, false))
         } else if let Some(error) = &state.error {
-            Some((error.as_str(), theme().error, true))
+            Some((error.clone(), theme().error, true))
         } else if let Some(notice) = &self.notice {
-            Some((notice.as_str(), theme().warning, true))
+            Some((notice.clone(), theme().warning, true))
         } else if let Some(notice) = &state.notice {
-            Some((notice.as_str(), theme().muted, true))
+            Some((notice.clone(), theme().muted, true))
         } else {
             self.workspace
                 .message
-                .as_deref()
+                .clone()
                 .map(|message| (message, theme().warning, true))
         };
         let repo_info = self
@@ -1939,12 +2119,17 @@ impl DesktopView {
                     .items_center()
                     .gap(px(5.))
                     .child(div().size(px(6.)).rounded(px(999.)).bg(rgb(if running {
-                        theme().link
+                        active_color
                     } else {
                         theme().brand
                     })))
-                    .child(if running {
-                        tr("运行中", "Busy")
+                    .child(if let Some(active) = active_write {
+                        match active.kind {
+                            githalo::workspace::WriteKind::Pull => tr("拉取中", "Pulling"),
+                            githalo::workspace::WriteKind::Push => tr("推送中", "Pushing"),
+                            githalo::workspace::WriteKind::Commit => tr("提交中", "Committing"),
+                            githalo::workspace::WriteKind::Other => tr("运行中", "Busy"),
+                        }
                     } else {
                         tr("就绪", "Ready")
                     }),
@@ -1968,6 +2153,7 @@ impl DesktopView {
                 div().flex_1().into_any_element()
             })
             .children(message.map(|(message, color, dismissible)| {
+                let first_line = message.lines().next().unwrap_or_default().to_owned();
                 div()
                     .min_w_0()
                     .max_w(px(620.))
@@ -1979,11 +2165,11 @@ impl DesktopView {
                         div()
                             .id("workspace-message")
                             .role(Role::Status)
-                            .aria_label(message.to_owned())
+                            .aria_label(message.clone())
                             .min_w_0()
                             .flex_1()
-                            .tooltip(tooltip(message.to_owned()))
-                            .child(elide(message.lines().next().unwrap_or_default().to_owned())),
+                            .tooltip(tooltip(message))
+                            .child(elide(first_line)),
                     )
                     .when(dismissible, |bar| {
                         bar.child(
@@ -2158,6 +2344,7 @@ impl Render for DesktopView {
                 }),
             )
             .child(self.titlebar(cx))
+            .children(self.remote_progress_banner())
             .child(
                 div()
                     .flex()

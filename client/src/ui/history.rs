@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::ops::Range;
@@ -2249,12 +2249,17 @@ impl DesktopView {
             (self.commit_diff_block_idx + 1) % count
         };
         self.commit_diff_block_idx = next;
-        let raw_row = patch.diff_blocks[next].start_row;
         let visible_row = patch
-            .visible_split_rows
-            .iter()
-            .position(|&idx| idx == raw_row)
-            .unwrap_or(raw_row);
+            .visible_diff_blocks
+            .get(next)
+            .map(|b| b.start_row)
+            .unwrap_or_else(|| {
+                let raw_row = patch.diff_blocks[next].start_row;
+                patch
+                    .visible_split_rows
+                    .binary_search(&raw_row)
+                    .unwrap_or(raw_row)
+            });
         self.diff_scroll
             .scroll_to_item(visible_row, ScrollStrategy::Center);
         cx.notify();
@@ -2943,13 +2948,48 @@ pub(super) struct HistoryScrollReset {
     pub(super) file: bool,
 }
 
+impl DesktopView {
+    /// Run `syntect` diff highlighting on GPUI's background thread pool and attach the spans to
+    /// `patch` once finished. Holding a `Weak<OnceCell<PatchSyntax>>` automatically discards stale
+    /// jobs if the user switches files, commits, repositories, or themes before completion.
+    pub(super) fn schedule_patch_highlight(
+        &self,
+        patch: &ParsedPatch,
+        job: Option<DiffSyntaxJob>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(job) = job else {
+            return;
+        };
+        let target = Rc::downgrade(&patch.syntax);
+        let bg = cx.background_executor().spawn(async move { job.run() });
+        cx.spawn(async move |view, cx| {
+            let result = bg.await;
+            let _ = view.update(cx, |_, cx| {
+                if let Some(cell) = target.upgrade() {
+                    let _ = cell.set(result);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+}
+
 impl HistoryDetails {
     pub(super) fn invalidate_patch(&mut self) {
         self.patch = None;
         self.selection.file = None;
     }
 
-    pub(super) fn update(&mut self, workspace: &Workspace) -> HistoryScrollReset {
+    pub(super) fn patch_ref(&self) -> Option<&ParsedPatch> {
+        self.patch.as_deref()
+    }
+
+    pub(super) fn update_async(
+        &mut self,
+        workspace: &Workspace,
+    ) -> (HistoryScrollReset, Option<DiffSyntaxJob>) {
         let worktree = workspace
             .selected
             .and_then(|id| workspace.repo(id))
@@ -2959,7 +2999,7 @@ impl HistoryDetails {
         } else {
             workspace.selected_commit.iter().cloned().collect()
         };
-        self.update_details(
+        self.update_details_inner(
             DetailSelection {
                 worktree,
                 commits,
@@ -2969,15 +3009,27 @@ impl HistoryDetails {
             },
             &workspace.changes,
             workspace.diff.as_deref(),
+            true,
         )
     }
 
+    #[cfg(test)]
     fn update_details(
         &mut self,
         selection: DetailSelection,
         files: &[ChangedFile],
         diff: Option<&str>,
     ) -> HistoryScrollReset {
+        self.update_details_inner(selection, files, diff, false).0
+    }
+
+    fn update_details_inner(
+        &mut self,
+        selection: DetailSelection,
+        files: &[ChangedFile],
+        diff: Option<&str>,
+        async_highlight: bool,
+    ) -> (HistoryScrollReset, Option<DiffSyntaxJob>) {
         let worktree = self.selection.worktree != selection.worktree;
         let commit = worktree || self.selection.commits != selection.commits;
         let file = commit || self.selection.file != selection.file;
@@ -2990,17 +3042,27 @@ impl HistoryDetails {
         if commit || self.selection.changes_loading != selection.changes_loading {
             self.changes.replace_files(files);
         }
+        let mut pending_job = None;
         if file || self.selection.diff_loading != selection.diff_loading {
-            self.patch = diff
-                .filter(|diff| !diff.is_empty())
-                .map(|diff| Rc::new(ParsedPatch::for_path(diff, selection.file.as_deref())));
+            self.patch = diff.filter(|diff| !diff.is_empty()).map(|diff| {
+                let (patch, job) = ParsedPatch::for_path_async(diff, selection.file.as_deref());
+                if async_highlight {
+                    pending_job = job;
+                } else if let Some(job) = job {
+                    let _ = patch.syntax.set(job.run());
+                }
+                Rc::new(patch)
+            });
         }
         self.selection = selection;
-        HistoryScrollReset {
-            worktree,
-            commit,
-            file,
-        }
+        (
+            HistoryScrollReset {
+                worktree,
+                commit,
+                file,
+            },
+            pending_job,
+        )
     }
 }
 
@@ -3235,6 +3297,98 @@ impl SplitHScroll {
     }
 }
 
+#[derive(Default)]
+pub(super) struct PatchSyntax {
+    unified: Vec<Vec<SyntaxSpan>>,
+    split_left: Vec<Vec<SyntaxSpan>>,
+    split_right: Vec<Vec<SyntaxSpan>>,
+}
+
+/// Self-contained `Send + 'static` job for computing `syntect` diff highlights off the UI thread.
+pub(super) struct DiffSyntaxJob {
+    light: bool,
+    unified_len: usize,
+    split_len: usize,
+    unified_line_info: Vec<(usize, bool)>,
+    batches: Vec<DiffSyntaxBatch>,
+}
+
+struct DiffSyntaxBatch {
+    path: PathBuf,
+    left_targets: Vec<(usize, Option<usize>)>,
+    left_entries: Vec<(String, bool)>,
+    right_targets: Vec<(usize, Option<usize>)>,
+    right_entries: Vec<(String, bool)>,
+}
+
+impl DiffSyntaxJob {
+    fn is_empty(&self) -> bool {
+        self.batches.is_empty()
+    }
+
+    pub(super) fn run(self) -> PatchSyntax {
+        let mut unified = vec![Vec::new(); self.unified_len];
+        let mut split_left = vec![Vec::new(); self.split_len];
+        let mut split_right = vec![Vec::new(); self.split_len];
+
+        for batch in self.batches {
+            if !batch.left_entries.is_empty() {
+                let segments: Vec<(&str, bool)> = batch
+                    .left_entries
+                    .iter()
+                    .map(|(text, reset)| (text.as_str(), *reset))
+                    .collect();
+                let spans_list =
+                    syntax::highlight_code_segments_for_theme(&batch.path, &segments, self.light);
+                for ((row_idx, unified_idx), spans) in
+                    batch.left_targets.into_iter().zip(spans_list)
+                {
+                    if let Some(u_idx) = unified_idx
+                        && let Some(&(line_len, has_prefix)) = self.unified_line_info.get(u_idx)
+                        && let Some(slot) = unified.get_mut(u_idx)
+                        && slot.is_empty()
+                    {
+                        *slot = shift_spans_for_unified_meta(line_len, has_prefix, &spans);
+                    }
+                    if let Some(slot) = split_left.get_mut(row_idx) {
+                        *slot = spans;
+                    }
+                }
+            }
+
+            if !batch.right_entries.is_empty() {
+                let segments: Vec<(&str, bool)> = batch
+                    .right_entries
+                    .iter()
+                    .map(|(text, reset)| (text.as_str(), *reset))
+                    .collect();
+                let spans_list =
+                    syntax::highlight_code_segments_for_theme(&batch.path, &segments, self.light);
+                for ((row_idx, unified_idx), spans) in
+                    batch.right_targets.into_iter().zip(spans_list)
+                {
+                    if let Some(u_idx) = unified_idx
+                        && let Some(&(line_len, has_prefix)) = self.unified_line_info.get(u_idx)
+                        && let Some(slot) = unified.get_mut(u_idx)
+                        && slot.is_empty()
+                    {
+                        *slot = shift_spans_for_unified_meta(line_len, has_prefix, &spans);
+                    }
+                    if let Some(slot) = split_right.get_mut(row_idx) {
+                        *slot = spans;
+                    }
+                }
+            }
+        }
+
+        PatchSyntax {
+            unified,
+            split_left,
+            split_right,
+        }
+    }
+}
+
 pub(super) struct ParsedPatch {
     pub(super) lines: Vec<DiffLine>,
     pub(super) longest: Option<usize>,
@@ -3243,7 +3397,31 @@ pub(super) struct ParsedPatch {
     /// Indices into `split_rows` for read-only split view (omits redundant `@@ -1,... @@` top banner).
     pub(super) visible_split_rows: Vec<usize>,
     pub(super) diff_blocks: Vec<DiffBlockMark>,
+    /// Precomputed block ranges mapped into `visible_split_rows` indices.
+    pub(super) visible_diff_blocks: Vec<DiffBlockMark>,
     pub(super) h_scroll: SplitHScroll,
+    /// Populated asynchronously by a background `DiffSyntaxJob` (or eagerly in sync tests).
+    pub(super) syntax: Rc<OnceCell<PatchSyntax>>,
+}
+
+impl ParsedPatch {
+    pub(super) fn unified_syntax(&self, index: usize) -> &[SyntaxSpan] {
+        self.syntax
+            .get()
+            .and_then(|s| s.unified.get(index))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(super) fn split_syntax(&self, row_idx: usize) -> (&[SyntaxSpan], &[SyntaxSpan]) {
+        match self.syntax.get() {
+            Some(s) => (
+                s.split_left.get(row_idx).map(Vec::as_slice).unwrap_or(&[]),
+                s.split_right.get(row_idx).map(Vec::as_slice).unwrap_or(&[]),
+            ),
+            None => (&[], &[]),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3275,7 +3453,6 @@ pub(super) struct DiffLine {
     new: Option<usize>,
     pub(super) text: SharedString,
     tone: DiffLineTone,
-    syntax: Vec<SyntaxSpan>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3293,7 +3470,6 @@ pub(super) struct SplitCell {
     pub(super) prefix: SharedString,
     pub(super) changed: SharedString,
     pub(super) suffix: SharedString,
-    pub(super) syntax: Vec<SyntaxSpan>,
 }
 
 impl SplitCell {
@@ -3304,7 +3480,6 @@ impl SplitCell {
             prefix: SharedString::default(),
             changed: SharedString::default(),
             suffix: SharedString::default(),
-            syntax: Vec::new(),
         }
     }
 
@@ -3315,7 +3490,6 @@ impl SplitCell {
             prefix: text.into(),
             changed: SharedString::default(),
             suffix: SharedString::default(),
-            syntax: Vec::new(),
         }
     }
 
@@ -3332,7 +3506,6 @@ impl SplitCell {
             prefix: prefix.into(),
             changed: changed.into(),
             suffix: suffix.into(),
-            syntax: Vec::new(),
         }
     }
 
@@ -3350,6 +3523,7 @@ impl SplitCell {
         block_kind: Option<DiffBlockKind>,
         meta: Option<&SplitRowMeta>,
         scroll_x: f32,
+        syntax: &[SyntaxSpan],
     ) -> Div {
         let t = theme();
         let is_first = meta.is_some_and(|m| m.is_first);
@@ -3389,13 +3563,13 @@ impl SplitCell {
             .ml(px(-scroll_x))
             .whitespace_nowrap()
             .text_color(rgb(fg));
-        if !self.syntax.is_empty() {
+        if !syntax.is_empty() {
             let full = self.full_code();
             if !full.is_empty() {
                 let changed_range = (!self.changed.is_empty())
                     .then_some(self.prefix.len()..self.prefix.len() + self.changed.len());
                 let highlights =
-                    merge_diff_highlights(&full, &self.syntax, changed_range, highlight_bg, fg);
+                    merge_diff_highlights(&full, syntax, changed_range, highlight_bg, fg);
                 code = code.child(StyledText::new(full).with_highlights(highlights));
             }
         } else {
@@ -3585,10 +3759,16 @@ pub(super) enum SplitDiffRow {
 impl SplitDiffRow {
     #[allow(dead_code)]
     pub(super) fn row(&self) -> Div {
-        self.render_modern(None, 0.0)
+        self.render_modern(None, 0.0, &[], &[])
     }
 
-    pub(super) fn render_modern(&self, meta: Option<&SplitRowMeta>, scroll_x: f32) -> Div {
+    pub(super) fn render_modern(
+        &self,
+        meta: Option<&SplitRowMeta>,
+        scroll_x: f32,
+        left_syntax: &[SyntaxSpan],
+        right_syntax: &[SyntaxSpan],
+    ) -> Div {
         // CRITICAL: Every item in GPUI's `uniform_list` MUST share the exact same fixed row height (`DIFF_ROW_HEIGHT`),
         // because `uniform_list` measures item 0 to compute stride for all rows.
         let base = div()
@@ -3665,7 +3845,7 @@ impl SplitDiffRow {
                     .then(|| block_border_color(block_kind))
                     .flatten();
 
-                base.child(left.render_code_pane(block_kind, meta, scroll_x))
+                base.child(left.render_code_pane(block_kind, meta, scroll_x, left_syntax))
                     .child(
                         div()
                             .w(px(102.))
@@ -3732,7 +3912,7 @@ impl SplitDiffRow {
                                     ),
                             ),
                     )
-                    .child(right.render_code_pane(block_kind, meta, scroll_x))
+                    .child(right.render_code_pane(block_kind, meta, scroll_x, right_syntax))
             }
         }
     }
@@ -3960,26 +4140,7 @@ pub(super) fn diff_overview_ruler(
         patch.split_rows.len().max(1)
     };
     let visible_blocks: Vec<DiffBlockMark> = if use_visible_rows {
-        patch
-            .diff_blocks
-            .iter()
-            .filter_map(|b| {
-                let start = patch
-                    .visible_split_rows
-                    .iter()
-                    .position(|&idx| idx == b.start_row)?;
-                let end = patch
-                    .visible_split_rows
-                    .iter()
-                    .position(|&idx| idx == b.end_row)
-                    .unwrap_or(start);
-                Some(DiffBlockMark {
-                    start_row: start,
-                    end_row: end,
-                    kind: b.kind,
-                })
-            })
-            .collect()
+        patch.visible_diff_blocks.clone()
     } else {
         patch.diff_blocks.clone()
     };
@@ -4091,7 +4252,13 @@ pub(super) fn render_patch_view(
                                     let raw_idx = *patch.visible_split_rows.get(visible_idx)?;
                                     let row = patch.split_rows.get(raw_idx)?;
                                     let meta = patch.split_meta.get(raw_idx);
-                                    Some(row.render_modern(meta, scroll_x))
+                                    let (left_syntax, right_syntax) = patch.split_syntax(raw_idx);
+                                    Some(row.render_modern(
+                                        meta,
+                                        scroll_x,
+                                        left_syntax,
+                                        right_syntax,
+                                    ))
                                 })
                                 .collect::<Vec<_>>()
                         })
@@ -4109,8 +4276,10 @@ pub(super) fn render_patch_view(
         let longest = patch.longest;
         uniform_list(list_id, count, move |range, _, _| {
             range
-                .filter_map(|index| patch.lines.get(index))
-                .map(DiffLine::row)
+                .filter_map(|index| {
+                    let line = patch.lines.get(index)?;
+                    Some(line.row(patch.unified_syntax(index)))
+                })
                 .collect::<Vec<_>>()
         })
         .with_width_from_item(longest)
@@ -4134,7 +4303,7 @@ pub(super) fn mono_font() -> &'static str {
 }
 
 impl DiffLine {
-    pub(super) fn row(&self) -> Div {
+    pub(super) fn row(&self, syntax: &[SyntaxSpan]) -> Div {
         let (color, background) = self.tone.colors();
         let number = |value: Option<usize>| {
             div()
@@ -4163,16 +4332,11 @@ impl DiffLine {
                     .flex_shrink_0()
                     .pl(px(6.))
                     .text_color(rgb(color))
-                    .child(if self.syntax.is_empty() {
+                    .child(if syntax.is_empty() {
                         self.text.clone().into_any_element()
                     } else {
-                        let highlights = merge_diff_highlights(
-                            &self.text,
-                            &self.syntax,
-                            None,
-                            background,
-                            color,
-                        );
+                        let highlights =
+                            merge_diff_highlights(&self.text, syntax, None, background, color);
                         StyledText::new(self.text.clone())
                             .with_highlights(highlights)
                             .into_any_element()
@@ -4181,32 +4345,78 @@ impl DiffLine {
     }
 }
 
+/// Cap single diff line length rendered in GPUI so minified 100KB lines never stall text shaping.
+const MAX_DIFF_DISPLAY_BYTES: usize = 4_096;
+/// Skip character-level inline word diff on lines longer than this threshold.
+const MAX_INLINE_DIFF_BYTES: usize = 2_048;
+
+fn format_diff_display_line(line: &str) -> String {
+    let expanded = line.replace('\t', "    ");
+    if expanded.len() <= MAX_DIFF_DISPLAY_BYTES {
+        return expanded;
+    }
+    let mut end = MAX_DIFF_DISPLAY_BYTES;
+    while end > 0 && !expanded.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut truncated = expanded[..end].to_owned();
+    truncated.push_str(" …");
+    truncated
+}
+
+struct SplitSyntaxRowMeta {
+    path: Option<PathBuf>,
+    hunk_id: usize,
+    left_unified: Option<usize>,
+    right_unified: Option<usize>,
+}
+
 impl ParsedPatch {
+    #[cfg(test)]
     pub(super) fn new(diff: &str) -> Self {
         Self::for_path(diff, None)
     }
 
+    pub(super) fn new_async(diff: &str) -> (Self, Option<DiffSyntaxJob>) {
+        Self::for_path_async(diff, None)
+    }
+
+    #[cfg(test)]
     pub(super) fn for_path(diff: &str, initial_path: Option<&Path>) -> Self {
+        let (patch, job) = Self::for_path_async(diff, initial_path);
+        if let Some(job) = job {
+            let _ = patch.syntax.set(job.run());
+        }
+        patch
+    }
+
+    /// Parse diff structure synchronously (~1-3 ms even on 512 KiB patches) and return a
+    /// `Send + 'static` [`DiffSyntaxJob`] so `syntect` runs completely off the UI thread.
+    pub(super) fn for_path_async(
+        diff: &str,
+        initial_path: Option<&Path>,
+    ) -> (Self, Option<DiffSyntaxJob>) {
         let mut longest = None;
         let mut max_columns = 0;
         let mut hunk: Option<(usize, usize, usize, usize)> = None;
         let mut split_rows = Vec::new();
-        let mut split_row_paths: Vec<Option<PathBuf>> = Vec::new();
-        let mut pending_removed: Vec<(Option<usize>, String)> = Vec::new();
-        let mut pending_added: Vec<(Option<usize>, String)> = Vec::new();
+        let mut split_syntax_meta: Vec<SplitSyntaxRowMeta> = Vec::new();
+        let mut pending_removed: Vec<(Option<usize>, String, usize)> = Vec::new();
+        let mut pending_added: Vec<(Option<usize>, String, usize)> = Vec::new();
         let mut hunk_order: usize = 0;
+        let mut current_hunk_id: usize = 0;
         let mut current_path: Option<PathBuf> = initial_path.map(Path::to_path_buf);
-        let mut line_meta: Vec<(Option<PathBuf>, bool)> = Vec::new();
 
-        let flush_block = |removed: &mut Vec<(Option<usize>, String)>,
-                           added: &mut Vec<(Option<usize>, String)>,
+        let flush_block = |removed: &mut Vec<(Option<usize>, String, usize)>,
+                           added: &mut Vec<(Option<usize>, String, usize)>,
                            rows: &mut Vec<SplitDiffRow>,
-                           row_paths: &mut Vec<Option<PathBuf>>,
-                           path: &Option<PathBuf>| {
+                           syntax_meta: &mut Vec<SplitSyntaxRowMeta>,
+                           path: &Option<PathBuf>,
+                           hunk_id: usize| {
             let count = removed.len().max(added.len());
             for i in 0..count {
                 match (removed.get(i), added.get(i)) {
-                    (Some((old_no, old_text)), Some((new_no, new_text))) => {
+                    (Some((old_no, old_text, old_uidx)), Some((new_no, new_text, new_uidx))) => {
                         let ((lp, lc, ls), (rp, rc, rs)) = inline_diff_spans(old_text, new_text);
                         rows.push(SplitDiffRow::Pair {
                             left: SplitCell::highlighted(
@@ -4224,9 +4434,14 @@ impl ParsedPatch {
                                 rs,
                             ),
                         });
-                        row_paths.push(path.clone());
+                        syntax_meta.push(SplitSyntaxRowMeta {
+                            path: path.clone(),
+                            hunk_id,
+                            left_unified: Some(*old_uidx),
+                            right_unified: Some(*new_uidx),
+                        });
                     }
-                    (Some((old_no, old_text)), None) => {
+                    (Some((old_no, old_text, old_uidx)), None) => {
                         rows.push(SplitDiffRow::Pair {
                             left: SplitCell::plain(
                                 *old_no,
@@ -4235,9 +4450,14 @@ impl ParsedPatch {
                             ),
                             right: SplitCell::empty(),
                         });
-                        row_paths.push(path.clone());
+                        syntax_meta.push(SplitSyntaxRowMeta {
+                            path: path.clone(),
+                            hunk_id,
+                            left_unified: Some(*old_uidx),
+                            right_unified: None,
+                        });
                     }
-                    (None, Some((new_no, new_text))) => {
+                    (None, Some((new_no, new_text, new_uidx))) => {
                         rows.push(SplitDiffRow::Pair {
                             left: SplitCell::empty(),
                             right: SplitCell::plain(
@@ -4246,7 +4466,12 @@ impl ParsedPatch {
                                 new_text.clone(),
                             ),
                         });
-                        row_paths.push(path.clone());
+                        syntax_meta.push(SplitSyntaxRowMeta {
+                            path: path.clone(),
+                            hunk_id,
+                            left_unified: None,
+                            right_unified: Some(*new_uidx),
+                        });
                     }
                     (None, None) => {}
                 }
@@ -4255,31 +4480,37 @@ impl ParsedPatch {
             added.clear();
         };
 
-        let mut lines: Vec<DiffLine> = diff
+        let lines: Vec<DiffLine> = diff
             .lines()
             .enumerate()
             .map(|(index, line)| {
                 let mut old = None;
                 let mut new = None;
-                let mut is_code_line = false;
-                let text = line.replace('\t', "    ");
+                let text = format_diff_display_line(line);
                 let tone = if line.starts_with("@@ ") {
                     flush_block(
                         &mut pending_removed,
                         &mut pending_added,
                         &mut split_rows,
-                        &mut split_row_paths,
+                        &mut split_syntax_meta,
                         &current_path,
+                        current_hunk_id,
                     );
                     hunk = hunk_range(line);
                     let order = hunk_order;
                     hunk_order += 1;
+                    current_hunk_id += 1;
                     split_rows.push(SplitDiffRow::Banner {
                         text: text.clone().into(),
                         tone: DiffLineTone::Hunk,
                         hunk_order: Some(order),
                     });
-                    split_row_paths.push(current_path.clone());
+                    split_syntax_meta.push(SplitSyntaxRowMeta {
+                        path: current_path.clone(),
+                        hunk_id: current_hunk_id,
+                        left_unified: None,
+                        right_unified: None,
+                    });
                     DiffLineTone::Hunk
                 } else if let Some((old_number, new_number, old_left, new_left)) = hunk.as_mut() {
                     let prefix = line.as_bytes().first().copied();
@@ -4299,22 +4530,21 @@ impl ParsedPatch {
                     let stripped = strip_diff_prefix(&text);
                     match (old.is_some(), new.is_some()) {
                         (true, false) => {
-                            is_code_line = true;
                             if !pending_added.is_empty() {
                                 flush_block(
                                     &mut pending_removed,
                                     &mut pending_added,
                                     &mut split_rows,
-                                    &mut split_row_paths,
+                                    &mut split_syntax_meta,
                                     &current_path,
+                                    current_hunk_id,
                                 );
                             }
-                            pending_removed.push((old, stripped));
+                            pending_removed.push((old, stripped, index));
                             DiffLineTone::Removed
                         }
                         (false, true) => {
-                            is_code_line = true;
-                            pending_added.push((new, stripped));
+                            pending_added.push((new, stripped, index));
                             DiffLineTone::Added
                         }
                         _ => {
@@ -4322,8 +4552,9 @@ impl ParsedPatch {
                                 &mut pending_removed,
                                 &mut pending_added,
                                 &mut split_rows,
-                                &mut split_row_paths,
+                                &mut split_syntax_meta,
                                 &current_path,
+                                current_hunk_id,
                             );
                             if line.starts_with('\\') {
                                 split_rows.push(SplitDiffRow::Banner {
@@ -4331,9 +4562,13 @@ impl ParsedPatch {
                                     tone: DiffLineTone::Subtle,
                                     hunk_order: None,
                                 });
-                                split_row_paths.push(current_path.clone());
+                                split_syntax_meta.push(SplitSyntaxRowMeta {
+                                    path: current_path.clone(),
+                                    hunk_id: current_hunk_id,
+                                    left_unified: None,
+                                    right_unified: None,
+                                });
                             } else {
-                                is_code_line = true;
                                 split_rows.push(SplitDiffRow::Pair {
                                     left: SplitCell::plain(
                                         old,
@@ -4342,7 +4577,12 @@ impl ParsedPatch {
                                     ),
                                     right: SplitCell::plain(new, SplitCellKind::Context, stripped),
                                 });
-                                split_row_paths.push(current_path.clone());
+                                split_syntax_meta.push(SplitSyntaxRowMeta {
+                                    path: current_path.clone(),
+                                    hunk_id: current_hunk_id,
+                                    left_unified: Some(index),
+                                    right_unified: Some(index),
+                                });
                             }
                             DiffLineTone::Context
                         }
@@ -4352,11 +4592,13 @@ impl ParsedPatch {
                         &mut pending_removed,
                         &mut pending_added,
                         &mut split_rows,
-                        &mut split_row_paths,
+                        &mut split_syntax_meta,
                         &current_path,
+                        current_hunk_id,
                     );
                     if let Some(detected) = extract_diff_header_path(line) {
                         current_path = Some(detected);
+                        current_hunk_id += 1;
                     }
                     if !line.starts_with("diff --git ")
                         && !line.starts_with("index ")
@@ -4368,7 +4610,12 @@ impl ParsedPatch {
                             tone: DiffLineTone::Meta,
                             hunk_order: None,
                         });
-                        split_row_paths.push(current_path.clone());
+                        split_syntax_meta.push(SplitSyntaxRowMeta {
+                            path: current_path.clone(),
+                            hunk_id: current_hunk_id,
+                            left_unified: None,
+                            right_unified: None,
+                        });
                     }
                     DiffLineTone::Meta
                 };
@@ -4377,13 +4624,11 @@ impl ParsedPatch {
                     max_columns = columns;
                     longest = Some(index);
                 }
-                line_meta.push((current_path.clone(), is_code_line));
                 DiffLine {
                     old,
                     new,
                     tone,
                     text: text.into(),
-                    syntax: Vec::new(),
                 }
             })
             .collect();
@@ -4391,24 +4636,30 @@ impl ParsedPatch {
             &mut pending_removed,
             &mut pending_added,
             &mut split_rows,
-            &mut split_row_paths,
+            &mut split_syntax_meta,
             &current_path,
+            current_hunk_id,
         );
 
-        apply_diff_syntax_highlights(&mut lines, &line_meta, &mut split_rows, &split_row_paths);
-        let (split_meta, visible_split_rows, diff_blocks) = compute_split_diff_meta(&split_rows);
+        let job = build_diff_syntax_job(&lines, &split_rows, &split_syntax_meta);
+        let (split_meta, visible_split_rows, diff_blocks, visible_diff_blocks) =
+            compute_split_diff_meta(&split_rows);
         let max_cols = max_split_visual_cols(&split_rows);
         let max_content_px = max_cols as f32 * 8.2 + 36.0;
 
-        Self {
+        let patch = Self {
             lines,
             longest,
             split_rows,
             split_meta,
             visible_split_rows,
             diff_blocks,
+            visible_diff_blocks,
             h_scroll: SplitHScroll::new(max_content_px),
-        }
+            syntax: Rc::new(OnceCell::new()),
+        };
+        let pending_job = (!job.is_empty()).then_some(job);
+        (patch, pending_job)
     }
 }
 
@@ -4433,7 +4684,12 @@ fn max_split_visual_cols(split_rows: &[SplitDiffRow]) -> usize {
 
 fn compute_split_diff_meta(
     split_rows: &[SplitDiffRow],
-) -> (Vec<SplitRowMeta>, Vec<usize>, Vec<DiffBlockMark>) {
+) -> (
+    Vec<SplitRowMeta>,
+    Vec<usize>,
+    Vec<DiffBlockMark>,
+    Vec<DiffBlockMark>,
+) {
     let mut meta = vec![SplitRowMeta::default(); split_rows.len()];
     let mut blocks = Vec::new();
 
@@ -4556,7 +4812,22 @@ fn compute_split_diff_meta(
         })
         .collect();
 
-    (meta, visible_rows, blocks)
+    // 4. Precompute visible block ranges in O(blocks * log(rows)) once per patch so overview
+    //    ruler rendering and next/prev jump are O(1) / O(log n) per frame.
+    let visible_blocks: Vec<DiffBlockMark> = blocks
+        .iter()
+        .filter_map(|b| {
+            let start = visible_rows.binary_search(&b.start_row).ok()?;
+            let end = visible_rows.binary_search(&b.end_row).unwrap_or(start);
+            Some(DiffBlockMark {
+                start_row: start,
+                end_row: end,
+                kind: b.kind,
+            })
+        })
+        .collect();
+
+    (meta, visible_rows, blocks, visible_blocks)
 }
 
 fn extract_diff_header_path(line: &str) -> Option<PathBuf> {
@@ -4586,99 +4857,86 @@ fn extract_diff_header_path(line: &str) -> Option<PathBuf> {
     None
 }
 
-fn apply_diff_syntax_highlights(
-    lines: &mut [DiffLine],
-    line_meta: &[(Option<PathBuf>, bool)],
-    split_rows: &mut [SplitDiffRow],
-    split_row_paths: &[Option<PathBuf>],
-) {
-    // 1. Unified diff lines grouped by file path
-    let mut i = 0;
-    while i < lines.len() {
-        let Some(path) = line_meta[i].0.clone() else {
-            i += 1;
+fn shift_spans_for_unified_meta(
+    line_len: usize,
+    has_prefix: bool,
+    spans: &[SyntaxSpan],
+) -> Vec<SyntaxSpan> {
+    let offset = usize::from(has_prefix);
+    spans
+        .iter()
+        .filter_map(|&s| {
+            let start = s.start.saturating_add(offset);
+            let end = s.end.saturating_add(offset).min(line_len);
+            (start < end).then_some(SyntaxSpan { start, end, ..s })
+        })
+        .collect()
+}
+
+/// Collect old-file (left) and new-file (right) code segments per file with fresh parser state
+/// flags at every hunk boundary into a `Send + 'static` [`DiffSyntaxJob`] for background execution.
+fn build_diff_syntax_job(
+    lines: &[DiffLine],
+    split_rows: &[SplitDiffRow],
+    split_meta: &[SplitSyntaxRowMeta],
+) -> DiffSyntaxJob {
+    let unified_line_info = lines
+        .iter()
+        .map(|l| {
+            let raw = l.text.as_ref();
+            (raw.len(), raw.starts_with(['+', '-', ' ']))
+        })
+        .collect();
+    let mut batches = Vec::new();
+    let mut r = 0;
+    while r < split_rows.len() {
+        let Some(path) = split_meta[r].path.clone() else {
+            r += 1;
             continue;
         };
-        let mut batch_indices = Vec::new();
-        let mut batch_texts: Vec<String> = Vec::new();
-        let mut batch_offsets: Vec<usize> = Vec::new();
-        while i < lines.len() && line_meta[i].0.as_ref() == Some(&path) {
-            if line_meta[i].1 {
-                let raw = lines[i].text.as_ref();
-                let prefix_len = if raw.starts_with(['+', '-', ' ']) {
-                    1
-                } else {
-                    0
-                };
-                batch_indices.push(i);
-                batch_offsets.push(prefix_len);
-                batch_texts.push(raw[prefix_len..].to_owned());
+        let mut left_targets: Vec<(usize, Option<usize>)> = Vec::new();
+        let mut left_entries: Vec<(String, bool)> = Vec::new();
+        let mut right_targets: Vec<(usize, Option<usize>)> = Vec::new();
+        let mut right_entries: Vec<(String, bool)> = Vec::new();
+        let mut last_left_hunk: Option<usize> = None;
+        let mut last_right_hunk: Option<usize> = None;
+
+        while r < split_rows.len() && split_meta[r].path.as_ref() == Some(&path) {
+            if let SplitDiffRow::Pair { left, right } = &split_rows[r] {
+                let hunk_id = split_meta[r].hunk_id;
+                if left.kind != SplitCellKind::Empty {
+                    let reset = last_left_hunk != Some(hunk_id);
+                    last_left_hunk = Some(hunk_id);
+                    left_targets.push((r, split_meta[r].left_unified));
+                    left_entries.push((left.full_code(), reset));
+                }
+                if right.kind != SplitCellKind::Empty {
+                    let reset = last_right_hunk != Some(hunk_id);
+                    last_right_hunk = Some(hunk_id);
+                    right_targets.push((r, split_meta[r].right_unified));
+                    right_entries.push((right.full_code(), reset));
+                }
             }
-            i += 1;
+            r += 1;
         }
-        if !batch_texts.is_empty() {
-            let refs: Vec<&str> = batch_texts.iter().map(String::as_str).collect();
-            let highlighted = syntax::highlight_code_lines(&path, &refs);
-            for ((idx, offset), spans) in batch_indices
-                .into_iter()
-                .zip(batch_offsets)
-                .zip(highlighted)
-            {
-                let line_len = lines[idx].text.len();
-                lines[idx].syntax = spans
-                    .into_iter()
-                    .filter_map(|mut s| {
-                        s.start = s.start.saturating_add(offset);
-                        s.end = s.end.saturating_add(offset).min(line_len);
-                        (s.start < s.end).then_some(s)
-                    })
-                    .collect();
-            }
+
+        if !left_entries.is_empty() || !right_entries.is_empty() {
+            batches.push(DiffSyntaxBatch {
+                path,
+                left_targets,
+                left_entries,
+                right_targets,
+                right_entries,
+            });
         }
     }
 
-    // 2. Side-by-side split rows: highlight left stream and right stream per file path
-    let mut r = 0;
-    while r < split_rows.len() {
-        let Some(path) = split_row_paths[r].clone() else {
-            r += 1;
-            continue;
-        };
-        let mut left_indices = Vec::new();
-        let mut left_texts: Vec<String> = Vec::new();
-        let mut right_indices = Vec::new();
-        let mut right_texts: Vec<String> = Vec::new();
-        while r < split_rows.len() && split_row_paths[r].as_ref() == Some(&path) {
-            if let SplitDiffRow::Pair { left, right } = &split_rows[r] {
-                if left.kind != SplitCellKind::Empty {
-                    left_indices.push(r);
-                    left_texts.push(left.full_code());
-                }
-                if right.kind != SplitCellKind::Empty {
-                    right_indices.push(r);
-                    right_texts.push(right.full_code());
-                }
-            }
-            r += 1;
-        }
-        if !left_texts.is_empty() {
-            let refs: Vec<&str> = left_texts.iter().map(String::as_str).collect();
-            let spans_list = syntax::highlight_code_lines(&path, &refs);
-            for (row_idx, spans) in left_indices.into_iter().zip(spans_list) {
-                if let SplitDiffRow::Pair { left, .. } = &mut split_rows[row_idx] {
-                    left.syntax = spans;
-                }
-            }
-        }
-        if !right_texts.is_empty() {
-            let refs: Vec<&str> = right_texts.iter().map(String::as_str).collect();
-            let spans_list = syntax::highlight_code_lines(&path, &refs);
-            for (row_idx, spans) in right_indices.into_iter().zip(spans_list) {
-                if let SplitDiffRow::Pair { right, .. } = &mut split_rows[row_idx] {
-                    right.syntax = spans;
-                }
-            }
-        }
+    DiffSyntaxJob {
+        light: githalo::theme::is_light(),
+        unified_len: lines.len(),
+        split_len: split_rows.len(),
+        unified_line_info,
+        batches,
     }
 }
 
@@ -4718,12 +4976,18 @@ fn merge_diff_highlights(
     cuts.dedup();
 
     let mut out = Vec::with_capacity(cuts.len().saturating_sub(1));
+    let mut span_cursor = 0usize;
     for win in cuts.windows(2) {
         let (a, b) = (win[0], win[1]);
         if a >= b {
             continue;
         }
-        let span = syntax_spans.iter().find(|s| s.start <= a && b <= s.end);
+        while span_cursor < syntax_spans.len() && syntax_spans[span_cursor].end <= a {
+            span_cursor += 1;
+        }
+        let span = syntax_spans
+            .get(span_cursor)
+            .filter(|s| s.start <= a && b <= s.end);
         let in_changed = changed_range
             .as_ref()
             .is_some_and(|r| r.start <= a && b <= r.end);
@@ -4757,6 +5021,12 @@ type HighlightSegments = (String, String, String);
 /// Split a paired old/new line into `(prefix, changed, suffix)` spans aligned to identifier
 /// boundaries so modified tokens (like `void` -> `string | undefined`) highlight cleanly.
 fn inline_diff_spans(old: &str, new: &str) -> (HighlightSegments, HighlightSegments) {
+    if old.len() > MAX_INLINE_DIFF_BYTES || new.len() > MAX_INLINE_DIFF_BYTES {
+        return (
+            (String::new(), old.to_owned(), String::new()),
+            (String::new(), new.to_owned(), String::new()),
+        );
+    }
     let old_chars: Vec<char> = old.chars().collect();
     let new_chars: Vec<char> = new.chars().collect();
     let mut prefix_len = 0;
@@ -5062,10 +5332,11 @@ mod tests {
                 assert_eq!(right.kind, SplitCellKind::Added);
                 assert_eq!(right.line_no, Some(12));
                 assert_eq!(right.prefix.as_ref(), "const extra = '中文新增';");
-                assert!(!right.syntax.is_empty());
+                let (_, right_syntax) = patch.split_syntax(3);
+                assert!(!right_syntax.is_empty());
                 let merged = merge_diff_highlights(
                     &right.full_code(),
-                    &right.syntax,
+                    right_syntax,
                     None,
                     theme().diff_added_word_bg,
                     theme().diff_added_fg,
@@ -5108,5 +5379,80 @@ mod tests {
         assert!((patch.h_scroll.offset() - 80.0).abs() < 0.5);
         assert!(patch.h_scroll.scroll_by(9999.0));
         assert!((patch.h_scroll.offset() - patch.h_scroll.max_scroll()).abs() < 0.5);
+    }
+
+    #[test]
+    fn parsed_patch_handles_many_unclosed_js_hunks_and_precomputes_visible_blocks() {
+        let mut diff = String::from(
+            "diff --git a/pages/room/index.js b/pages/room/index.js\n--- a/pages/room/index.js\n+++ b/pages/room/index.js\n",
+        );
+        for i in 0..40 {
+            let line_no = 100 + i * 200;
+            diff.push_str(&format!(
+                "@@ -{line_no},4 +{line_no},5 @@ class AiAgent {{\n"
+            ));
+            diff.push_str("   render() {\n");
+            diff.push_str(&format!("-    if (oldCond_{i} && check({i})) {{\n"));
+            diff.push_str(&format!("+    if (newCond_{i} && check({i})) {{\n"));
+            diff.push_str(&format!("+      const fn_{i} = (arg = {{}}) => {{\n"));
+            diff.push_str("       return this.doWork(\n");
+        }
+        diff.push_str("@@ -16110,4 +16179,4 @@ class AiAgent {\n");
+        diff.push_str("     const quickButtonMessage = useMemo(\n");
+        diff.push_str("-      () => oldFlag && this.getMessage(validMessages),\n");
+        diff.push_str("+      () => newFlag && this.getMessage(validMessages),\n");
+        diff.push_str("       [validMessages]\n");
+
+        let started = std::time::Instant::now();
+        let patch = ParsedPatch::for_path(&diff, Some(Path::new("pages/room/index.js")));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "ParsedPatch took too long: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(patch.diff_blocks.len(), 41);
+        assert_eq!(patch.visible_diff_blocks.len(), patch.diff_blocks.len());
+        // Unified and split rows both receive syntax spans without cross-hunk corruption.
+        assert!((0..patch.lines.len()).any(|i| !patch.unified_syntax(i).is_empty()));
+        assert!((0..patch.split_rows.len()).any(|i| {
+            let (l, r) = patch.split_syntax(i);
+            !l.is_empty() && !r.is_empty()
+        }));
+    }
+
+    #[test]
+    fn parsed_patch_async_defers_syntax_work_to_background_thread() {
+        let diff = "diff --git a/demo.rs b/demo.rs\n--- a/demo.rs\n+++ b/demo.rs\n@@ -1,2 +1,2 @@\n-fn old_name() -> usize { 1 }\n+fn new_name() -> usize { 2 }\n";
+        let (patch, job) = ParsedPatch::for_path_async(diff, Some(Path::new("demo.rs")));
+        // Immediately after sync parse, structure is ready and syntax is not yet populated.
+        assert_eq!(patch.diff_blocks.len(), 1);
+        assert!(patch.syntax.get().is_none());
+        assert!(patch.unified_syntax(4).is_empty());
+
+        let job = job.expect("expected background syntax job");
+        let syntax_result = std::thread::spawn(move || job.run())
+            .join()
+            .expect("background highlight thread panicked");
+        let _ = patch.syntax.set(syntax_result);
+
+        assert!(!patch.unified_syntax(4).is_empty());
+        let (left_spans, right_spans) = patch.split_syntax(1);
+        assert!(!left_spans.is_empty());
+        assert!(!right_spans.is_empty());
+    }
+
+    #[test]
+    fn parsed_patch_truncates_huge_minified_lines_safely() {
+        let huge = "const a = \"中文\";".repeat(400);
+        let diff = format!(
+            "diff --git a/bundle.js b/bundle.js\n--- a/bundle.js\n+++ b/bundle.js\n@@ -1,1 +1,1 @@\n-{huge}\n+{huge}1\n"
+        );
+        let patch = ParsedPatch::for_path(&diff, Some(Path::new("bundle.js")));
+        assert!(
+            patch
+                .lines
+                .iter()
+                .all(|l| l.text.len() <= MAX_DIFF_DISPLAY_BYTES + 16)
+        );
     }
 }

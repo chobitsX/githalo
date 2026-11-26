@@ -104,7 +104,10 @@ impl Runtime {
                 status: Pool::new("status", 3, events.clone()),
                 detail: Pool::new("details", 2, events.clone()),
                 fetch: Pool::new("fetch", 3, events.clone()),
-                write: Pool::new("write", 1, events.clone()),
+                // Allow concurrent writes across distinct repositories (e.g. pulling one sub-repo
+                // while committing or pushing another); same-worktree & shared-common-dir
+                // serialization is enforced in `Workspace::write_with_progress`.
+                write: Pool::new("write", 3, events.clone()),
                 scan: Pool::new("scan", 1, events.clone()),
                 db_path,
                 store_queue,

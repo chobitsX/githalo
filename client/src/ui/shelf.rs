@@ -53,7 +53,7 @@ pub(super) struct DeleteShelfDialog {
 }
 
 impl DesktopView {
-    pub(super) fn sync_shelf_view(&mut self) {
+    pub(super) fn sync_shelf_view(&mut self, cx: &mut Context<Self>) {
         let worktree = self.active_worktree();
         if self.shelf_ui.worktree.as_ref() != worktree {
             self.shelf_ui.worktree = worktree.cloned();
@@ -79,7 +79,14 @@ impl DesktopView {
             (None, None) => {}
             (diff, _) => {
                 self.shelf_ui.diff_scroll = UniformListScrollHandle::new();
-                self.shelf_ui.patch = diff.map(|d| (d.clone(), Rc::new(ParsedPatch::new(d))));
+                if let Some(d) = diff {
+                    let (patch, job) = ParsedPatch::new_async(d);
+                    let patch = Rc::new(patch);
+                    self.schedule_patch_highlight(&patch, job, cx);
+                    self.shelf_ui.patch = Some((d.clone(), patch));
+                } else {
+                    self.shelf_ui.patch = None;
+                }
             }
         }
     }

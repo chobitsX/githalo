@@ -14,7 +14,8 @@ mod remote;
 
 pub use remote::{
     PullStrategy, PushOptions, RemoteFailure, RemoteOperation, RemoteOutcome, RemotePreview,
-    preview_pull, preview_push, run_remote, run_remote_with_options,
+    RemoteProgress, preview_pull, preview_push, run_remote, run_remote_with_options,
+    run_remote_with_progress,
 };
 
 const HEADS: &[u8] = b"refs/heads/";

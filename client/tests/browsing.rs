@@ -303,6 +303,64 @@ fn multi_commit_selection_computes_contiguous_net_diff_and_non_contiguous_combin
 }
 
 #[test]
+fn multi_commit_batch_handles_cross_branch_merge_empty_and_rename_commits() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().join("cross-branch-repo");
+    fs::create_dir_all(&root).unwrap();
+    run_git(&root, &["init", "-b", "main"]);
+
+    fs::write(root.join("shared.txt"), "v1\n").unwrap();
+    run_git(&root, &["add", "shared.txt"]);
+    run_git(&root, &["commit", "-m", "root commit\n\nRoot body"]);
+    let c1 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    run_git(&root, &["commit", "--allow-empty", "-m", "empty commit"]);
+    let c2 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    fs::rename(root.join("shared.txt"), root.join("renamed.txt")).unwrap();
+    fs::write(root.join("main_only.txt"), "main\n").unwrap();
+    run_git(&root, &["add", "-A"]);
+    run_git(&root, &["commit", "-m", "rename shared and add main_only"]);
+    let c3 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    run_git(&root, &["checkout", "-b", "feat", &c1]);
+    fs::write(root.join("feat_only.txt"), "feat\n").unwrap();
+    run_git(&root, &["add", "feat_only.txt"]);
+    run_git(&root, &["commit", "-m", "feat commit"]);
+    let c4 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    run_git(&root, &["checkout", "main"]);
+    run_git(&root, &["merge", "--no-ff", "feat", "-m", "merge feat"]);
+    let c5 = run_git(&root, &["rev-parse", "HEAD"]);
+
+    // Non-contiguous cross-branch selection including merge, feat, rename, empty, and root.
+    let selected = vec![c5.clone(), c4.clone(), c3.clone(), c2.clone(), c1.clone()];
+    let bundle = history::changed_files_for_commits(&root, &selected).unwrap();
+    assert_eq!(
+        bundle.bodies.get(&c1).map(String::as_str),
+        Some("Root body")
+    );
+    let paths: Vec<_> = bundle
+        .files
+        .iter()
+        .map(|f| f.path.to_string_lossy().into_owned())
+        .collect();
+    assert!(paths.contains(&"renamed.txt".to_owned()));
+    assert!(paths.contains(&"main_only.txt".to_owned()));
+    assert!(paths.contains(&"feat_only.txt".to_owned()));
+
+    let feat_file = bundle
+        .files
+        .iter()
+        .find(|f| f.path == Path::new("feat_only.txt"))
+        .unwrap();
+    // Selecting non-contiguous [c5, c4] should diff feat_only.txt via single batch diff-tree
+    // comparing each commit strictly against its first parent.
+    let diff = history::file_diff_for_commits(&root, &[c5, c4], feat_file).unwrap();
+    assert!(diff.contains("+feat"));
+}
+
+#[test]
 fn batch_cherry_pick_and_batch_revert_apply_multiple_commits() {
     use githalo::cherry_pick::{self, CherryPickOutcome};
     use githalo::history_ops::{self, RevertOutcome};

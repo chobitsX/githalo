@@ -1,20 +1,29 @@
 //! Resolve configured targets and run the confirmed single-ref operation.
 
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{HEADS, STALE, WorktreeState, exact_ref_oid, operation_failure};
 use crate::git::{
     FetchOutcome, checked, commit_oid, config_values, failure, is_oid, line_content, os_string,
     read_command, ref_exists, refspec_match, run, split_at_byte,
 };
+use crate::i18n::{is_zh, tr};
 use crate::worktree::{UpstreamConfig, WorktreeTarget};
 
 mod recovery;
 use recovery::fast_forward;
+
+/// Throttled real-time progress snapshot emitted while a remote Pull or Push is running.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteProgress {
+    pub percent: Option<u8>,
+    pub detail: String,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteOperation {
@@ -554,10 +563,20 @@ pub fn run_remote_with_options(
     pull: PullStrategy,
     push: &PushOptions,
 ) -> Result<RemoteOutcome, RemoteFailure> {
+    let mut noop = |_: RemoteProgress| {};
+    run_remote_with_progress(preview, pull, push, &mut noop)
+}
+
+pub fn run_remote_with_progress(
+    preview: &RemotePreview,
+    pull: PullStrategy,
+    push: &PushOptions,
+    on_progress: &mut dyn FnMut(RemoteProgress),
+) -> Result<RemoteOutcome, RemoteFailure> {
     verify_preview(preview)?;
     match preview.kind {
-        RemoteOperation::Pull => run_pull(preview, pull),
-        RemoteOperation::Push => run_push(preview, push).map_err(RemoteFailure::from),
+        RemoteOperation::Pull => run_pull(preview, pull, on_progress),
+        RemoteOperation::Push => run_push(preview, push, on_progress).map_err(RemoteFailure::from),
     }
 }
 
@@ -656,8 +675,13 @@ fn integrate_pull_rebase(preview: &RemotePreview, oid: &str) -> Result<PullInteg
 fn run_pull(
     preview: &RemotePreview,
     strategy: PullStrategy,
+    on_progress: &mut dyn FnMut(RemoteProgress),
 ) -> Result<RemoteOutcome, RemoteFailure> {
     if preview.endpoint.is_none() {
+        on_progress(RemoteProgress {
+            percent: None,
+            detail: integrate_stage_label(strategy).to_owned(),
+        });
         let oid = exact_ref_oid(&preview.state, &preview.remote_ref)?;
         return match integrate_pull(preview, &oid, strategy)? {
             PullIntegration::Updated(head_oid) => Ok(RemoteOutcome::Pulled {
@@ -679,7 +703,11 @@ fn run_pull(
         .flatten();
     let temporary_ref = format!("refs/githalo/pull/{}", operation_id());
     let mut fetched = None;
-    let result = fetch_for_pull(preview, &temporary_ref).and_then(|oid| {
+    on_progress(RemoteProgress {
+        percent: None,
+        detail: tr("正在连接远端并拉取数据…", "Connecting to remote…").to_owned(),
+    });
+    let result = fetch_for_pull(preview, &temporary_ref, on_progress).and_then(|oid| {
         // Network I/O can outlast a checkout, a commit, or a configuration edit.
         verify_preview(preview)?;
         fetched = match preview.tracking_ref.as_deref() {
@@ -697,6 +725,10 @@ fn run_pull(
             }
             _ => None,
         };
+        on_progress(RemoteProgress {
+            percent: None,
+            detail: integrate_stage_label(strategy).to_owned(),
+        });
         integrate_pull(preview, &oid, strategy)
     });
     let cleanup = checked(
@@ -731,14 +763,30 @@ fn run_pull(
     }
 }
 
-fn fetch_for_pull(preview: &RemotePreview, temporary_ref: &str) -> Result<String, String> {
+fn integrate_stage_label(strategy: PullStrategy) -> &'static str {
+    match strategy {
+        PullStrategy::FastForwardOnly => {
+            tr("正在快进更新本地分支…", "Fast-forwarding local branch…")
+        }
+        PullStrategy::Merge => tr("正在合并远端提交…", "Merging remote commits…"),
+        PullStrategy::Rebase => tr("正在变基到上游提交…", "Rebasing onto upstream…"),
+    }
+}
+
+fn fetch_for_pull(
+    preview: &RemotePreview,
+    temporary_ref: &str,
+    on_progress: &mut dyn FnMut(RemoteProgress),
+) -> Result<String, String> {
     let endpoint = preview.endpoint.as_ref().expect("remote Pull endpoint");
     let mut command = preview.state.command();
     pin_endpoint(&mut command, preview, endpoint);
     use_stored_history(&mut command);
     command
+        .env("LC_ALL", "C")
         .args([
             "fetch",
+            "--progress",
             "--porcelain",
             "--no-tags",
             "--no-prune",
@@ -771,7 +819,13 @@ fn fetch_for_pull(preview: &RemotePreview, temporary_ref: &str) -> Result<String
     ] {
         command.arg(config_key(prefix, &preview.remote_ref, suffix));
     }
-    checked(&mut command, "无法拉取上游引用").map_err(|reason| redact_error(&reason, endpoint))?;
+    let output = run_streaming_progress(&mut command, on_progress)?;
+    if !output.status.success() {
+        return Err(redact_error(
+            &failure("无法拉取上游引用", &output),
+            endpoint,
+        ));
+    }
     exact_ref_oid(&preview.state, OsStr::new(temporary_ref))
 }
 
@@ -812,7 +866,11 @@ fn update_tracking_ref(
     Ok(current.as_deref() == Some(oid))
 }
 
-fn run_push(preview: &RemotePreview, options: &PushOptions) -> Result<RemoteOutcome, String> {
+fn run_push(
+    preview: &RemotePreview,
+    options: &PushOptions,
+    on_progress: &mut dyn FnMut(RemoteProgress),
+) -> Result<RemoteOutcome, String> {
     let endpoint = preview.endpoint.as_ref().expect("Push endpoint");
     let push_oid = match options.up_to_oid.as_deref() {
         Some(raw) => {
@@ -831,13 +889,19 @@ fn run_push(preview: &RemotePreview, options: &PushOptions) -> Result<RemoteOutc
         }
         None => preview.head_oid().to_owned(),
     };
+    on_progress(RemoteProgress {
+        percent: None,
+        detail: tr("正在连接远端并推送提交…", "Connecting to remote…").to_owned(),
+    });
     let mut command = preview.state.command();
     pin_endpoint(&mut command, preview, endpoint);
     use_stored_history(&mut command);
     let mut refspec = OsString::from(&push_oid);
     refspec.push(":");
     refspec.push(&preview.remote_ref);
-    command.args(["push", "--porcelain", "--no-force"]);
+    command
+        .env("LC_ALL", "C")
+        .args(["push", "--progress", "--porcelain", "--no-force"]);
     if options.force_with_lease {
         let expected = preview.tracking_ref.as_deref().and_then(|reference| {
             optional_tracking_oid(&preview.state, reference)
@@ -854,7 +918,7 @@ fn run_push(preview: &RemotePreview, options: &PushOptions) -> Result<RemoteOutc
     } else {
         command.arg("--no-force-with-lease");
     }
-    let output = run(command
+    command
         .args([
             "--no-force-if-includes",
             "--no-mirror",
@@ -871,7 +935,8 @@ fn run_push(preview: &RemotePreview, options: &PushOptions) -> Result<RemoteOutc
         )
         .arg("--")
         .arg(&preview.remote)
-        .arg(refspec))?;
+        .arg(refspec);
+    let output = run_streaming_progress(&mut command, on_progress)?;
     if !output.status.success() {
         let reason = failure("推送失败", &output);
         if let Some(detail) = output
@@ -888,6 +953,136 @@ fn run_push(preview: &RemotePreview, options: &PushOptions) -> Result<RemoteOutc
         return Err(redact_error(&reason, endpoint));
     }
     Ok(RemoteOutcome::Pushed)
+}
+
+const PROGRESS_THROTTLE: Duration = Duration::from_millis(120);
+const MAX_ERROR_STDERR_BYTES: usize = 64 * 1024;
+
+/// Spawn a Git remote command, read stdout & stderr concurrently without pipe deadlocks, emit
+/// throttled progress snapshots from stderr `\r`/`\n` chunks, and strip transient progress bars
+/// from the returned `Output.stderr` so error messages stay clean.
+fn run_streaming_progress(
+    command: &mut Command,
+    on_progress: &mut dyn FnMut(RemoteProgress),
+) -> Result<Output, String> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let mut stdout_pipe = child.stdout.take().expect("piped Git stdout");
+    let mut stderr_pipe = child.stderr.take().expect("piped Git stderr");
+
+    std::thread::scope(|scope| {
+        let stdout_thread = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stdout_pipe.read_to_end(&mut buf);
+            buf
+        });
+
+        let mut error_stderr = Vec::new();
+        let mut line_buf = Vec::with_capacity(256);
+        let mut chunk = [0u8; 4096];
+        let mut last_emit: Option<Instant> = None;
+        let mut last_sent: Option<RemoteProgress> = None;
+
+        let mut handle_line = |raw: &[u8], is_cr: bool| {
+            let text = String::from_utf8_lossy(raw);
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            if let Some(progress) = parse_git_progress_line(trimmed) {
+                let now = Instant::now();
+                let changed = last_sent.as_ref() != Some(&progress);
+                let stage_changed = last_sent.as_ref().is_none_or(|prev| {
+                    prev.percent.is_some() != progress.percent.is_some()
+                        || progress.percent == Some(100)
+                });
+                let due = last_emit.is_none_or(|t| now.duration_since(t) >= PROGRESS_THROTTLE);
+                if changed && (due || stage_changed) {
+                    on_progress(progress.clone());
+                    last_emit = Some(now);
+                    last_sent = Some(progress);
+                }
+            } else if !is_cr {
+                if error_stderr.len() + trimmed.len() + 1 > MAX_ERROR_STDERR_BYTES {
+                    let drop_len = (error_stderr.len() + trimmed.len() + 1)
+                        .saturating_sub(MAX_ERROR_STDERR_BYTES);
+                    let keep_from = drop_len.min(error_stderr.len());
+                    error_stderr.drain(..keep_from);
+                }
+                error_stderr.extend_from_slice(trimmed.as_bytes());
+                error_stderr.push(b'\n');
+            }
+        };
+
+        loop {
+            match stderr_pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for &byte in &chunk[..n] {
+                        if byte == b'\r' || byte == b'\n' {
+                            handle_line(&line_buf, byte == b'\r');
+                            line_buf.clear();
+                        } else if line_buf.len() < 1024 {
+                            line_buf.push(byte);
+                        }
+                    }
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        if !line_buf.is_empty() {
+            handle_line(&line_buf, false);
+        }
+
+        let status = child.wait().map_err(|e| e.to_string())?;
+        let stdout = stdout_thread.join().unwrap_or_default();
+        Ok(Output {
+            status,
+            stdout,
+            stderr: error_stderr,
+        })
+    })
+}
+
+/// Parse standard Git `--progress` lines (both local and `remote:` prefixed) into concise
+/// localized progress text and an optional `0..=100` percentage.
+fn parse_git_progress_line(line: &str) -> Option<RemoteProgress> {
+    let cleaned = line.strip_prefix("remote:").unwrap_or(line).trim();
+    let (prefix, zh_stage, en_stage) = [
+        ("Receiving objects:", "接收对象", "Receiving objects"),
+        ("Resolving deltas:", "处理增量", "Resolving deltas"),
+        ("Writing objects:", "写入对象", "Writing objects"),
+        ("Compressing objects:", "压缩对象", "Compressing objects"),
+        ("Counting objects:", "统计对象", "Counting objects"),
+        ("Enumerating objects:", "枚举对象", "Enumerating objects"),
+        ("Unpacking objects:", "解包对象", "Unpacking objects"),
+        ("Updating files:", "更新文件", "Updating files"),
+    ]
+    .into_iter()
+    .find_map(|(key, zh, en)| cleaned.strip_prefix(key).map(|rest| (rest.trim(), zh, en)))?;
+
+    let stage = if is_zh() { zh_stage } else { en_stage };
+    let rest_no_done = prefix.trim_end_matches(", done.").trim();
+    let percent = rest_no_done
+        .split_once('%')
+        .and_then(|(num, _)| num.trim().parse::<u8>().ok())
+        .map(|p| p.min(100));
+
+    let detail = if rest_no_done.is_empty() {
+        format!("{stage}…")
+    } else {
+        // Normalize Git's `, 4.12 MiB | 2.10 MiB/s` spacing into compact middle-dot separators.
+        let compact = rest_no_done
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" | ", " · ")
+            .replace(", ", " · ");
+        format!("{stage} {compact}")
+    };
+
+    Some(RemoteProgress { percent, detail })
 }
 
 fn pin_endpoint(command: &mut Command, preview: &RemotePreview, endpoint: &RemoteEndpoint) {
@@ -950,4 +1145,34 @@ fn operation_id() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{}-{now}-{sequence}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_git_progress_lines_and_ignores_regular_errors() {
+        let recv =
+            parse_git_progress_line("Receiving objects:  45% (1200/2666), 4.12 MiB | 2.10 MiB/s")
+                .expect("receiving progress");
+        assert_eq!(recv.percent, Some(45));
+        assert!(recv.detail.contains("45%"));
+        assert!(recv.detail.contains("4.12 MiB"));
+
+        let remote_count =
+            parse_git_progress_line("remote: Compressing objects: 100% (42/42), done.")
+                .expect("remote compressing progress");
+        assert_eq!(remote_count.percent, Some(100));
+        assert!(!remote_count.detail.contains("done."));
+
+        let write =
+            parse_git_progress_line("Writing objects:  68% (340/500), 1.85 MiB | 920 KiB/s")
+                .expect("writing progress");
+        assert_eq!(write.percent, Some(68));
+        assert!(write.detail.contains("68%"));
+
+        assert!(parse_git_progress_line("fatal: could not read Username").is_none());
+        assert!(parse_git_progress_line("To ssh://example.com/repo.git").is_none());
+    }
 }

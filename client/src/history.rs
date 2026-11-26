@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
-    io::Read,
+    io::{Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -64,6 +64,37 @@ fn run(cmd: &mut Command) -> Result<Vec<u8>, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
     }
     Ok(out.stdout)
+}
+
+fn run_with_stdin(cmd: &mut Command, input: &[u8]) -> Result<Vec<u8>, String> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().expect("piped Git stdin");
+    let mut stdout = child.stdout.take().expect("piped Git stdout");
+    let mut stderr = child.stderr.take().expect("piped Git stderr");
+    let (status, out, err) = std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            let _ = stdin.write_all(input);
+        });
+        let err_reader = scope.spawn(move || {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf);
+            buf
+        });
+        let mut out = Vec::new();
+        let read_res = stdout.read_to_end(&mut out);
+        let _ = writer.join();
+        let err = err_reader.join().unwrap_or_default();
+        let status = read_res.and_then(|_| child.wait());
+        (status, out, err)
+    });
+    let status = status.map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&err).trim().to_owned());
+    }
+    Ok(out)
 }
 
 fn fields(data: &[u8]) -> impl Iterator<Item = &[u8]> {
@@ -391,31 +422,102 @@ pub fn changed_files(root: &Path, oid: &str) -> Result<Vec<ChangedFile>, String>
     changed_files_from(&mut comparison(root, oid)?)
 }
 
-/// Resolve the first parent of `oid` (returns `Ok(None)` for a root commit, or errors on shallow missing parent).
-fn first_parent_oid(root: &Path, oid: &str) -> Result<Option<String>, String> {
-    if !is_oid(oid.as_bytes()) {
-        return Err("无效的提交 ID".into());
+struct CommitMetaBatch {
+    first_parents: HashMap<String, Option<String>>,
+    bodies: BTreeMap<String, String>,
+}
+
+/// Read first-parent OIDs (for all `oids`) and commit bodies (for the first 40 commits) in a
+/// single `git show --stdin` process, avoiding per-commit `cat-file` spawn storms.
+fn read_commit_meta_batch(
+    root: &Path,
+    oids: &[String],
+    include_bodies: bool,
+) -> Result<CommitMetaBatch, String> {
+    let mut first_parents = HashMap::with_capacity(oids.len());
+    let mut bodies = BTreeMap::new();
+    let mut stdin_buf = String::with_capacity(oids.len() * 42);
+    for oid in oids {
+        if !is_oid(oid.as_bytes()) {
+            return Err("无效的提交 ID".into());
+        }
+        stdin_buf.push_str(oid);
+        stdin_buf.push('\n');
     }
-    let object = run(read_command(root).args(["cat-file", "commit", oid]))?;
-    let parent = object
-        .split(|b| *b == b'\n')
-        .take_while(|line| !line.is_empty())
-        .find_map(|line| line.strip_prefix(b"parent "));
-    let Some(raw) = parent else {
-        return Ok(None);
+    if stdin_buf.is_empty() {
+        return Ok(CommitMetaBatch {
+            first_parents,
+            bodies,
+        });
+    }
+    let body_targets: HashSet<&str> = if include_bodies {
+        oids.iter().take(40).map(String::as_str).collect()
+    } else {
+        HashSet::new()
     };
-    let parent = std::str::from_utf8(raw).map_err(|_| "父提交 ID 无效")?;
-    if !is_oid(parent.as_bytes()) {
-        return Err("父提交 ID 无效".into());
+    let mut cmd = read_command(root);
+    let format = if include_bodies {
+        "--format=%H%x00%P%x00%b"
+    } else {
+        "--format=%H%x00%P"
+    };
+    cmd.args([
+        "log",
+        "--no-walk=unsorted",
+        "--no-show-signature",
+        "--no-color",
+        "-z",
+        format,
+        "--stdin",
+    ]);
+    let data = run_with_stdin(&mut cmd, stdin_buf.as_bytes())?;
+    let mut iter = fields(&data);
+    while let Some(oid_bytes) = iter.next() {
+        let Some(parents_bytes) = iter.next() else {
+            break;
+        };
+        let body_bytes = if include_bodies { iter.next() } else { None };
+        let oid = String::from_utf8_lossy(oid_bytes).trim().to_owned();
+        if oid.is_empty() {
+            continue;
+        }
+        let first_parent = std::str::from_utf8(parents_bytes)
+            .ok()
+            .and_then(|s| s.split_whitespace().next())
+            .filter(|p| is_oid(p.as_bytes()))
+            .map(str::to_owned);
+        first_parents.insert(oid.clone(), first_parent);
+        if let Some(raw_body) = body_bytes
+            && body_targets.contains(oid.as_str())
+        {
+            let body = String::from_utf8_lossy(raw_body).trim().to_owned();
+            if !body.is_empty() {
+                bodies.insert(oid, body);
+            }
+        }
     }
-    let exists = read_command(root)
-        .args(["cat-file", "-e", parent])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !exists.status.success() {
-        return Err("本地缺少父提交，无法比较这次变更（浅克隆或对象缺失）".into());
+    Ok(CommitMetaBatch {
+        first_parents,
+        bodies,
+    })
+}
+
+/// Build `<oid> <first_parent>\n` (or `<oid>\n` for root commits) input for `git diff-tree --stdin`
+/// in oldest -> newest order so merge commits compare strictly against their first parent.
+fn build_diff_tree_stdin(
+    oids: &[String],
+    first_parents: &HashMap<String, Option<String>>,
+) -> Vec<u8> {
+    let mut input = String::with_capacity(oids.len() * 84);
+    for oid in oids.iter().rev() {
+        input.push_str(oid);
+        if let Some(Some(parent)) = first_parents.get(oid) {
+            input.push(' ');
+            input.push_str(parent);
+        }
+        input.push('\n');
     }
-    Ok(Some(parent.to_owned()))
+    input.into_bytes()
 }
 
 fn empty_tree_oid(root: &Path) -> Result<String, String> {
@@ -437,25 +539,19 @@ fn empty_tree_oid(root: &Path) -> Result<String, String> {
 
 /// Check whether `oids` (ordered newest -> oldest) form a closed contiguous commit range
 /// `base..newest` whose exact commit set equals `oids`. Returns `Some(base_tree_or_commit)` when true.
-fn contiguous_range_base(root: &Path, oids: &[String]) -> Result<Option<String>, String> {
+fn contiguous_range_base(
+    root: &Path,
+    oids: &[String],
+    oldest_parent: Option<&str>,
+) -> Result<Option<String>, String> {
     if oids.len() < 2 {
         return Ok(None);
     }
-    for oid in oids {
-        if !is_oid(oid.as_bytes()) {
-            return Err("无效的提交 ID".into());
-        }
-    }
     let newest = &oids[0];
-    let oldest = oids.last().expect("at least two oids");
-    let parent = match first_parent_oid(root, oldest) {
-        Ok(parent) => parent,
-        Err(_) => return Ok(None),
-    };
     let mut cmd = read_command(root);
     cmd.args(["rev-list", "--no-commit-header"])
         .arg(format!("--max-count={}", oids.len() + 1));
-    if let Some(base) = parent.as_deref() {
+    if let Some(base) = oldest_parent {
         cmd.arg(format!("{base}..{newest}"));
     } else {
         cmd.arg(newest);
@@ -474,8 +570,8 @@ fn contiguous_range_base(root: &Path, oids: &[String]) -> Result<Option<String>,
     }
     let expected: HashSet<&str> = oids.iter().map(String::as_str).collect();
     if listed.iter().all(|oid| expected.contains(oid)) {
-        match parent {
-            Some(base) => Ok(Some(base)),
+        match oldest_parent {
+            Some(base) => Ok(Some(base.to_owned())),
             None => Ok(Some(empty_tree_oid(root)?)),
         }
     } else {
@@ -483,95 +579,51 @@ fn contiguous_range_base(root: &Path, oids: &[String]) -> Result<Option<String>,
     }
 }
 
-/// Read non-empty commit message bodies for the selected commits (capped at 40 for fast response).
-pub fn commit_bodies(root: &Path, oids: &[String]) -> BTreeMap<String, String> {
-    let mut bodies = BTreeMap::new();
-    let sample: Vec<&str> = oids
-        .iter()
-        .take(40)
-        .map(String::as_str)
-        .filter(|oid| is_oid(oid.as_bytes()))
-        .collect();
-    if sample.is_empty() {
-        return bodies;
-    }
-    let mut cmd = read_command(root);
-    cmd.args([
-        "show",
-        "-s",
-        "--no-show-signature",
-        "--no-color",
-        "-z",
-        "--format=%H%x00%b",
-    ]);
-    for oid in &sample {
-        cmd.arg(oid);
-    }
-    cmd.arg("--");
-    let Ok(data) = run(&mut cmd) else {
-        return bodies;
-    };
-    let mut iter = fields(&data);
-    while let Some(oid_bytes) = iter.next() {
-        let Some(body_bytes) = iter.next() else {
-            break;
-        };
-        let oid = String::from_utf8_lossy(oid_bytes).trim().to_owned();
-        let body = String::from_utf8_lossy(body_bytes).trim().to_owned();
-        if !oid.is_empty() && !body.is_empty() {
-            bodies.insert(oid, body);
-        }
-    }
-    bodies
-}
-
-/// Merge changed file lists across multiple non-contiguous commits (applied oldest -> newest).
-fn merge_changed_files(per_commit: Vec<Vec<ChangedFile>>) -> Vec<ChangedFile> {
+/// Merge a flat sequence of changed files ordered oldest -> newest across multiple non-contiguous commits.
+fn merge_changed_files_flat(files: Vec<ChangedFile>) -> Vec<ChangedFile> {
     let mut by_path: BTreeMap<PathBuf, ChangedFile> = BTreeMap::new();
-    for files in per_commit {
-        for file in files {
-            if let Some(prev) = &file.previous_path
-                && let Some(existing) = by_path.remove(prev)
-            {
-                let status = if existing.status.starts_with('A') {
-                    "A".to_owned()
-                } else {
-                    file.status.clone()
-                };
-                let previous_path = if existing.status.starts_with('A') {
-                    None
-                } else {
-                    existing.previous_path.or(file.previous_path.clone())
-                };
-                by_path.insert(
-                    file.path.clone(),
-                    ChangedFile {
-                        path: file.path,
-                        status,
-                        previous_path,
-                    },
-                );
-                continue;
-            }
-            if let Some(existing) = by_path.get_mut(&file.path) {
-                match (
-                    existing.status.as_bytes().first(),
-                    file.status.as_bytes().first(),
-                ) {
-                    (Some(b'A'), Some(b'D')) => {
-                        existing.status = "M".to_owned();
-                    }
-                    (Some(b'A'), _) => {}
-                    (Some(b'D'), Some(b'A')) => {
-                        existing.status = "M".to_owned();
-                    }
-                    _ => {
-                        existing.status = file.status;
-                    }
-                }
+    for file in files {
+        if let Some(prev) = &file.previous_path
+            && let Some(existing) = by_path.remove(prev)
+        {
+            let status = if existing.status.starts_with('A') {
+                "A".to_owned()
             } else {
-                by_path.insert(file.path.clone(), file);
+                file.status.clone()
+            };
+            let previous_path = if existing.status.starts_with('A') {
+                None
+            } else {
+                existing.previous_path.or(file.previous_path.clone())
+            };
+            by_path.insert(
+                file.path.clone(),
+                ChangedFile {
+                    path: file.path,
+                    status,
+                    previous_path,
+                },
+            );
+            continue;
+        }
+        if let Some(existing) = by_path.get_mut(&file.path) {
+            match (
+                existing.status.as_bytes().first(),
+                file.status.as_bytes().first(),
+            ) {
+                (Some(b'A'), Some(b'D')) => {
+                    existing.status = "M".to_owned();
+                }
+                (Some(b'A'), _) => {}
+                (Some(b'D'), Some(b'A')) => {
+                    existing.status = "M".to_owned();
+                }
+                _ => {
+                    existing.status = file.status;
+                }
             }
+        } else {
+            by_path.insert(file.path.clone(), file);
         }
     }
     by_path.into_values().collect()
@@ -586,32 +638,42 @@ pub fn changed_files_for_commits(
     if oids.is_empty() {
         return Ok(CommitChangesBundle::default());
     }
-    let bodies = commit_bodies(root, oids);
+    let meta = read_commit_meta_batch(root, oids, true)?;
     if oids.len() == 1 {
         let files = changed_files(root, &oids[0])?;
         return Ok(CommitChangesBundle {
             files,
-            bodies,
+            bodies: meta.bodies,
             contiguous: true,
         });
     }
-    if let Some(base) = contiguous_range_base(root, oids)? {
+    let oldest = oids.last().expect("at least two oids");
+    let oldest_parent = meta.first_parents.get(oldest).and_then(|p| p.as_deref());
+    if let Some(base) = contiguous_range_base(root, oids, oldest_parent)? {
         let mut cmd = diff_tree(root);
         cmd.args([&base, &oids[0]]);
         let files = changed_files_from(&mut cmd)?;
         return Ok(CommitChangesBundle {
             files,
-            bodies,
+            bodies: meta.bodies,
             contiguous: true,
         });
     }
-    let mut per_commit = Vec::with_capacity(oids.len());
-    for oid in oids.iter().rev() {
-        per_commit.push(changed_files(root, oid)?);
-    }
+    // Single-process batch diff-tree across all non-contiguous commits in oldest -> newest order.
+    let stdin_data = build_diff_tree_stdin(oids, &meta.first_parents);
+    let mut cmd = diff_tree(root);
+    cmd.args(["--name-status", "-z", "--stdin"]);
+    let raw = run_with_stdin(&mut cmd, &stdin_data).map_err(|err| {
+        if err.contains("bad object") || err.contains("Invalid revision") {
+            "本地缺少父提交，无法比较这次变更（浅克隆或对象缺失）".to_owned()
+        } else {
+            err
+        }
+    })?;
+    let flat_files = parse_name_status_z(&raw)?;
     Ok(CommitChangesBundle {
-        files: merge_changed_files(per_commit),
-        bodies,
+        files: merge_changed_files_flat(flat_files),
+        bodies: meta.bodies,
         contiguous: false,
     })
 }
@@ -628,56 +690,58 @@ pub fn file_diff_for_commits(
     if oids.len() == 1 {
         return file_diff(root, &oids[0], file);
     }
-    if let Some(base) = contiguous_range_base(root, oids)? {
+    let meta = read_commit_meta_batch(root, oids, false)?;
+    let oldest = oids.last().expect("at least two oids");
+    let oldest_parent = meta.first_parents.get(oldest).and_then(|p| p.as_deref());
+    if let Some(base) = contiguous_range_base(root, oids, oldest_parent)? {
         let mut cmd = diff_tree(root);
         cmd.args([&base, &oids[0]]);
         return file_diff_from(&mut cmd, file);
     }
-    let mut sections: Vec<(String, String)> = Vec::new();
-    for oid in oids.iter().rev() {
-        let commit_files = changed_files(root, oid)?;
-        let matching = commit_files.into_iter().find(|entry| {
-            entry.path == file.path
-                || file
-                    .previous_path
-                    .as_ref()
-                    .is_some_and(|prev| &entry.path == prev)
-                || entry
-                    .previous_path
-                    .as_ref()
-                    .is_some_and(|prev| prev == &file.path)
-        });
-        if let Some(matched) = matching {
-            let patch = file_diff(root, oid, &matched)?;
-            if !patch.trim().is_empty() {
-                sections.push((oid.clone(), patch));
-            }
-        }
-    }
-    if sections.is_empty() {
+    // Single-process batch patch for the selected file across all non-contiguous commits.
+    let stdin_data = build_diff_tree_stdin(oids, &meta.first_parents);
+    let mut cmd = read_command(root);
+    cmd.args([
+        "diff-tree",
+        "--root",
+        "-r",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+        "--find-renames",
+        "--format=commit %h",
+        "--stdin",
+    ]);
+    let raw = file_diff_from_with_stdin(&mut cmd, file, Some(&stdin_data))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
         return Ok(String::new());
     }
-    if sections.len() == 1 {
-        return Ok(sections.remove(0).1);
+    // When only one commit touched this file, strip the leading `commit <short>` banner so it
+    // renders identically to a single-commit diff.
+    let commit_headers = raw
+        .lines()
+        .filter(|line| line.starts_with("commit "))
+        .count();
+    if commit_headers == 1
+        && let Some(idx) = raw.find("\ndiff --git ")
+    {
+        return Ok(raw[idx + 1..].to_owned());
     }
-    let mut combined = String::new();
-    for (idx, (oid, patch)) in sections.into_iter().enumerate() {
-        if idx > 0 {
-            combined.push('\n');
-        }
-        let short = oid.get(..8).unwrap_or(&oid);
-        combined.push_str(&format!("commit {short}\n"));
-        combined.push_str(&patch);
-    }
-    Ok(combined)
+    Ok(raw)
 }
 
 pub(crate) fn changed_files_from(cmd: &mut Command) -> Result<Vec<ChangedFile>, String> {
     let data = run(cmd.args(["--name-status", "-z", "--"]))?;
+    parse_name_status_z(&data)
+}
+
+fn parse_name_status_z(data: &[u8]) -> Result<Vec<ChangedFile>, String> {
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    let mut iter = fields(&data);
+    let mut iter = fields(data);
     let mut result = Vec::new();
     while let Some(code) = iter.next() {
         let status = std::str::from_utf8(code)
@@ -730,6 +794,14 @@ fn file_pathspec(path: &Path) -> Result<OsString, String> {
 }
 
 pub(crate) fn file_diff_from(cmd: &mut Command, file: &ChangedFile) -> Result<String, String> {
+    file_diff_from_with_stdin(cmd, file, None)
+}
+
+fn file_diff_from_with_stdin(
+    cmd: &mut Command,
+    file: &ChangedFile,
+    stdin_input: Option<&[u8]>,
+) -> Result<String, String> {
     cmd.env_remove("GIT_LITERAL_PATHSPECS")
         .args(["--patch", "--"]);
     if let Some(old) = &file.previous_path {
@@ -738,10 +810,21 @@ pub(crate) fn file_diff_from(cmd: &mut Command, file: &ChangedFile) -> Result<St
     cmd.arg(file_pathspec(&file.path)?)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if stdin_input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let stdin_pipe = child.stdin.take();
     let stdout = child.stdout.take().expect("piped Git stdout");
     let mut stderr = child.stderr.take().expect("piped Git stderr");
     let (result, error) = std::thread::scope(|scope| {
+        let writer = stdin_input.and_then(|bytes| {
+            stdin_pipe.map(|mut pipe| {
+                scope.spawn(move || {
+                    let _ = pipe.write_all(bytes);
+                })
+            })
+        });
         let errors = scope.spawn(move || {
             let mut error = Vec::new();
             let _ = stderr.read_to_end(&mut error);
@@ -752,6 +835,9 @@ pub(crate) fn file_diff_from(cmd: &mut Command, file: &ChangedFile) -> Result<St
         let truncated = output.len() as u64 > PATCH_LIMIT;
         if truncated || read.is_err() {
             let _ = child.kill();
+        }
+        if let Some(handle) = writer {
+            let _ = handle.join();
         }
         let status = child.wait();
         let error = errors.join().unwrap_or_default();

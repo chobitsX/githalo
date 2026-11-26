@@ -954,8 +954,10 @@ impl DesktopView {
                                         count,
                                         move |range, _, _| {
                                             range
-                                                .filter_map(|index| patch.lines.get(index))
-                                                .map(|line| line.row())
+                                                .filter_map(|index| {
+                                                    let line = patch.lines.get(index)?;
+                                                    Some(line.row(patch.unified_syntax(index)))
+                                                })
                                                 .collect::<Vec<_>>()
                                         },
                                     )

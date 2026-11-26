@@ -6,16 +6,33 @@
 
 use std::path::Path;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, Theme, ThemeSet};
-use syntect::parsing::{SyntaxReference, SyntaxSet};
+use syntect::highlighting::{
+    FontStyle, HighlightIterator, HighlightState, Highlighter, Theme, ThemeSet,
+};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 /// Cap full-file syntax highlighting at 8,000 lines so huge logs/dumps stay instant.
 const MAX_HIGHLIGHT_LINES: usize = 8_000;
+/// Cap per-stream diff highlighting lines so massive patches stay responsive.
+const MAX_DIFF_HIGHLIGHT_LINES: usize = 3_000;
 /// Cap per-line tokenizing at 4 KiB so minified single-line bundles never stall regex engines.
 const MAX_LINE_BYTES: usize = 4_096;
+/// Reset `syntect`'s parser when scope nesting exceeds this depth; `syntect` 5.3 can enter
+/// pathological backtracking / non-consuming loops near its internal stack cap (100) on
+/// fragmented diff hunks or unmatched brackets.
+const MAX_SCOPE_DEPTH: usize = 24;
+/// If consecutive lines take longer than this to parse, the internal `with_prototype` stack is
+/// bloated even without deep scopes — reset state before the next line can stall. Using a
+/// two-line streak avoids false resets when `syntect` lazily compiles regexes on first entry
+/// into an embedded syntax (e.g. `<style>` CSS or `<script>` JS).
+const SLOW_LINE_RESET_THRESHOLD: Duration = Duration::from_millis(40);
+/// Hard wall-clock budget for a background full-document highlight pass.
+const DOCUMENT_HIGHLIGHT_BUDGET: Duration = Duration::from_millis(600);
+/// Hard wall-clock budget for a single background diff stream highlight pass.
+const DIFF_HIGHLIGHT_BUDGET: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SyntaxSpan {
@@ -224,50 +241,94 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-fn highlight_single_line(
-    highlighter: &mut HighlightLines<'_>,
-    syntaxes: &SyntaxSet,
-    raw_line: &str,
-    content_len: usize,
-    light: bool,
-) -> Vec<SyntaxSpan> {
-    if content_len == 0 {
-        return Vec::new();
-    }
-    let sample = if raw_line.len() > MAX_LINE_BYTES {
-        truncate_to_char_boundary(raw_line, MAX_LINE_BYTES)
-    } else {
-        raw_line
-    };
-    let Ok(ranges) = highlighter.highlight_line(sample, syntaxes) else {
-        return Vec::new();
-    };
-    let mut spans = Vec::with_capacity(ranges.len());
-    let mut offset = 0usize;
-    for (style, segment) in ranges {
-        let seg_len = segment.len();
-        let start = offset;
-        let end = (offset + seg_len).min(content_len);
-        offset += seg_len;
-        if start >= content_len || start >= end {
-            continue;
+struct SafeLineHighlighter<'a> {
+    highlighter: Highlighter<'a>,
+    syntax: &'a SyntaxReference,
+    parse_state: ParseState,
+    highlight_state: HighlightState,
+    slow_streak: u8,
+}
+
+impl<'a> SafeLineHighlighter<'a> {
+    fn new(syntax: &'a SyntaxReference, theme: &'a Theme) -> Self {
+        let highlighter = Highlighter::new(theme);
+        let highlight_state = HighlightState::new(&highlighter, ScopeStack::new());
+        Self {
+            highlighter,
+            syntax,
+            parse_state: ParseState::new(syntax),
+            highlight_state,
+            slow_streak: 0,
         }
-        let color = if light {
-            adjust_light_fg(style.foreground.r, style.foreground.g, style.foreground.b)
-        } else {
-            adjust_dark_fg(style.foreground.r, style.foreground.g, style.foreground.b)
-        };
-        let bold = style.font_style.contains(FontStyle::BOLD);
-        let italic = style.font_style.contains(FontStyle::ITALIC);
-        spans.push(SyntaxSpan {
-            start,
-            end,
-            color,
-            bold,
-            italic,
-        });
     }
-    spans
+
+    fn reset(&mut self) {
+        self.parse_state = ParseState::new(self.syntax);
+        self.highlight_state = HighlightState::new(&self.highlighter, ScopeStack::new());
+        self.slow_streak = 0;
+    }
+
+    fn highlight_line(
+        &mut self,
+        syntaxes: &SyntaxSet,
+        raw_line: &str,
+        content_len: usize,
+        light: bool,
+    ) -> Vec<SyntaxSpan> {
+        if content_len == 0 {
+            return Vec::new();
+        }
+        let sample = if raw_line.len() > MAX_LINE_BYTES {
+            truncate_to_char_boundary(raw_line, MAX_LINE_BYTES)
+        } else {
+            raw_line
+        };
+        let line_start = Instant::now();
+        let Ok(ops) = self.parse_state.parse_line(sample, syntaxes) else {
+            self.reset();
+            return Vec::new();
+        };
+        let iter = HighlightIterator::new(
+            &mut self.highlight_state,
+            &ops[..],
+            sample,
+            &self.highlighter,
+        );
+        let mut spans = Vec::new();
+        let mut offset = 0usize;
+        for (style, segment) in iter {
+            let seg_len = segment.len();
+            let start = offset;
+            let end = (offset + seg_len).min(content_len);
+            offset += seg_len;
+            if start >= content_len || start >= end {
+                continue;
+            }
+            let color = if light {
+                adjust_light_fg(style.foreground.r, style.foreground.g, style.foreground.b)
+            } else {
+                adjust_dark_fg(style.foreground.r, style.foreground.g, style.foreground.b)
+            };
+            let bold = style.font_style.contains(FontStyle::BOLD);
+            let italic = style.font_style.contains(FontStyle::ITALIC);
+            spans.push(SyntaxSpan {
+                start,
+                end,
+                color,
+                bold,
+                italic,
+            });
+        }
+        if line_start.elapsed() > SLOW_LINE_RESET_THRESHOLD {
+            self.slow_streak = self.slow_streak.saturating_add(1);
+        } else {
+            self.slow_streak = 0;
+        }
+        if self.highlight_state.path.len() > MAX_SCOPE_DEPTH || self.slow_streak >= 2 {
+            self.reset();
+        }
+        spans
+    }
 }
 
 /// Highlight an entire document preserving multi-line syntax state (e.g. HTML `<style>` CSS,
@@ -288,7 +349,7 @@ pub fn highlight_document_for_theme(path: &Path, text: &str, light: bool) -> Vec
     } else {
         &eng.dark_theme
     };
-    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut highlighter = SafeLineHighlighter::new(syntax, theme);
     let mut result = Vec::new();
 
     if text.is_empty() {
@@ -296,14 +357,20 @@ pub fn highlight_document_for_theme(path: &Path, text: &str, light: bool) -> Vec
         return result;
     }
 
+    let started = Instant::now();
+    let mut budget_exceeded = false;
     for (idx, line_with_ending) in LinesWithEndings::from(text).enumerate() {
         let content_len = line_with_ending.trim_end_matches(['\r', '\n']).len();
-        if idx >= MAX_HIGHLIGHT_LINES {
+        if idx >= MAX_HIGHLIGHT_LINES || budget_exceeded {
             result.push(Vec::new());
             continue;
         }
-        result.push(highlight_single_line(
-            &mut highlighter,
+        if idx > 0 && idx % 64 == 0 && started.elapsed() >= DOCUMENT_HIGHLIGHT_BUDGET {
+            budget_exceeded = true;
+            result.push(Vec::new());
+            continue;
+        }
+        result.push(highlighter.highlight_line(
             &eng.syntaxes,
             line_with_ending,
             content_len,
@@ -327,6 +394,23 @@ pub fn highlight_code_lines_for_theme(
     lines: &[&str],
     light: bool,
 ) -> Vec<Vec<SyntaxSpan>> {
+    let segments: Vec<(&str, bool)> = lines.iter().map(|&line| (line, false)).collect();
+    highlight_code_segments_for_theme(path, &segments, light)
+}
+
+/// Highlight a sequence of segmented code lines (without trailing newlines) where each entry is
+/// `(line, reset_state_before)`. Resetting parser state at diff hunk boundaries prevents
+/// unmatched brackets from accumulating across disconnected hunks.
+pub fn highlight_code_segments(path: &Path, lines: &[(&str, bool)]) -> Vec<Vec<SyntaxSpan>> {
+    highlight_code_segments_for_theme(path, lines, crate::theme::is_light())
+}
+
+/// Highlight segmented code lines with an explicit light/dark theme selection.
+pub fn highlight_code_segments_for_theme(
+    path: &Path,
+    lines: &[(&str, bool)],
+    light: bool,
+) -> Vec<Vec<SyntaxSpan>> {
     let eng = engine();
     let syntax = find_syntax(&eng.syntaxes, path);
     let theme = if light {
@@ -334,11 +418,24 @@ pub fn highlight_code_lines_for_theme(
     } else {
         &eng.dark_theme
     };
-    let mut highlighter = HighlightLines::new(syntax, theme);
+    let mut highlighter = SafeLineHighlighter::new(syntax, theme);
     let mut result = Vec::with_capacity(lines.len());
     let mut buf = String::new();
-    for (idx, &line) in lines.iter().enumerate() {
-        if idx >= MAX_HIGHLIGHT_LINES || line.is_empty() {
+    let started = Instant::now();
+    let mut budget_exceeded = false;
+    for (idx, &(line, reset_before)) in lines.iter().enumerate() {
+        if idx >= MAX_DIFF_HIGHLIGHT_LINES || budget_exceeded || line.is_empty() {
+            if reset_before && !budget_exceeded && idx < MAX_DIFF_HIGHLIGHT_LINES {
+                highlighter.reset();
+            }
+            result.push(Vec::new());
+            continue;
+        }
+        if reset_before {
+            highlighter.reset();
+        }
+        if idx > 0 && idx % 32 == 0 && started.elapsed() >= DIFF_HIGHLIGHT_BUDGET {
+            budget_exceeded = true;
             result.push(Vec::new());
             continue;
         }
@@ -346,13 +443,7 @@ pub fn highlight_code_lines_for_theme(
         buf.clear();
         buf.push_str(sample);
         buf.push('\n');
-        result.push(highlight_single_line(
-            &mut highlighter,
-            &eng.syntaxes,
-            &buf,
-            sample.len(),
-            light,
-        ));
+        result.push(highlighter.highlight_line(&eng.syntaxes, &buf, sample.len(), light));
     }
     result
 }
@@ -401,6 +492,47 @@ mod tests {
             assert!(long_line.is_char_boundary(span.start));
             assert!(long_line.is_char_boundary(span.end));
         }
+    }
+
+    #[test]
+    fn deeply_unclosed_js_fragments_never_hang_syntect() {
+        // Simulate dozens of disconnected hunks opening blocks/parens without closing them,
+        // followed by arrow functions inside `useMemo(...)` — the exact pattern that previously
+        // drove `syntect`'s parser stack to 100 and triggered an infinite loop.
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..80 {
+            lines.push(format!("  if (cond_{i} && check({i})) {{"));
+            lines.push(format!("    const fn_{i} = (arg = {{}}) => {{"));
+        }
+        lines.push("    const quickButtonMessage = useMemo(".to_owned());
+        lines.push(
+            "      () => showRecommendQuickButton && this.getLastRecommendQuickButtonSourceMessage(validMessages),"
+                .to_owned(),
+        );
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let started = Instant::now();
+        let spans = highlight_code_lines(Path::new("pages/room/index.js"), &refs);
+        assert_eq!(spans.len(), refs.len());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "highlighting unclosed JS fragments took too long: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn segmented_highlighting_resets_unclosed_multiline_comment_across_hunks() {
+        let segments = [
+            ("/* unclosed comment from hunk 1", true),
+            ("   still comment in hunk 1", false),
+            ("const value = 42;", true),
+        ];
+        let res = highlight_code_segments(Path::new("app.js"), &segments);
+        assert_eq!(res.len(), 3);
+        // After reset on hunk 2, `const value = 42;` must be tokenized as code (multiple colors),
+        // not swallowed into the unclosed comment from hunk 1.
+        let colors: std::collections::BTreeSet<u32> = res[2].iter().map(|s| s.color).collect();
+        assert!(colors.len() >= 2);
     }
 
     #[test]

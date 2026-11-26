@@ -11,6 +11,10 @@ mod status;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::SystemTime;
 
 use crate::git::{self, FetchOutcome};
@@ -29,7 +33,9 @@ pub use crate::worktree::WorktreeId;
 use crate::worktree::{SyncSnapshot, UpstreamConfig, WorktreeTarget};
 use async_channel::Receiver;
 pub use cherry_pick::{CherryPickAction, CherryPickState};
-pub use daily::{CommitReceipt, DailyAction, DailyReview, DailyState, ReviewKind};
+pub use daily::{
+    ActiveWrite, CommitReceipt, DailyAction, DailyReview, DailyState, ReviewKind, WriteKind,
+};
 pub use repo_ops::{RepoOpAction, RepoOpPreview, RepoOpsState};
 use runtime::Runtime;
 pub use shelves::{ShelfAction, ShelfState};
@@ -329,6 +335,9 @@ pub struct Workspace {
     changes_request: u64,
     commit_refs_request: u64,
     patch_request: u64,
+    latest_changes_request: Arc<AtomicU64>,
+    latest_commit_refs_request: Arc<AtomicU64>,
+    latest_patch_request: Arc<AtomicU64>,
     dir_requests: BTreeMap<PathBuf, u64>,
     project_status_request: u64,
     project_file_requests: BTreeMap<PathBuf, u64>,
@@ -407,6 +416,9 @@ impl Workspace {
                 changes_request: 0,
                 commit_refs_request: 0,
                 patch_request: 0,
+                latest_changes_request: Arc::new(AtomicU64::new(0)),
+                latest_commit_refs_request: Arc::new(AtomicU64::new(0)),
+                latest_patch_request: Arc::new(AtomicU64::new(0)),
                 dir_requests: BTreeMap::new(),
                 project_status_request: 0,
                 project_file_requests: BTreeMap::new(),

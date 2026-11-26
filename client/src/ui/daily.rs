@@ -504,8 +504,8 @@ struct WorkingPatch {
 }
 
 impl WorkingPatch {
-    fn new(diff: Arc<ChangeDiff>) -> Self {
-        let patch = ParsedPatch::for_path(&diff.text, Some(diff.file.path.as_path()));
+    fn new_async(diff: Arc<ChangeDiff>) -> (Self, Option<super::history::DiffSyntaxJob>) {
+        let (patch, job) = ParsedPatch::for_path_async(&diff.text, Some(diff.file.path.as_path()));
         let mut hunks = diff.hunks.iter();
         let mut headers = BTreeMap::new();
         for (index, line) in patch.lines.iter().enumerate() {
@@ -526,12 +526,15 @@ impl WorkingPatch {
                 split_headers.insert(index, hunk.id);
             }
         }
-        Self {
-            diff,
-            patch,
-            headers,
-            split_headers,
-        }
+        (
+            Self {
+                diff,
+                patch,
+                headers,
+                split_headers,
+            },
+            job,
+        )
     }
 }
 
@@ -672,7 +675,13 @@ impl DesktopView {
         }
         let previous = self.daily_ui.patch.as_ref().map(|patch| &patch.diff);
         if !same_arc(previous, diff) {
-            self.daily_ui.patch = diff.cloned().map(WorkingPatch::new);
+            if let Some(diff) = diff.cloned() {
+                let (working, job) = WorkingPatch::new_async(diff);
+                self.schedule_patch_highlight(&working.patch, job, cx);
+                self.daily_ui.patch = Some(working);
+            } else {
+                self.daily_ui.patch = None;
+            }
             self.daily_ui.selected_hunks.clear();
             self.daily_ui.patch_scroll = UniformListScrollHandle::new();
         }
@@ -681,7 +690,10 @@ impl DesktopView {
         {
             self.daily_ui.review_patch = review.and_then(|review| match &review.kind {
                 ReviewKind::Commit { preview, .. } => {
-                    Some((review.id, Rc::new(ParsedPatch::new(&preview.text))))
+                    let (patch, job) = ParsedPatch::new_async(&preview.text);
+                    let patch = Rc::new(patch);
+                    self.schedule_patch_highlight(&patch, job, cx);
+                    Some((review.id, patch))
                 }
                 ReviewKind::Remote(_) => None,
             });
@@ -2560,9 +2572,16 @@ impl DesktopView {
                                                 Some(view.hunk_row(patch, *id, text.as_ref(), cx))
                                             } else {
                                                 let meta = patch.patch.split_meta.get(index);
+                                                let (left_syntax, right_syntax) =
+                                                    patch.patch.split_syntax(index);
                                                 Some(
-                                                    row.render_modern(meta, scroll_x)
-                                                        .into_any_element(),
+                                                    row.render_modern(
+                                                        meta,
+                                                        scroll_x,
+                                                        left_syntax,
+                                                        right_syntax,
+                                                    )
+                                                    .into_any_element(),
                                                 )
                                             }
                                         })
@@ -2592,7 +2611,8 @@ impl DesktopView {
                         Some(if let Some(id) = patch.headers.get(&index) {
                             view.hunk_row(patch, *id, line.text.as_ref(), cx)
                         } else {
-                            line.row().into_any_element()
+                            line.row(patch.patch.unified_syntax(index))
+                                .into_any_element()
                         })
                     })
                     .collect::<Vec<_>>()
