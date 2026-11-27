@@ -173,7 +173,6 @@ pub(super) fn bind_keys(cx: &mut App) {
     cx.on_action(|_: &HideApp, cx| cx.hide());
     cx.on_action(|_: &HideOtherApps, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAllApps, cx| cx.unhide_other_apps());
-    cx.on_action(|_: &CheckForUpdates, cx| cx.open_url(RELEASES_URL));
     cx.on_action(|_: &OpenGitHub, cx| cx.open_url(GITHUB_URL));
     cx.on_action(|_: &OpenReleases, cx| cx.open_url(RELEASES_URL));
     cx.on_action(|_: &ReportIssue, cx| cx.open_url(ISSUES_URL));
@@ -393,6 +392,9 @@ impl DesktopView {
     ) -> Stateful<Div> {
         root.on_action(cx.listener(|view, _: &OpenAbout, window, cx| {
             view.open_confirmation(Dialog::About, window, cx);
+        }))
+        .on_action(cx.listener(|view, _: &CheckForUpdates, window, cx| {
+            view.open_update_dialog(window, cx);
         }))
         .on_action(cx.listener(|view, _: &OpenSettings, window, cx| {
             view.open_settings_dialog(window, cx);
@@ -768,6 +770,16 @@ impl DesktopView {
                                     .to_owned(),
                             );
                             cx.notify();
+                        })),
+                    )
+                    .child(
+                        text_button(
+                            "about-check-updates",
+                            tr("检查更新…", "Check for Updates…"),
+                            false,
+                        )
+                        .on_click(cx.listener(|view, _, window, cx| {
+                            view.open_update_dialog(window, cx);
                         })),
                     )
                     .child(

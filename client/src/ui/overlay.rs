@@ -180,6 +180,7 @@ pub(super) enum Dialog {
     Settings,
     About,
     Shortcuts,
+    AppUpdate,
 }
 
 thread_local! {
@@ -2546,6 +2547,12 @@ impl DesktopView {
                     .aria_label(tr("快捷键一览", "Keyboard Shortcuts"))
                     .w(px(560.))
                     .child(self.shortcuts_dialog(cx));
+            }
+            Dialog::AppUpdate => {
+                container = container
+                    .aria_label(tr("软件更新", "Software Update"))
+                    .w(px(500.))
+                    .child(self.app_update_dialog(cx));
             }
         }
         container

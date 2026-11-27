@@ -3630,6 +3630,80 @@ impl DesktopView {
                         )),
                     ),
             )
+            // 3. Software Update
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .child(settings_section_label(tr("软件更新", "SOFTWARE UPDATE")))
+                    .child(
+                        settings_card()
+                            .child(settings_toggle_row(
+                                "settings-toggle-auto-updates",
+                                tr("自动检查新版本", "Automatically Check for Updates"),
+                                tr(
+                                    "启动后在后台静默检查 GitHub Releases 新版本（每 6 小时最多一次），绝不打断工作",
+                                    "Silently check GitHub Releases in the background on launch (at most once every 6 hours)",
+                                ),
+                                None,
+                                self.auto_check_updates,
+                                false,
+                                cx.listener(|view, _, _, cx| {
+                                    view.auto_check_updates = !view.auto_check_updates;
+                                    view.save_preferences();
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(
+                                div()
+                                    .border_t_1()
+                                    .border_color(rgb(theme().border))
+                                    .px(px(14.))
+                                    .py(px(11.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(12.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.5))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(rgb(theme().text))
+                                                    .child(format!(
+                                                        "{} v{}",
+                                                        tr("当前版本", "Current Version"),
+                                                        env!("CARGO_PKG_VERSION")
+                                                    )),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(11.))
+                                                    .text_color(rgb(theme().subtle))
+                                                    .child(tr(
+                                                        "支持应用内下载、校验并一键重启更新",
+                                                        "Download, verify, and restart to update in-app",
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        text_button(
+                                            "settings-check-updates-now",
+                                            tr("检查更新…", "Check Now…"),
+                                            false,
+                                        )
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.open_update_dialog(window, cx);
+                                        })),
+                                    ),
+                            ),
+                    ),
+            )
     }
 
     fn settings_workspace_pane(&self, cx: &mut Context<Self>) -> Div {

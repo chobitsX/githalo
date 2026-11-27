@@ -217,6 +217,12 @@ pub struct AppPreferences {
     pub commit_no_verify: bool,
     pub commit_show_conventional: bool,
     pub show_changes_to_parents: bool,
+    /// 启动后在后台静默检查 GitHub 新版本（默认开启）。
+    pub auto_check_updates: bool,
+    /// 上次自动检查更新的 Unix 秒时间戳（用于 6 小时冷却节流）。
+    pub last_update_check_epoch: u64,
+    /// 用户主动选择「跳过此版本」的版本号（如 `0.8.1`）。
+    pub skipped_update_version: String,
     /// Custom drag-and-drop repository order per group (`0` = ungrouped, `> 0` = GroupId).
     pub group_repo_order: BTreeMap<i64, Vec<i64>>,
     /// Custom drag-and-drop nested child order per parent worktree ID (pinned ahead of alphabetical).
@@ -261,6 +267,9 @@ impl Default for AppPreferences {
             commit_no_verify: false,
             commit_show_conventional: false,
             show_changes_to_parents: false,
+            auto_check_updates: true,
+            last_update_check_epoch: 0,
+            skipped_update_version: String::new(),
             group_repo_order: BTreeMap::new(),
             nested_repo_order: BTreeMap::new(),
         }
@@ -333,6 +342,15 @@ impl AppPreferences {
                 "commit_no_verify" => prefs.commit_no_verify = parse_bool(value),
                 "commit_show_conventional" => prefs.commit_show_conventional = parse_bool(value),
                 "show_changes_to_parents" => prefs.show_changes_to_parents = parse_bool(value),
+                "auto_check_updates" => prefs.auto_check_updates = parse_bool(value),
+                "last_update_check_epoch" => {
+                    if let Ok(ts) = value.trim().parse::<u64>() {
+                        prefs.last_update_check_epoch = ts;
+                    }
+                }
+                "skipped_update_version" => {
+                    prefs.skipped_update_version = value.trim().to_owned();
+                }
                 other => {
                     if let Some(raw_group) = other.strip_prefix("group_repo_order_")
                         && let Ok(group_key) = raw_group.parse::<i64>()
@@ -375,7 +393,7 @@ impl AppPreferences {
             .collect::<Vec<_>>()
             .join(",");
         let mut content = format!(
-            "language={}\ntheme={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nshow_branches_drawer={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\nshow_changes_to_parents={}\n",
+            "language={}\ntheme={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nshow_branches_drawer={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\nshow_changes_to_parents={}\nauto_check_updates={}\nlast_update_check_epoch={}\nskipped_update_version={}\n",
             self.language.as_key(),
             self.theme.as_key(),
             normalize_ui_scale(self.ui_scale),
@@ -396,6 +414,9 @@ impl AppPreferences {
             self.commit_no_verify,
             self.commit_show_conventional,
             self.show_changes_to_parents,
+            self.auto_check_updates,
+            self.last_update_check_epoch,
+            self.skipped_update_version,
         );
         for (&group_key, ids) in &self.group_repo_order {
             if !ids.is_empty() {
@@ -491,6 +512,9 @@ mod tests {
             commit_no_verify: true,
             commit_show_conventional: true,
             show_changes_to_parents: true,
+            auto_check_updates: false,
+            last_update_check_epoch: 1_795_740_000,
+            skipped_update_version: "0.8.1".to_owned(),
             group_repo_order,
             nested_repo_order,
         };

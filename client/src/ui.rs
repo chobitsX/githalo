@@ -19,6 +19,7 @@ mod shelf;
 mod sidebar;
 mod stash;
 mod text_field;
+mod updater_ui;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -109,6 +110,7 @@ enum PaletteCommand {
     SetTheme(ThemePreference),
     OpenSettings,
     OpenShortcuts,
+    CheckForUpdates,
     OpenAbout,
 }
 
@@ -257,6 +259,10 @@ pub struct DesktopView {
     pub(super) multi_commit_details_drag: Option<(Pixels, Pixels)>,
     pub(super) pending_push_commit: Option<WorktreeTarget>,
     pub(super) hovered_hint: Option<String>,
+    pub(super) auto_check_updates: bool,
+    pub(super) last_update_check_epoch: u64,
+    pub(super) skipped_update_version: String,
+    app_update: updater_ui::AppUpdateState,
     last_activation_reload: Option<Instant>,
 }
 
@@ -448,9 +454,14 @@ impl DesktopView {
             multi_commit_details_drag: None,
             pending_push_commit: None,
             hovered_hint: None,
+            auto_check_updates: prefs.auto_check_updates,
+            last_update_check_epoch: prefs.last_update_check_epoch,
+            skipped_update_version: prefs.skipped_update_version,
+            app_update: updater_ui::AppUpdateState::Idle,
             last_activation_reload: Some(Instant::now()),
         };
         view.refresh_app_menus(cx);
+        view.schedule_auto_update_check(cx);
         view
     }
 
@@ -499,6 +510,9 @@ impl DesktopView {
             commit_no_verify: self.commit_no_verify,
             commit_show_conventional: self.commit_show_conventional,
             show_changes_to_parents: self.workspace.show_changes_to_parents,
+            auto_check_updates: self.auto_check_updates,
+            last_update_check_epoch: self.last_update_check_epoch,
+            skipped_update_version: self.skipped_update_version.clone(),
             group_repo_order: self.group_repo_order.clone(),
             nested_repo_order: self.nested_repo_order.clone(),
         };
@@ -1122,6 +1136,20 @@ impl DesktopView {
             },
             PaletteEntry {
                 category: tr("系统", "App"),
+                title: tr("检查软件更新…", "Check for Updates…").into(),
+                subtitle: Some(
+                    tr(
+                        "检测 GitHub 新版本并支持应用内一键下载更新",
+                        "Check GitHub Releases & update in-app",
+                    )
+                    .into(),
+                ),
+                shortcut: None,
+                icon: Icon::Refresh,
+                cmd: PaletteCommand::CheckForUpdates,
+            },
+            PaletteEntry {
+                category: tr("系统", "App"),
                 title: tr("查看快捷键一览…", "Keyboard Shortcuts…").into(),
                 subtitle: None,
                 shortcut: None,
@@ -1277,6 +1305,7 @@ impl DesktopView {
             PaletteCommand::SetTheme(pref) => self.set_theme(pref, window, cx),
             PaletteCommand::OpenSettings => self.open_settings_dialog(window, cx),
             PaletteCommand::OpenShortcuts => self.open_confirmation(Dialog::Shortcuts, window, cx),
+            PaletteCommand::CheckForUpdates => self.open_update_dialog(window, cx),
             PaletteCommand::OpenAbout => self.open_confirmation(Dialog::About, window, cx),
         }
     }
@@ -1867,6 +1896,7 @@ impl DesktopView {
                 },
             ))
             .children(action_group)
+            .children(self.topbar_update_pill(cx))
             .child(
                 div()
                     .id("command-palette-trigger")
