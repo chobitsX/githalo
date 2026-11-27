@@ -248,6 +248,10 @@ enum Event {
     StatusUnchanged {
         target: WorktreeTarget,
     },
+    DirtyCount {
+        target: WorktreeTarget,
+        result: Result<git::LocalChangesCount, String>,
+    },
     Noop,
     Fetched {
         before: SyncSnapshot,
@@ -689,6 +693,7 @@ impl Workspace {
                 to_check.push(id);
             } else {
                 row.stale = true;
+                row.dirty_stale = true;
             }
         }
         // Prioritize the currently selected worktree first so its status settles immediately.
@@ -699,6 +704,10 @@ impl Workspace {
         }
         for id in to_check {
             self.start_status_if_changed(id);
+            // 当前选中仓已通过 `load_working_changes()` 同步精确改动数，无需重复扫描。
+            if Some(id) != selected {
+                self.start_dirty_check(id);
+            }
         }
     }
 
@@ -784,6 +793,13 @@ impl Workspace {
                             .is_some_and(|r| r.stale || !r.has_status())
                         {
                             self.start_status_if_changed(repo_id);
+                        }
+                        if Some(repo_id) != self.selected
+                            && self
+                                .repo(repo_id)
+                                .is_some_and(|r| r.dirty_stale || r.local_changes.is_none())
+                        {
+                            self.start_dirty_check(repo_id);
                         }
                     }
                 } else {
@@ -1048,6 +1064,13 @@ impl Workspace {
                         if self.repo(child).is_some_and(|r| r.stale || !r.has_status()) {
                             self.start_status_if_changed(child);
                         }
+                        if Some(child) != self.selected
+                            && self
+                                .repo(child)
+                                .is_some_and(|r| r.dirty_stale || r.local_changes.is_none())
+                        {
+                            self.start_dirty_check(child);
+                        }
                     }
                 } else {
                     self.edit_catalog(move |db| db.toggle_nested_expanded(parent));
@@ -1203,6 +1226,7 @@ impl Workspace {
                 stamp,
             } => self.apply_status(snapshot, common, stamp),
             Event::StatusUnchanged { target } => self.apply_status_unchanged(target),
+            Event::DirtyCount { target, result } => self.apply_dirty_count(target, result),
             Event::Noop => {}
             Event::Fetched {
                 before,
@@ -1428,8 +1452,15 @@ impl Workspace {
                 2u8
             }
         });
+        for id in &reads {
+            self.start_status(*id);
+        }
+        // 低并发独立后台池按「展开可见优先、折叠滞后」渐进扫描本地改动数；
+        // 当前选中仓由 `load_working_changes` 直接喂数，跳过重复执行。
         for id in reads {
-            self.start_status(id);
+            if Some(id) != selected {
+                self.start_dirty_check(id);
+            }
         }
         self.bump_board_version();
         // Trigger low-priority async nested scan once per top-level worktree revision.

@@ -46,6 +46,8 @@ impl Pool {
 
 pub(super) struct Runtime {
     pub(super) status: Pool,
+    /// 低并发独立线程池：专用于后台轻量统计各仓库本地改动数，绝不阻塞主线程或核心状态/详情池。
+    pub(super) dirty: Pool,
     pub(super) detail: Pool,
     pub(super) fetch: Pool,
     pub(super) write: Pool,
@@ -122,10 +124,12 @@ impl Runtime {
             .map(std::num::NonZeroUsize::get)
             .unwrap_or(4);
         let status_threads = cpus.clamp(4, 8);
+        let dirty_threads = (cpus / 3).clamp(2, 3);
         let fetch_threads = (cpus / 2).clamp(4, 6);
         (
             Self {
                 status: Pool::new("status", status_threads, events.clone()),
+                dirty: Pool::new("dirty", dirty_threads, events.clone()),
                 detail: Pool::new("details", 2, events.clone()),
                 fetch: Pool::new("fetch", fetch_threads, events.clone()),
                 // Allow concurrent writes across distinct repositories (e.g. pulling one sub-repo

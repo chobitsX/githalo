@@ -1936,7 +1936,7 @@ impl DesktopView {
                 Some(theme().error)
             } else if counts.commit_files > 0 {
                 Some(theme().link)
-            } else if counts.diverged_repos > 0 {
+            } else if counts.actionable_repos > 0 {
                 Some(theme().brand)
             } else {
                 None

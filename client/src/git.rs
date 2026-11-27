@@ -168,6 +168,15 @@ pub struct SyncReadResult {
     pub stamp: Option<RepoStateStamp>,
 }
 
+/// 仓库本地未提交改动计数摘要（用于侧边栏仓库/子仓列表轻量展示）。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LocalChangesCount {
+    /// 本地改动条目数（最多统计至 999，防止超大工作区占用过多内存）。
+    pub files: usize,
+    /// 是否存在未解决冲突条目（`DD`/`AU`/`UD`/`UA`/`DU`/`AA`/`UU`）。
+    pub has_conflicts: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FetchOutcome {
     /// Git confirmed the source ref at its configured local tracking ref.
@@ -245,6 +254,81 @@ pub fn read_sync_with_common(target: &WorktreeTarget) -> SyncReadResult {
         },
         common: Some(resolved.common_dir),
         stamp,
+    }
+}
+
+const LOCAL_CHANGES_SCAN_CAP: usize = 999;
+
+/// 极速统计工作树本地未提交改动数（单进程、免锁、不递归子模块、跳过重命名探测）。
+pub fn read_local_changes_count(root: &Path) -> Result<LocalChangesCount, String> {
+    if fs::symlink_metadata(root).is_err() || fs::symlink_metadata(root.join(".git")).is_err() {
+        return Err("无法访问 Git 工作树".into());
+    }
+    let mut command = read_command(root);
+    command.arg("--work-tree").arg(root).args([
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=normal",
+        "--ignore-submodules=dirty",
+        "--no-renames",
+    ]);
+    let output = checked(&mut command, "无法读取工作区改动状态")?;
+    Ok(parse_porcelain_v1_z_counts(&output))
+}
+
+fn parse_porcelain_v1_z_counts(bytes: &[u8]) -> LocalChangesCount {
+    let mut files = 0usize;
+    let mut has_conflicts = false;
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        let end = bytes[pos..]
+            .iter()
+            .position(|&b| b == 0)
+            .map_or(bytes.len(), |offset| pos + offset);
+        let record = &bytes[pos..end];
+        pos = if end < bytes.len() { end + 1 } else { end };
+        if record.len() < 4 || record[2] != b' ' {
+            continue;
+        }
+        let x = record[0];
+        let y = record[1];
+        if matches!(
+            (x, y),
+            (b'D', b'D')
+                | (b'A', b'U')
+                | (b'U', b'D')
+                | (b'U', b'A')
+                | (b'D', b'U')
+                | (b'A', b'A')
+                | (b'U', b'U')
+        ) {
+            has_conflicts = true;
+        }
+        // 即便加了 `--no-renames`，如遇历史 index 中已存在的重命名/复制条目仍需跳过第二路径。
+        if matches!(x, b'R' | b'C') {
+            let next_end = bytes[pos..]
+                .iter()
+                .position(|&b| b == 0)
+                .map_or(bytes.len(), |offset| pos + offset);
+            pos = if next_end < bytes.len() {
+                next_end + 1
+            } else {
+                next_end
+            };
+        }
+        files += 1;
+        if files >= LOCAL_CHANGES_SCAN_CAP {
+            // 已触顶后仅快速扫描剩余条目的冲突标记，避免无谓计数溢出。
+            if has_conflicts {
+                break;
+            }
+            files = LOCAL_CHANGES_SCAN_CAP;
+        }
+    }
+    LocalChangesCount {
+        files,
+        has_conflicts,
     }
 }
 

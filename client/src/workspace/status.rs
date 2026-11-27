@@ -50,6 +50,8 @@ pub struct RepoRow {
     pub upstream: Option<String>,
     pub upstream_is_local: bool,
     pub counts: Option<SyncCounts>,
+    /// 工作区本地未提交改动数（由后台轻量 `dirty` 池或当前选中仓的 `staging::changes` 异步更新）。
+    pub local_changes: Option<git::LocalChangesCount>,
     pub issue: Option<String>,
     pub historical: bool,
     pub historical_at: Option<SystemTime>,
@@ -62,6 +64,9 @@ pub struct RepoRow {
     stamp: Option<git::RepoStateStamp>,
     db_lookup_key: Option<(OsString, UpstreamConfig, OsString)>,
     read_again: bool,
+    dirty_loading: bool,
+    dirty_read_again: bool,
+    pub(super) dirty_stale: bool,
     failure: Option<(SyncStatus, String)>,
     confirmed: Option<HistoricalCounts>,
     receipt: Option<Receipt>,
@@ -146,6 +151,7 @@ impl RepoRow {
             upstream: None,
             upstream_is_local: false,
             counts: None,
+            local_changes: None,
             issue: None,
             historical: false,
             historical_at: None,
@@ -158,6 +164,9 @@ impl RepoRow {
             stamp: None,
             db_lookup_key: None,
             read_again: false,
+            dirty_loading: false,
+            dirty_read_again: false,
+            dirty_stale: false,
             failure: None,
             confirmed: None,
             receipt: None,
@@ -232,6 +241,67 @@ impl RepoRow {
 impl Workspace {
     pub(super) fn start_status(&mut self, id: WorktreeId) {
         self.start_status_inner(id, false);
+    }
+
+    /// 在独立低并发 `dirty` 线程池异步统计仓库本地改动数，避免阻塞 UI 与核心同步池。
+    pub(super) fn start_dirty_check(&mut self, id: WorktreeId) {
+        let Some(row) = self.repo_mut(id) else {
+            return;
+        };
+        row.dirty_stale = false;
+        if row.dirty_loading {
+            row.dirty_read_again = true;
+            return;
+        }
+        row.dirty_loading = true;
+        let target = row.target.clone();
+        self.runtime.dirty.run(move || {
+            let result = git::read_local_changes_count(&target.root);
+            Event::DirtyCount { target, result }
+        });
+    }
+
+    pub(super) fn apply_dirty_count(
+        &mut self,
+        target: WorktreeTarget,
+        result: Result<git::LocalChangesCount, String>,
+    ) {
+        let Some(row) = self.repo_mut(target.id).filter(|r| r.target == target) else {
+            return;
+        };
+        row.dirty_loading = false;
+        row.dirty_stale = false;
+        if std::mem::take(&mut row.dirty_read_again) {
+            self.start_dirty_check(target.id);
+            return;
+        }
+        let next = result.ok();
+        let prev_visible = row.local_changes.filter(|c| c.files > 0);
+        let next_visible = next.filter(|c| c.files > 0);
+        row.local_changes = next;
+        // 仅当视觉可见的本地改动数或冲突状态发生变化时才触发侧边栏缓存重建与重绘，
+        // 避免数百个干净子仓扫描完成时引发无谓 UI 刷新。
+        if prev_visible != next_visible {
+            self.bump_board_version();
+        }
+    }
+
+    /// 将当前选中仓已精确读取的 `ChangesSnapshot` 改动数零成本同步至侧边栏行缓存。
+    pub(super) fn sync_row_local_changes(
+        &mut self,
+        target: &WorktreeTarget,
+        count: git::LocalChangesCount,
+    ) {
+        let Some(row) = self.repo_mut(target.id).filter(|r| r.target == *target) else {
+            return;
+        };
+        row.dirty_stale = false;
+        let prev_visible = row.local_changes.filter(|c| c.files > 0);
+        let next_visible = (count.files > 0).then_some(count);
+        row.local_changes = Some(count);
+        if prev_visible != next_visible {
+            self.bump_board_version();
+        }
     }
 
     /// Refreshes `id` only if its lightweight `.git` fingerprint changed since the last read.

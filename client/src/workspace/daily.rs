@@ -791,8 +791,11 @@ impl Workspace {
                 self.daily.changes_loading = false;
                 match result {
                     Ok(s) => {
+                        let summary = summarize_changes_snapshot(&s);
+                        let target = s.worktree.clone();
                         let s = Arc::new(s);
                         self.daily.changes = Some(s.clone());
+                        self.sync_row_local_changes(&target, summary);
                         if let Some((side, path)) = self.daily.selection.clone() {
                             self.open_change(s, side, path);
                         }
@@ -978,7 +981,25 @@ impl Workspace {
         }
         for id in affected {
             self.start_status(id);
+            if Some(id) != self.selected {
+                self.start_dirty_check(id);
+            }
         }
+    }
+}
+
+fn summarize_changes_snapshot(snap: &ChangesSnapshot) -> crate::git::LocalChangesCount {
+    let mut unique = std::collections::BTreeSet::new();
+    let mut has_conflicts = false;
+    for file in snap.staged.iter().chain(snap.unstaged.iter()) {
+        unique.insert(file.path.as_path());
+        if matches!(file.kind, crate::staging::ChangeKind::Conflicted(_)) {
+            has_conflicts = true;
+        }
+    }
+    crate::git::LocalChangesCount {
+        files: unique.len(),
+        has_conflicts,
     }
 }
 

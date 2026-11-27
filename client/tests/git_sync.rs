@@ -1,5 +1,6 @@
 use githalo::git::{
-    FetchOutcome, common_dir, discover, fetch_all_remotes, fetch_upstream, read_sync,
+    FetchOutcome, LocalChangesCount, common_dir, discover, fetch_all_remotes, fetch_upstream,
+    read_local_changes_count, read_sync,
 };
 use githalo::worktree::{
     SyncCounts, SyncStatus, UpstreamConfig, UpstreamStatus, WorktreeId, WorktreeTarget,
@@ -680,5 +681,33 @@ fn fetch_all_remotes_discovers_new_branches_prunes_deleted_and_handles_detached_
         )
         .trim(),
         LOCAL
+    );
+}
+
+#[test]
+fn read_local_changes_count_tracks_edits_untracked_and_staged_without_locking() {
+    let fixture = Fixture::new();
+    let repo = fixture.clone("project", false);
+
+    assert_eq!(
+        read_local_changes_count(&repo),
+        Ok(LocalChangesCount {
+            files: 0,
+            has_conflicts: false,
+        })
+    );
+
+    // 同一文件既有暂存改动又有未暂存改动只记为 1 项，再加上 1 个未跟踪文件共 2 项。
+    fs::write(repo.join("README.md"), "staged edit\n").unwrap();
+    git(&repo, &["add", "--", "README.md"]);
+    fs::write(repo.join("README.md"), "unstaged edit\n").unwrap();
+    fs::write(repo.join("draft.txt"), "untracked file\n").unwrap();
+
+    assert_eq!(
+        read_local_changes_count(&repo),
+        Ok(LocalChangesCount {
+            files: 2,
+            has_conflicts: false,
+        })
     );
 }

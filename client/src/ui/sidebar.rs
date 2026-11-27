@@ -42,6 +42,7 @@ pub(super) enum SidebarRow {
         selected: bool,
         nested_total: usize,
         nested_diverged: usize,
+        nested_dirty: usize,
         nested_expanded: bool,
     },
     ScanningNested {
@@ -81,6 +82,8 @@ pub(super) struct SidebarBoardCache {
     pub(super) rows: Vec<SidebarRow>,
     pub(super) total_repos: usize,
     pub(super) diverged_repos: usize,
+    pub(super) dirty_repos: usize,
+    pub(super) actionable_repos: usize,
     pub(super) matched_repo_count: usize,
     pub(super) filtered_empty: bool,
     pub(super) has_query: bool,
@@ -112,7 +115,7 @@ impl RepoFilter {
     }
 
     fn matches(&self, repo: &RepoRow) -> bool {
-        if self.diverged_only && !repo_is_diverged(repo) {
+        if self.diverged_only && !repo_is_actionable(repo) {
             return false;
         }
         repo_matches_tokens(repo, &self.tokens)
@@ -122,6 +125,15 @@ impl RepoFilter {
 fn repo_is_diverged(repo: &RepoRow) -> bool {
     repo.counts
         .is_some_and(|counts| counts.behind > 0 || counts.ahead > 0)
+}
+
+fn repo_is_dirty(repo: &RepoRow) -> bool {
+    repo.local_changes.is_some_and(|c| c.files > 0)
+}
+
+/// 仓库是否存在需要用户关注的活跃状态（待推送/待拉取，或有未提交本地改动）。
+fn repo_is_actionable(repo: &RepoRow) -> bool {
+    repo_is_diverged(repo) || repo_is_dirty(repo)
 }
 
 fn repo_has_blocking_issue(repo: &RepoRow) -> bool {
@@ -188,16 +200,18 @@ fn nested_sort_key(
         .get(&repo.target.id.get())
         .copied()
         .unwrap_or(usize::MAX);
-    if let Some(counts) = repo.counts.filter(|c| c.behind > 0 || c.ahead > 0) {
-        let live_rank = u8::from(repo.historical);
-        let magnitude = counts.ahead.saturating_add(counts.behind);
-        // Diverged repos always stay at tier 0; within the same live/historical state,
-        // user-pinned repos appear first, then by commit delta magnitude.
+    let diverged_counts = repo.counts.filter(|c| c.behind > 0 || c.ahead > 0);
+    let dirty_files = repo.local_changes.map_or(0, |c| c.files as u64);
+    if diverged_counts.is_some() || dirty_files > 0 {
+        // 有实时待同步提交或本地未提交改动的子仓统一置顶（Tier 0），同层内尊重用户拖拽常用顺序。
+        let live_rank = u8::from(diverged_counts.is_some() && repo.historical && dirty_files == 0);
+        let commit_delta = diverged_counts.map_or(0, |c| c.ahead.saturating_add(c.behind));
+        let magnitude = commit_delta.saturating_add(dirty_files);
         (0, live_rank, custom, std::cmp::Reverse(magnitude))
     } else if repo_has_blocking_issue(repo) {
         (1, 0, custom, std::cmp::Reverse(0))
     } else {
-        // Synced repos: user custom-ordered repos appear ahead of alphabetical repos.
+        // Synced & clean repos: user custom-ordered repos appear ahead of alphabetical repos.
         let custom_tier = u8::from(custom == usize::MAX);
         (2, custom_tier, custom, std::cmp::Reverse(0))
     }
@@ -273,6 +287,8 @@ struct TabBadgeStyle {
 #[derive(Clone, Copy, Default)]
 pub(super) struct SidebarBadgeCounts {
     pub(super) diverged_repos: usize,
+    pub(super) dirty_repos: usize,
+    pub(super) actionable_repos: usize,
     pub(super) commit_files: usize,
     pub(super) commit_staged: usize,
     pub(super) commit_unstaged: usize,
@@ -336,15 +352,24 @@ impl DesktopView {
         });
 
         let total_repos = self.workspace.repos.len();
-        let diverged_repos = self
-            .workspace
-            .repos
-            .iter()
-            .filter(|r| {
-                r.counts
-                    .is_some_and(|c| (c.behind > 0 || c.ahead > 0) && !r.historical)
-            })
-            .count();
+        let mut diverged_repos = 0usize;
+        let mut dirty_repos = 0usize;
+        let mut actionable_repos = 0usize;
+        for r in &self.workspace.repos {
+            let is_live_diverged = r
+                .counts
+                .is_some_and(|c| (c.behind > 0 || c.ahead > 0) && !r.historical);
+            let is_dirty = repo_is_dirty(r);
+            if is_live_diverged {
+                diverged_repos += 1;
+            }
+            if is_dirty {
+                dirty_repos += 1;
+            }
+            if is_live_diverged || is_dirty {
+                actionable_repos += 1;
+            }
+        }
 
         let filter = RepoFilter::new(&next_key.query, next_key.diverged_only);
         let filtering = filter.is_active();
@@ -469,20 +494,27 @@ impl DesktopView {
                     .nested
                     .get(&member_id)
                     .filter(|n| !n.children.is_empty());
-                let (nested_total, nested_diverged, nested_expanded) = match nested {
+                let (nested_total, nested_diverged, nested_dirty, nested_expanded) = match nested {
                     Some(n) => {
                         let mut diverged = 0usize;
+                        let mut dirty = 0usize;
                         for &child_id in &n.children {
-                            if let Some(counts) = self.workspace.repo(child_id).and_then(|r| {
-                                r.counts.filter(|_| r.issue.is_none() && !r.historical)
-                            }) && (counts.behind > 0 || counts.ahead > 0)
-                            {
-                                diverged += 1;
+                            if let Some(child) = self.workspace.repo(child_id) {
+                                if child
+                                    .counts
+                                    .filter(|_| child.issue.is_none() && !child.historical)
+                                    .is_some_and(|c| c.behind > 0 || c.ahead > 0)
+                                {
+                                    diverged += 1;
+                                }
+                                if repo_is_dirty(child) {
+                                    dirty += 1;
+                                }
                             }
                         }
-                        (n.children.len(), diverged, n.expanded)
+                        (n.children.len(), diverged, dirty, n.expanded)
                     }
-                    None => (0, 0, false),
+                    None => (0, 0, 0, false),
                 };
                 let row_selected =
                     self.workspace.selected == Some(member_id) && visible_group == Some(group.id);
@@ -493,6 +525,7 @@ impl DesktopView {
                     selected: row_selected,
                     nested_total,
                     nested_diverged,
+                    nested_dirty,
                     nested_expanded,
                 });
 
@@ -547,13 +580,14 @@ impl DesktopView {
                         let total_children = sorted_children.len();
                         let diverged_count = sorted_children
                             .iter()
-                            .filter(|child| repo_is_diverged(child))
+                            .filter(|child| repo_is_actionable(child))
                             .count();
                         let custom_pinned_count = custom_order.map_or(0, |ids| {
                             sorted_children
                                 .iter()
                                 .filter(|child| {
-                                    !repo_is_diverged(child) && ids.contains(&child.target.id.get())
+                                    !repo_is_actionable(child)
+                                        && ids.contains(&child.target.id.get())
                                 })
                                 .count()
                         });
@@ -590,6 +624,7 @@ impl DesktopView {
                                 selected: child_selected,
                                 nested_total: 0,
                                 nested_diverged: 0,
+                                nested_dirty: 0,
                                 nested_expanded: false,
                             });
                         }
@@ -639,6 +674,8 @@ impl DesktopView {
         self.sidebar_board_cache.rows = rows;
         self.sidebar_board_cache.total_repos = total_repos;
         self.sidebar_board_cache.diverged_repos = diverged_repos;
+        self.sidebar_board_cache.dirty_repos = dirty_repos;
+        self.sidebar_board_cache.actionable_repos = actionable_repos;
         self.sidebar_board_cache.matched_repo_count = matched_repo_count;
         self.sidebar_board_cache.filtered_empty =
             filtering && visible_group_count == 0 && total_repos > 0;
@@ -647,6 +684,8 @@ impl DesktopView {
 
     pub(super) fn sidebar_badge_counts(&self) -> SidebarBadgeCounts {
         let diverged_repos = self.sidebar_board_cache.diverged_repos;
+        let dirty_repos = self.sidebar_board_cache.dirty_repos;
+        let actionable_repos = self.sidebar_board_cache.actionable_repos;
 
         let selected = self.workspace.selected;
         let (commit_files, commit_staged, commit_unstaged, commit_conflicts) = self
@@ -697,6 +736,8 @@ impl DesktopView {
 
         SidebarBadgeCounts {
             diverged_repos,
+            dirty_repos,
+            actionable_repos,
             commit_files,
             commit_staged,
             commit_unstaged,
@@ -710,7 +751,7 @@ impl DesktopView {
         let panel = self.workspace.panel;
         let scale = self.ui_scale as f32 / 100.;
         let counts = self.sidebar_badge_counts();
-        let active_badges = usize::from(counts.diverged_repos > 0)
+        let active_badges = usize::from(counts.actionable_repos > 0)
             + usize::from(counts.commit_files > 0)
             + usize::from(counts.stash_entries > 0)
             + usize::from(counts.shelf_entries > 0);
@@ -719,16 +760,26 @@ impl DesktopView {
         let dot_only =
             width < px((216. + lang_extra + active_badges.saturating_sub(1) as f32 * 20.) * scale);
 
-        let repos_tip = (counts.diverged_repos > 0).then(|| {
+        let repos_tip = (counts.actionable_repos > 0).then(|| {
+            let mut segments = Vec::new();
+            if counts.diverged_repos > 0 {
+                segments.push(if is_zh() {
+                    format!("{} 个待同步提交", counts.diverged_repos)
+                } else {
+                    format!("{} to sync", counts.diverged_repos)
+                });
+            }
+            if counts.dirty_repos > 0 {
+                segments.push(if is_zh() {
+                    format!("{} 个有本地改动", counts.dirty_repos)
+                } else {
+                    format!("{} with local changes", counts.dirty_repos)
+                });
+            }
             if is_zh() {
-                format!("{} 个仓库有待同步的提交", counts.diverged_repos)
-            } else if counts.diverged_repos == 1 {
-                "1 repository has commits to pull or push".to_owned()
+                format!("仓库状态：{}", segments.join(" · "))
             } else {
-                format!(
-                    "{} repositories have commits to pull or push",
-                    counts.diverged_repos
-                )
+                format!("Repositories: {}", segments.join(" · "))
             }
         });
         let commit_tip = (counts.commit_files > 0).then(|| {
@@ -894,7 +945,7 @@ impl DesktopView {
                                     "repositories-tab",
                                     tr("仓库", "Repos"),
                                     Panel::Repositories,
-                                    counts.diverged_repos,
+                                    counts.actionable_repos,
                                     Some(repos_badge_style),
                                     repos_tip,
                                 ))
@@ -938,6 +989,8 @@ impl DesktopView {
         let cache = &self.sidebar_board_cache;
         let total_repos = cache.total_repos;
         let diverged_repos = cache.diverged_repos;
+        let dirty_repos = cache.dirty_repos;
+        let actionable_repos = cache.actionable_repos;
         let has_query = cache.has_query;
         let matched_repo_count = cache.matched_repo_count;
         let filtered_empty = cache.filtered_empty;
@@ -945,30 +998,46 @@ impl DesktopView {
 
         let summary_pill: Option<AnyElement> = if total_repos == 0 {
             None
-        } else if diverged_repos > 0 || diverged_filter_active {
-            let label = if diverged_filter_active {
-                if is_zh() {
-                    format!("✓ {diverged_repos} 待同步")
-                } else {
-                    format!("✓ {diverged_repos} to sync")
-                }
-            } else if is_zh() {
-                format!("{diverged_repos} 待同步")
+        } else if actionable_repos > 0 || diverged_filter_active {
+            let suffix = if dirty_repos > 0 && diverged_repos == 0 {
+                tr("有改动", "modified")
+            } else if dirty_repos > 0 {
+                tr("待处理", "active")
             } else {
-                format!("{diverged_repos} to sync")
+                tr("待同步", "to sync")
+            };
+            let label = if diverged_filter_active {
+                format!("✓ {actionable_repos} {suffix}")
+            } else {
+                format!("{actionable_repos} {suffix}")
             };
             let tip = if diverged_filter_active {
                 tr(
-                    "正在仅显示待同步仓库，点击恢复显示全部",
-                    "Showing diverged repositories only — click to show all",
+                    "正在仅显示待同步或有本地改动的仓库，点击恢复显示全部",
+                    "Showing modified or diverged repositories only — click to show all",
                 )
                 .to_owned()
             } else {
-                tr(
-                    "点击仅筛选待同步（待推送/待拉取）的仓库",
-                    "Click to filter repositories with pending push/pull",
-                )
-                .to_owned()
+                let mut detail = Vec::new();
+                if diverged_repos > 0 {
+                    detail.push(if is_zh() {
+                        format!("{diverged_repos} 个待推送/待拉取")
+                    } else {
+                        format!("{diverged_repos} to pull/push")
+                    });
+                }
+                if dirty_repos > 0 {
+                    detail.push(if is_zh() {
+                        format!("{dirty_repos} 个有本地改动")
+                    } else {
+                        format!("{dirty_repos} with local changes")
+                    });
+                }
+                if is_zh() {
+                    format!("点击仅筛选活跃仓库（{}）", detail.join(" · "))
+                } else {
+                    format!("Click to filter active repos ({})", detail.join(" · "))
+                }
             };
             let (bg, border, fg) = if diverged_filter_active {
                 (
@@ -1481,6 +1550,7 @@ impl DesktopView {
                 selected,
                 nested_total,
                 nested_diverged,
+                nested_dirty,
                 nested_expanded,
             } => {
                 let Some(repo) = self.workspace.repo(id) else {
@@ -1493,6 +1563,7 @@ impl DesktopView {
                     selected,
                     nested_total,
                     nested_diverged,
+                    nested_dirty,
                     nested_expanded,
                     entity,
                     window,
@@ -2173,10 +2244,10 @@ impl DesktopView {
             .unwrap_or_default();
         sort_nested_children(&mut sorted, Some(&existing_custom));
 
-        let dragged_diverged = self
+        let dragged_actionable = self
             .workspace
             .repo(dragged_id)
-            .is_some_and(repo_is_diverged);
+            .is_some_and(repo_is_actionable);
         let dragged_name = self
             .workspace
             .repo(dragged_id)
@@ -2190,33 +2261,40 @@ impl DesktopView {
             None => {
                 // Pin dragged child to the top of custom order.
                 next_custom.insert(0, dragged_id.get());
-                if !dragged_diverged && sorted.iter().any(|r| repo_is_diverged(r)) {
+                if !dragged_actionable && sorted.iter().any(|r| repo_is_actionable(r)) {
                     self.notice = Some(if is_zh() {
-                        format!("已将「{dragged_name}」置顶至常用首位（待同步子仓仍自动前置）")
+                        format!(
+                            "已将「{dragged_name}」置顶至常用首位（有改动/待同步子仓仍自动前置）"
+                        )
                     } else {
                         format!(
-                            "Pinned '{dragged_name}' to top of custom order (diverged repos stay first)"
+                            "Pinned '{dragged_name}' to top of custom order (modified/diverged repos stay first)"
                         )
                     });
                 }
             }
             Some(target_id) => {
-                let target_diverged = self.workspace.repo(target_id).is_some_and(repo_is_diverged);
-                if !dragged_diverged && target_diverged {
-                    // Dragged synced child onto a diverged child: pin to top of custom synced tier
-                    // so diverged auto-front stays intact and user gets clear feedback.
+                let target_actionable = self
+                    .workspace
+                    .repo(target_id)
+                    .is_some_and(repo_is_actionable);
+                if !dragged_actionable && target_actionable {
+                    // Dragged synced/clean child onto an actionable child: pin to top of custom clean tier
+                    // so modified/diverged auto-front stays intact and user gets clear feedback.
                     next_custom.insert(0, dragged_id.get());
                     self.notice = Some(if is_zh() {
-                        format!("已将「{dragged_name}」置顶至常用首位（待同步子仓仍自动前置）")
+                        format!(
+                            "已将「{dragged_name}」置顶至常用首位（有改动/待同步子仓仍自动前置）"
+                        )
                     } else {
                         format!(
-                            "Pinned '{dragged_name}' to top of custom order (diverged repos stay first)"
+                            "Pinned '{dragged_name}' to top of custom order (modified/diverged repos stay first)"
                         )
                     });
                 } else {
                     // Snapshot every same-tier child currently ahead of `target_id` so the dragged
                     // child lands at the exact visual slot before `target_id`.
-                    let target_tier_diverged = target_diverged;
+                    let target_tier_actionable = target_actionable;
                     let target_pos_in_sorted = sorted
                         .iter()
                         .position(|r| r.target.id == target_id)
@@ -2227,7 +2305,7 @@ impl DesktopView {
                         if cid == dragged_id.get() {
                             continue;
                         }
-                        if repo_is_diverged(child) == target_tier_diverged
+                        if repo_is_actionable(child) == target_tier_actionable
                             || next_custom.contains(&cid)
                         {
                             prefix_ids.push(cid);
@@ -2326,6 +2404,7 @@ impl DesktopView {
         selected: bool,
         nested_total: usize,
         nested_diverged: usize,
+        nested_dirty: usize,
         nested_expanded: bool,
         entity: &gpui::Entity<Self>,
         window: &mut Window,
@@ -2384,6 +2463,80 @@ impl DesktopView {
         let is_transient_status = repo.fetching || (repo.loading && !repo.has_status());
         let count_is_historical = repo.historical;
 
+        let local_changes_badge = repo.local_changes.filter(|c| c.files > 0).map(|changes| {
+            let (bg, border, fg, dot) = if changes.has_conflicts {
+                (
+                    theme().danger_bg,
+                    theme().danger_border,
+                    theme().error,
+                    theme().error,
+                )
+            } else {
+                (
+                    theme().accent_bg,
+                    theme().accent_border,
+                    theme().link,
+                    theme().link,
+                )
+            };
+            let count_text = format_badge_count(changes.files);
+            let tip = if changes.has_conflicts {
+                if is_zh() {
+                    format!(
+                        "本地改动 {} 个文件（含冲突）· 点击查看 Commit",
+                        changes.files
+                    )
+                } else {
+                    format!(
+                        "{} local change(s) with conflicts · click to open Commit",
+                        changes.files
+                    )
+                }
+            } else if is_zh() {
+                format!("本地改动 {} 个文件 · 点击查看 Commit", changes.files)
+            } else {
+                format!("{} local change(s) · click to open Commit", changes.files)
+            };
+            div()
+                .id((
+                    "repo-dirty-pill",
+                    (id.get() as usize) * 4 + usize::from(nested_parent.is_some()),
+                ))
+                .flex_shrink_0()
+                .px(px(4.5))
+                .py(px(0.5))
+                .rounded(px(4.))
+                .bg(rgb(bg))
+                .border_1()
+                .border_color(rgb(border))
+                .flex()
+                .items_center()
+                .gap(px(3.))
+                .text_size(rems(0.66))
+                .line_height(rems(0.9))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(fg))
+                .hover(|s| s.border_color(rgb(theme().brand)))
+                .on_hover(
+                    window.listener_for(entity, move |view, hovered: &bool, _, cx| {
+                        view.set_hovered_hint(hovered.then(|| tip.clone()), cx);
+                    }),
+                )
+                .on_click(window.listener_for(entity, move |view, _, window, cx| {
+                    cx.stop_propagation();
+                    view.select_repo(id, Some(group), window, cx);
+                    view.dispatch(Action::ShowPanel(Panel::Commit), cx);
+                }))
+                .child(
+                    div()
+                        .size(px(4.5))
+                        .flex_shrink_0()
+                        .rounded(px(999.))
+                        .bg(rgb(dot)),
+                )
+                .child(count_text)
+        });
+
         let sync_badges = repo
             .counts
             .filter(|counts| counts.behind > 0 || counts.ahead > 0)
@@ -2435,18 +2588,36 @@ impl DesktopView {
             });
 
         let nested_summary = (nested_parent.is_none() && nested_total > 0).then(|| {
-            let badge_text = if nested_diverged > 0 {
+            let has_alert = nested_diverged > 0 || nested_dirty > 0;
+            let badge_text = if nested_diverged > 0 && nested_dirty > 0 {
+                if is_zh() {
+                    format!("{nested_total} 子仓 · {nested_diverged}/{nested_dirty}")
+                } else {
+                    format!("{nested_total} sub · {nested_diverged}/{nested_dirty}")
+                }
+            } else if nested_diverged > 0 {
                 if is_zh() {
                     format!("{nested_total} 子仓 · {nested_diverged}")
                 } else {
                     format!("{nested_total} sub · {nested_diverged}")
+                }
+            } else if nested_dirty > 0 {
+                if is_zh() {
+                    format!("{nested_total} 子仓 · {nested_dirty} 改")
+                } else {
+                    format!("{nested_total} sub · {nested_dirty} mod")
                 }
             } else if is_zh() {
                 format!("{nested_total} 子仓")
             } else {
                 format!("{nested_total} sub")
             };
-            (nested_expanded, nested_diverged > 0, badge_text)
+            (
+                nested_expanded,
+                has_alert,
+                nested_dirty > 0 && nested_diverged == 0,
+                badge_text,
+            )
         });
 
         let branch_label = if repo.branch.is_empty() {
@@ -2690,6 +2861,7 @@ impl DesktopView {
                             })),
                     )
                 })
+                .children(local_changes_badge)
                 .children(sync_badges)
                 .child(more_btn);
 
@@ -2708,7 +2880,7 @@ impl DesktopView {
 
         // 含子仓库胶囊或历史缓存状态的仓库行
         let mut name = div().flex().min_w_0().flex_1().gap(px(4.)).items_center();
-        if let Some((expanded, _, _)) = &nested_summary {
+        if let Some((expanded, _, _, _)) = &nested_summary {
             let arrow = if *expanded {
                 Icon::ChevronDown
             } else {
@@ -2767,8 +2939,10 @@ impl DesktopView {
             .children(
                 nested_summary
                     .as_ref()
-                    .map(|(_, has_diverged, badge_text)| {
-                        let (bg, border, fg) = if *has_diverged {
+                    .map(|(_, has_alert, dirty_only, badge_text)| {
+                        let (bg, border, fg) = if *dirty_only {
+                            (theme().accent_bg, theme().accent_border, theme().link)
+                        } else if *has_alert {
                             (theme().warn_bg, theme().warn_border, theme().warning)
                         } else {
                             (theme().card, theme().border_strong, theme().muted)
@@ -2789,18 +2963,39 @@ impl DesktopView {
                                 entity,
                                 move |view, hovered: &bool, _, cx| {
                                     let tip = hovered.then(|| {
-                            if nested_diverged > 0 {
-                                if is_zh() {
-                                    format!("{nested_total} 个子仓库 · {nested_diverged} 个待同步")
-                                } else {
-                                    format!("{nested_total} sub-repos · {nested_diverged} diverged")
-                                }
-                            } else if is_zh() {
-                                format!("{nested_total} 个子仓库 · 已同步")
-                            } else {
-                                format!("{nested_total} sub-repos · synced")
-                            }
-                        });
+                                        let mut segments = Vec::new();
+                                        if nested_diverged > 0 {
+                                            segments.push(if is_zh() {
+                                                format!("{nested_diverged} 个待同步")
+                                            } else {
+                                                format!("{nested_diverged} diverged")
+                                            });
+                                        }
+                                        if nested_dirty > 0 {
+                                            segments.push(if is_zh() {
+                                                format!("{nested_dirty} 个有本地改动")
+                                            } else {
+                                                format!("{nested_dirty} modified")
+                                            });
+                                        }
+                                        if segments.is_empty() {
+                                            if is_zh() {
+                                                format!("{nested_total} 个子仓库 · 已同步")
+                                            } else {
+                                                format!("{nested_total} sub-repos · synced")
+                                            }
+                                        } else if is_zh() {
+                                            format!(
+                                                "{nested_total} 个子仓库 · {}",
+                                                segments.join(" · ")
+                                            )
+                                        } else {
+                                            format!(
+                                                "{nested_total} sub-repos · {}",
+                                                segments.join(" · ")
+                                            )
+                                        }
+                                    });
                                     view.set_hovered_hint(tip, cx);
                                 },
                             ))
@@ -2815,6 +3010,7 @@ impl DesktopView {
             .when_some(active_remote_pill, |row, pill| {
                 row.child(render_active_pill(pill))
             })
+            .children(local_changes_badge)
             .children(sync_badges)
             .child(more_btn);
 
@@ -3402,6 +3598,21 @@ fn repo_hover_summary(repo: &RepoRow) -> String {
         .as_deref()
         .unwrap_or(tr("未设置上游", "No upstream"));
     let mut parts = vec![repo.name.clone(), format!("{branch} → {upstream}")];
+    if let Some(changes) = repo.local_changes
+        && changes.files > 0
+    {
+        parts.push(if changes.has_conflicts {
+            if is_zh() {
+                format!("本地改动 {} 个文件（含冲突）", changes.files)
+            } else {
+                format!("{} local change(s) (conflicts)", changes.files)
+            }
+        } else if is_zh() {
+            format!("本地改动 {} 个文件", changes.files)
+        } else {
+            format!("{} local change(s)", changes.files)
+        });
+    }
     if let Some(counts) = repo.counts
         && (counts.behind > 0 || counts.ahead > 0)
     {
@@ -3632,5 +3843,40 @@ mod tests {
         assert_eq!(paths.entries(), &[(dir.path().to_path_buf(), true)]);
         assert!(outbound_repo_drag_payload(&file).is_none());
         assert!(outbound_repo_drag_payload(&missing).is_none());
+    }
+
+    #[test]
+    fn dirty_nested_children_float_to_top_alongside_diverged_and_match_active_filter() {
+        let mut z_dirty = fake_repo(1, "z-local-edit", "main", None, None);
+        z_dirty.local_changes = Some(githalo::git::LocalChangesCount {
+            files: 3,
+            has_conflicts: false,
+        });
+        let a_clean = fake_repo(2, "a-clean", "main", None, None);
+        let b_pinned = fake_repo(3, "b-pinned", "main", None, None);
+        let m_diverged = fake_repo(
+            4,
+            "m-diverged",
+            "main",
+            Some(SyncCounts {
+                ahead: 1,
+                behind: 0,
+            }),
+            None,
+        );
+
+        let mut list = vec![&a_clean, &b_pinned, &z_dirty, &m_diverged];
+        // 用户将 b-pinned (3) 与 z-local-edit (1) 置顶
+        sort_nested_children(&mut list, Some(&[3, 1]));
+        let names: Vec<&str> = list.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["z-local-edit", "m-diverged", "b-pinned", "a-clean"]
+        );
+
+        let active_filter = RepoFilter::new("", true);
+        assert!(active_filter.matches(&z_dirty));
+        assert!(active_filter.matches(&m_diverged));
+        assert!(!active_filter.matches(&a_clean));
     }
 }
