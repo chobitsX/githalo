@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -72,6 +72,7 @@ struct SidebarCacheKey {
     query: String,
     diverged_only: bool,
     nested_limits_version: u64,
+    repo_order_version: u64,
 }
 
 #[derive(Default)]
@@ -139,27 +140,66 @@ fn repo_matches_tokens(repo: &RepoRow, tokens: &[String]) -> bool {
         .all(|token| repo.name_lower.contains(token) || repo.path_lower.contains(token))
 }
 
+fn group_order_key(group: Option<GroupId>) -> i64 {
+    group.map_or(0, GroupId::get)
+}
+
+/// Applies user custom order to a top-level group's repository list.
+/// Repositories present in `custom_order` appear first in that exact order; remaining
+/// repositories preserve their original relative order.
+fn apply_group_repo_order(members: &mut [WorktreeId], custom_order: Option<&[i64]>) {
+    let Some(order) = custom_order else {
+        return;
+    };
+    if order.is_empty() || members.len() <= 1 {
+        return;
+    }
+    let rank: HashMap<i64, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(idx, &id)| (id, idx))
+        .collect();
+    // Stable sort keeps unranked repositories in their original registration order.
+    members.sort_by_key(|id| rank.get(&id.get()).copied().unwrap_or(usize::MAX));
+}
+
 /// Sorts nested children so actionable repositories (pending push/pull, then blocking errors)
-/// always float to the top ahead of alphabetical synced repositories.
+/// always float to the top ahead of synced repositories, while respecting user custom drag order
+/// both within actionable items and ahead of alphabetical synced repositories.
 /// Uses precomputed `name_lower` to avoid heap allocations during O(N log N) comparisons.
-fn sort_nested_children(children: &mut [&RepoRow]) {
+fn sort_nested_children(children: &mut [&RepoRow], custom_order: Option<&[i64]>) {
+    let rank: HashMap<i64, usize> = custom_order
+        .map(|ids| ids.iter().enumerate().map(|(idx, &id)| (id, idx)).collect())
+        .unwrap_or_default();
     children.sort_by(|a, b| {
-        nested_sort_key(a)
-            .cmp(&nested_sort_key(b))
+        let ka = nested_sort_key(a, &rank);
+        let kb = nested_sort_key(b, &rank);
+        ka.cmp(&kb)
             .then_with(|| a.name_lower.cmp(&b.name_lower))
             .then_with(|| a.target.id.cmp(&b.target.id))
     });
 }
 
-fn nested_sort_key(repo: &RepoRow) -> (u8, u8, std::cmp::Reverse<u64>) {
+fn nested_sort_key(
+    repo: &RepoRow,
+    custom_rank: &HashMap<i64, usize>,
+) -> (u8, u8, usize, std::cmp::Reverse<u64>) {
+    let custom = custom_rank
+        .get(&repo.target.id.get())
+        .copied()
+        .unwrap_or(usize::MAX);
     if let Some(counts) = repo.counts.filter(|c| c.behind > 0 || c.ahead > 0) {
         let live_rank = u8::from(repo.historical);
         let magnitude = counts.ahead.saturating_add(counts.behind);
-        (0, live_rank, std::cmp::Reverse(magnitude))
+        // Diverged repos always stay at tier 0; within the same live/historical state,
+        // user-pinned repos appear first, then by commit delta magnitude.
+        (0, live_rank, custom, std::cmp::Reverse(magnitude))
     } else if repo_has_blocking_issue(repo) {
-        (1, 0, std::cmp::Reverse(0))
+        (1, 0, custom, std::cmp::Reverse(0))
     } else {
-        (2, 0, std::cmp::Reverse(0))
+        // Synced repos: user custom-ordered repos appear ahead of alphabetical repos.
+        let custom_tier = u8::from(custom == usize::MAX);
+        (2, custom_tier, custom, std::cmp::Reverse(0))
     }
 }
 
@@ -190,6 +230,7 @@ fn select_visible_nested_children<'a>(
 struct DraggedRepo {
     id: WorktreeId,
     from: Option<GroupId>,
+    nested_parent: Option<WorktreeId>,
     name: String,
     path: PathBuf,
 }
@@ -285,6 +326,7 @@ impl DesktopView {
             query: raw_query,
             diverged_only: self.repo_filter_diverged_only,
             nested_limits_version: self.nested_limits_version,
+            repo_order_version: self.repo_order_version,
         };
         if self.sidebar_board_cache.key.as_ref() == Some(&next_key) {
             return;
@@ -358,7 +400,7 @@ impl DesktopView {
             if group.id.is_none() && group.members.is_empty() {
                 continue;
             }
-            let visible_members: Vec<WorktreeId> = if !filtering {
+            let mut visible_members: Vec<WorktreeId> = if !filtering {
                 group.members.clone()
             } else {
                 group
@@ -376,6 +418,12 @@ impl DesktopView {
                     })
                     .collect()
             };
+            apply_group_repo_order(
+                &mut visible_members,
+                self.group_repo_order
+                    .get(&group_order_key(group.id))
+                    .map(Vec::as_slice),
+            );
             if filtering && visible_members.is_empty() {
                 continue;
             }
@@ -490,18 +538,32 @@ impl DesktopView {
                         } else {
                             all_children
                         };
-                        sort_nested_children(&mut sorted_children);
+                        let custom_order = self
+                            .nested_repo_order
+                            .get(&member_id.get())
+                            .map(Vec::as_slice);
+                        sort_nested_children(&mut sorted_children, custom_order);
 
                         let total_children = sorted_children.len();
                         let diverged_count = sorted_children
                             .iter()
                             .filter(|child| repo_is_diverged(child))
                             .count();
+                        let custom_pinned_count = custom_order.map_or(0, |ids| {
+                            sorted_children
+                                .iter()
+                                .filter(|child| {
+                                    !repo_is_diverged(child) && ids.contains(&child.target.id.get())
+                                })
+                                .count()
+                        });
                         let default_limit = if show_filtered_children {
                             FILTERED_NESTED_VISIBLE_LIMIT
                         } else {
-                            DEFAULT_NESTED_VISIBLE_LIMIT
-                                .max(diverged_count.min(AUTO_DIVERGED_NESTED_CAP))
+                            DEFAULT_NESTED_VISIBLE_LIMIT.max(
+                                (diverged_count + custom_pinned_count)
+                                    .min(AUTO_DIVERGED_NESTED_CAP),
+                            )
                         };
                         let current_limit = self
                             .nested_visible_limits
@@ -1621,7 +1683,14 @@ impl DesktopView {
             .on_drop::<DraggedRepo>(window.listener_for(
                 entity,
                 move |view, dragged: &DraggedRepo, _, cx| {
-                    view.drop_repo_to_group(dragged, id, cx);
+                    if dragged.nested_parent.is_some() {
+                        return;
+                    }
+                    if dragged.from == id {
+                        view.reorder_group_repo(id, dragged.id, None, cx);
+                    } else {
+                        view.drop_repo_to_group(dragged, id, cx);
+                    }
                 },
             ))
             .child(toggle)
@@ -2003,7 +2072,7 @@ impl DesktopView {
         target: Option<GroupId>,
         cx: &mut Context<Self>,
     ) {
-        if dragged.from == target {
+        if dragged.nested_parent.is_some() || dragged.from == target {
             return;
         }
         self.notice = None;
@@ -2037,6 +2106,214 @@ impl DesktopView {
                 );
             }
             (None, None) => {}
+        }
+    }
+
+    pub(super) fn reorder_group_repo(
+        &mut self,
+        group: Option<GroupId>,
+        dragged_id: WorktreeId,
+        before_target: Option<WorktreeId>,
+        cx: &mut Context<Self>,
+    ) {
+        if before_target == Some(dragged_id) {
+            return;
+        }
+        let key = group_order_key(group);
+        let mut ordered: Vec<WorktreeId> = self
+            .workspace
+            .groups
+            .iter()
+            .find(|g| g.id == group)
+            .map(|g| g.members.clone())
+            .unwrap_or_default();
+        apply_group_repo_order(
+            &mut ordered,
+            self.group_repo_order.get(&key).map(Vec::as_slice),
+        );
+        ordered.retain(|&id| id != dragged_id);
+        let insert_pos = match before_target {
+            Some(target_id) => ordered
+                .iter()
+                .position(|&id| id == target_id)
+                .unwrap_or(ordered.len()),
+            None => 0,
+        };
+        ordered.insert(insert_pos, dragged_id);
+        let raw_ids: Vec<i64> = ordered.into_iter().map(WorktreeId::get).collect();
+        self.group_repo_order.insert(key, raw_ids);
+        self.repo_order_version = self.repo_order_version.wrapping_add(1);
+        self.save_preferences();
+        cx.notify();
+    }
+
+    pub(super) fn reorder_nested_repo(
+        &mut self,
+        parent_id: WorktreeId,
+        dragged_id: WorktreeId,
+        before_target: Option<WorktreeId>,
+        cx: &mut Context<Self>,
+    ) {
+        if before_target == Some(dragged_id) {
+            return;
+        }
+        let Some(nested) = self.workspace.nested.get(&parent_id) else {
+            return;
+        };
+        let parent_key = parent_id.get();
+        let mut sorted: Vec<&RepoRow> = nested
+            .children
+            .iter()
+            .filter_map(|&cid| self.workspace.repo(cid))
+            .collect();
+        let existing_custom = self
+            .nested_repo_order
+            .get(&parent_key)
+            .cloned()
+            .unwrap_or_default();
+        sort_nested_children(&mut sorted, Some(&existing_custom));
+
+        let dragged_diverged = self
+            .workspace
+            .repo(dragged_id)
+            .is_some_and(repo_is_diverged);
+        let dragged_name = self
+            .workspace
+            .repo(dragged_id)
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+
+        let mut next_custom = existing_custom;
+        next_custom.retain(|&id| id != dragged_id.get());
+
+        match before_target {
+            None => {
+                // Pin dragged child to the top of custom order.
+                next_custom.insert(0, dragged_id.get());
+                if !dragged_diverged && sorted.iter().any(|r| repo_is_diverged(r)) {
+                    self.notice = Some(if is_zh() {
+                        format!("已将「{dragged_name}」置顶至常用首位（待同步子仓仍自动前置）")
+                    } else {
+                        format!(
+                            "Pinned '{dragged_name}' to top of custom order (diverged repos stay first)"
+                        )
+                    });
+                }
+            }
+            Some(target_id) => {
+                let target_diverged = self.workspace.repo(target_id).is_some_and(repo_is_diverged);
+                if !dragged_diverged && target_diverged {
+                    // Dragged synced child onto a diverged child: pin to top of custom synced tier
+                    // so diverged auto-front stays intact and user gets clear feedback.
+                    next_custom.insert(0, dragged_id.get());
+                    self.notice = Some(if is_zh() {
+                        format!("已将「{dragged_name}」置顶至常用首位（待同步子仓仍自动前置）")
+                    } else {
+                        format!(
+                            "Pinned '{dragged_name}' to top of custom order (diverged repos stay first)"
+                        )
+                    });
+                } else {
+                    // Snapshot every same-tier child currently ahead of `target_id` so the dragged
+                    // child lands at the exact visual slot before `target_id`.
+                    let target_tier_diverged = target_diverged;
+                    let target_pos_in_sorted = sorted
+                        .iter()
+                        .position(|r| r.target.id == target_id)
+                        .unwrap_or(sorted.len());
+                    let mut prefix_ids: Vec<i64> = Vec::new();
+                    for child in sorted.iter().take(target_pos_in_sorted) {
+                        let cid = child.target.id.get();
+                        if cid == dragged_id.get() {
+                            continue;
+                        }
+                        if repo_is_diverged(child) == target_tier_diverged
+                            || next_custom.contains(&cid)
+                        {
+                            prefix_ids.push(cid);
+                        }
+                    }
+                    let mut merged: Vec<i64> =
+                        Vec::with_capacity(next_custom.len() + prefix_ids.len() + 2);
+                    for id in prefix_ids {
+                        if !merged.contains(&id) {
+                            merged.push(id);
+                        }
+                    }
+                    merged.push(dragged_id.get());
+                    if !merged.contains(&target_id.get()) {
+                        merged.push(target_id.get());
+                    }
+                    for id in next_custom {
+                        if !merged.contains(&id) {
+                            merged.push(id);
+                        }
+                    }
+                    next_custom = merged;
+                }
+            }
+        }
+
+        // Prune IDs that are no longer children of this parent.
+        let valid_children: BTreeSet<i64> = nested.children.iter().map(|id| id.get()).collect();
+        next_custom.retain(|id| valid_children.contains(id));
+
+        self.nested_repo_order.insert(parent_key, next_custom);
+        self.repo_order_version = self.repo_order_version.wrapping_add(1);
+        self.save_preferences();
+        cx.notify();
+    }
+
+    pub(super) fn reset_group_repo_order(
+        &mut self,
+        group: Option<GroupId>,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .group_repo_order
+            .remove(&group_order_key(group))
+            .is_some()
+        {
+            self.repo_order_version = self.repo_order_version.wrapping_add(1);
+            self.save_preferences();
+            self.notice = Some(tr("已恢复分组默认排序", "Restored default group order").to_owned());
+            cx.notify();
+        }
+    }
+
+    pub(super) fn reset_nested_repo_order(
+        &mut self,
+        parent_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) {
+        if self.nested_repo_order.remove(&parent_id.get()).is_some() {
+            self.repo_order_version = self.repo_order_version.wrapping_add(1);
+            self.save_preferences();
+            self.notice = Some(
+                tr(
+                    "已恢复子仓库默认排序",
+                    "Restored default nested repository order",
+                )
+                .to_owned(),
+            );
+            cx.notify();
+        }
+    }
+
+    pub(super) fn has_custom_repo_order(
+        &self,
+        group: Option<GroupId>,
+        nested_parent: Option<WorktreeId>,
+    ) -> bool {
+        match nested_parent {
+            Some(parent_id) => self
+                .nested_repo_order
+                .get(&parent_id.get())
+                .is_some_and(|v| !v.is_empty()),
+            None => self
+                .group_repo_order
+                .get(&group_order_key(group))
+                .is_some_and(|v| !v.is_empty()),
         }
     }
 
@@ -2226,7 +2503,12 @@ impl DesktopView {
             .min_w_0()
             .rounded(px(6.))
             .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(rgb(theme().brand_bg)))
-            .drag_over::<DraggedRepo>(|style, _, _, _| style.bg(rgb(theme().brand_bg)))
+            .drag_over::<DraggedRepo>(|style, _, _, _| {
+                style
+                    .bg(rgb(theme().brand_bg))
+                    .border_t_2()
+                    .border_color(rgb(theme().brand))
+            })
             .on_drop::<ExternalPaths>(window.listener_for(
                 entity,
                 move |view, paths: &ExternalPaths, _, cx| {
@@ -2236,7 +2518,31 @@ impl DesktopView {
             .on_drop::<DraggedRepo>(window.listener_for(
                 entity,
                 move |view, dragged: &DraggedRepo, _, cx| {
-                    view.drop_repo_to_group(dragged, group, cx);
+                    match (dragged.nested_parent, nested_parent) {
+                        // Reorder nested child before another child of the same parent
+                        (Some(drag_parent), Some(target_parent))
+                            if drag_parent == target_parent =>
+                        {
+                            view.reorder_nested_repo(target_parent, dragged.id, Some(id), cx);
+                        }
+                        // Drag nested child onto its own parent row -> pin to top
+                        (Some(drag_parent), None) if drag_parent == id => {
+                            view.reorder_nested_repo(drag_parent, dragged.id, None, cx);
+                        }
+                        // Ignore dropping a nested child onto unrelated groups/parents
+                        (Some(_), _) => {}
+                        // Top-level repo dropped onto another top-level repo
+                        (None, None) => {
+                            if dragged.from != group {
+                                view.drop_repo_to_group(dragged, group, cx);
+                            }
+                            view.reorder_group_repo(group, dragged.id, Some(id), cx);
+                        }
+                        // Top-level repo dropped onto a nested child row -> move to its group
+                        (None, Some(_)) => {
+                            view.drop_repo_to_group(dragged, group, cx);
+                        }
+                    }
                 },
             ))
             .on_hover(
@@ -2251,6 +2557,7 @@ impl DesktopView {
                 DraggedRepo {
                     id,
                     from: group,
+                    nested_parent,
                     name: drag_name,
                     path: drag_path,
                 },
@@ -3185,7 +3492,7 @@ mod tests {
             &gamma_push,
             &delta_both,
         ];
-        sort_nested_children(&mut list);
+        sort_nested_children(&mut list, None);
         let names: Vec<&str> = list.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(
             names,
@@ -3197,6 +3504,73 @@ mod tests {
                 "base-api",
             ]
         );
+    }
+
+    #[test]
+    fn custom_nested_order_pins_favorite_children_while_keeping_diverged_first() {
+        let a_synced = fake_repo(1, "ab-test", "main", None, None);
+        let b_synced = fake_repo(2, "base-api", "main", None, None);
+        let z_fav = fake_repo(3, "z-favorite", "main", None, None);
+        let y_fav = fake_repo(4, "y-second-fav", "main", None, None);
+        let m_diverged = fake_repo(
+            5,
+            "m-diverged",
+            "main",
+            Some(SyncCounts {
+                ahead: 1,
+                behind: 0,
+            }),
+            None,
+        );
+        let d_diverged_fav = fake_repo(
+            6,
+            "d-diverged-fav",
+            "main",
+            Some(SyncCounts {
+                ahead: 1,
+                behind: 0,
+            }),
+            None,
+        );
+
+        let mut list = vec![
+            &a_synced,
+            &b_synced,
+            &z_fav,
+            &y_fav,
+            &m_diverged,
+            &d_diverged_fav,
+        ];
+        // User pinned: z-favorite (3), y-second-fav (4), d-diverged-fav (6)
+        sort_nested_children(&mut list, Some(&[3, 4, 6]));
+        let names: Vec<&str> = list.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                // Tier 0: diverged repos always float first, and pinned diverged wins tie
+                "d-diverged-fav",
+                "m-diverged",
+                // Tier 2 (custom): user-ordered synced repos come ahead of alphabetical synced
+                "z-favorite",
+                "y-second-fav",
+                // Tier 2 (default): remaining synced repos in alphabetical order
+                "ab-test",
+                "base-api",
+            ]
+        );
+    }
+
+    #[test]
+    fn group_repo_custom_order_reorders_known_ids_and_preserves_unranked_tail() {
+        let mut members = vec![
+            WorktreeId::new(1).unwrap(),
+            WorktreeId::new(2).unwrap(),
+            WorktreeId::new(3).unwrap(),
+            WorktreeId::new(4).unwrap(),
+        ];
+        apply_group_repo_order(&mut members, Some(&[4, 999, 2]));
+        let ids: Vec<i64> = members.into_iter().map(WorktreeId::get).collect();
+        assert_eq!(ids, vec![4, 2, 1, 3]);
     }
 
     #[test]

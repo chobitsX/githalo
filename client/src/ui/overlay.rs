@@ -1432,6 +1432,40 @@ impl DesktopView {
                         },
                     ));
                 }
+                items.extend([menu_item(
+                    "pin-repo-top",
+                    tr("移到最前（常用置顶）", "Move to Top (Pin)"),
+                    None,
+                    cx,
+                    move |view, _, window, cx| {
+                        view.close_overlay(window, cx);
+                        if let Some(parent_id) = nested_parent {
+                            view.reorder_nested_repo(parent_id, id, None, cx);
+                        } else {
+                            view.reorder_group_repo(group, id, None, cx);
+                        }
+                    },
+                )]);
+                if self.has_custom_repo_order(group, nested_parent) {
+                    items.push(menu_item(
+                        "reset-repo-order",
+                        if nested_parent.is_some() {
+                            tr("恢复子仓默认排序", "Reset Nested Sort Order")
+                        } else {
+                            tr("恢复分组默认排序", "Reset Group Sort Order")
+                        },
+                        None,
+                        cx,
+                        move |view, _, window, cx| {
+                            view.close_overlay(window, cx);
+                            if let Some(parent_id) = nested_parent {
+                                view.reset_nested_repo_order(parent_id, cx);
+                            } else {
+                                view.reset_group_repo_order(group, cx);
+                            }
+                        },
+                    ));
+                }
                 items.extend([
                     menu_item(
                         "scan-nested",

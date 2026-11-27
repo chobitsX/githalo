@@ -3,7 +3,7 @@
 //! By default the application follows the host OS language: Chinese locales resolve to
 //! [`Locale::ZhCn`], and all other locales resolve to [`Locale::EnUs`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -217,6 +217,10 @@ pub struct AppPreferences {
     pub commit_no_verify: bool,
     pub commit_show_conventional: bool,
     pub show_changes_to_parents: bool,
+    /// Custom drag-and-drop repository order per group (`0` = ungrouped, `> 0` = GroupId).
+    pub group_repo_order: BTreeMap<i64, Vec<i64>>,
+    /// Custom drag-and-drop nested child order per parent worktree ID (pinned ahead of alphabetical).
+    pub nested_repo_order: BTreeMap<i64, Vec<i64>>,
 }
 
 /// Allowed UI zoom percentage presets (90% .. 130%).
@@ -257,6 +261,8 @@ impl Default for AppPreferences {
             commit_no_verify: false,
             commit_show_conventional: false,
             show_changes_to_parents: false,
+            group_repo_order: BTreeMap::new(),
+            nested_repo_order: BTreeMap::new(),
         }
     }
 }
@@ -327,7 +333,23 @@ impl AppPreferences {
                 "commit_no_verify" => prefs.commit_no_verify = parse_bool(value),
                 "commit_show_conventional" => prefs.commit_show_conventional = parse_bool(value),
                 "show_changes_to_parents" => prefs.show_changes_to_parents = parse_bool(value),
-                _ => {}
+                other => {
+                    if let Some(raw_group) = other.strip_prefix("group_repo_order_")
+                        && let Ok(group_key) = raw_group.parse::<i64>()
+                    {
+                        let ids = parse_id_list(value);
+                        if !ids.is_empty() {
+                            prefs.group_repo_order.insert(group_key, ids);
+                        }
+                    } else if let Some(raw_parent) = other.strip_prefix("nested_repo_order_")
+                        && let Ok(parent_key) = raw_parent.parse::<i64>()
+                    {
+                        let ids = parse_id_list(value);
+                        if !ids.is_empty() {
+                            prefs.nested_repo_order.insert(parent_key, ids);
+                        }
+                    }
+                }
             }
         }
         if !has_branches_drawer_key {
@@ -352,7 +374,7 @@ impl AppPreferences {
             .cloned()
             .collect::<Vec<_>>()
             .join(",");
-        let content = format!(
+        let mut content = format!(
             "language={}\ntheme={}\nui_scale={}\npull_strategy={}\nshow_commit_details={}\ndiff_side_by_side={}\nshow_branches_panel={}\nshow_branches_drawer={}\nbranches_group_by_dir={}\nbranches_show_tags={}\nbranches_only_favorites={}\nbranches_click_mode={}\nfavorite_branches={}\ncommit_group_by_dir={}\ncommit_staging_view={}\ncommit_review_before={}\ncommit_sign_off={}\ncommit_no_verify={}\ncommit_show_conventional={}\nshow_changes_to_parents={}\n",
             self.language.as_key(),
             self.theme.as_key(),
@@ -375,8 +397,33 @@ impl AppPreferences {
             self.commit_show_conventional,
             self.show_changes_to_parents,
         );
+        for (&group_key, ids) in &self.group_repo_order {
+            if !ids.is_empty() {
+                let joined = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+                content.push_str(&format!("group_repo_order_{group_key}={joined}\n"));
+            }
+        }
+        for (&parent_key, ids) in &self.nested_repo_order {
+            if !ids.is_empty() {
+                let joined = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+                content.push_str(&format!("nested_repo_order_{parent_key}={joined}\n"));
+            }
+        }
         fs::write(path, content).map_err(|e| e.to_string())
     }
+}
+
+fn parse_id_list(raw: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    for part in raw.split(',') {
+        if let Ok(id) = part.trim().parse::<i64>()
+            && id > 0
+            && !out.contains(&id)
+        {
+            out.push(id);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -418,6 +465,11 @@ mod tests {
         let mut favorites = BTreeSet::new();
         favorites.insert("refs/heads/main".to_owned());
         favorites.insert("refs/heads/release/v1".to_owned());
+        let mut group_repo_order = BTreeMap::new();
+        group_repo_order.insert(0, vec![9, 3]);
+        group_repo_order.insert(2, vec![12, 4, 7]);
+        let mut nested_repo_order = BTreeMap::new();
+        nested_repo_order.insert(42, vec![101, 55, 88]);
         let saved = AppPreferences {
             language: LanguagePreference::EnUs,
             theme: ThemePreference::Light,
@@ -439,6 +491,8 @@ mod tests {
             commit_no_verify: true,
             commit_show_conventional: true,
             show_changes_to_parents: true,
+            group_repo_order,
+            nested_repo_order,
         };
         saved.save(&path).unwrap();
         assert_eq!(AppPreferences::load(&path), saved);

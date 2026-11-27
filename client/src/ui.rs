@@ -194,6 +194,9 @@ pub struct DesktopView {
     repo_filter_diverged_only: bool,
     nested_visible_limits: BTreeMap<WorktreeId, usize>,
     nested_limits_version: u64,
+    group_repo_order: BTreeMap<i64, Vec<i64>>,
+    nested_repo_order: BTreeMap<i64, Vec<i64>>,
+    repo_order_version: u64,
     sidebar_board_cache: sidebar::SidebarBoardCache,
     sidebar_list_state: ListState,
     palette_scroll: UniformListScrollHandle,
@@ -382,6 +385,9 @@ impl DesktopView {
             repo_filter_diverged_only: false,
             nested_visible_limits: BTreeMap::new(),
             nested_limits_version: 0,
+            group_repo_order: prefs.group_repo_order.clone(),
+            nested_repo_order: prefs.nested_repo_order.clone(),
+            repo_order_version: 0,
             sidebar_board_cache: sidebar::SidebarBoardCache::default(),
             sidebar_list_state: ListState::new(0, ListAlignment::Top, px(240.)),
             palette_scroll: UniformListScrollHandle::new(),
@@ -493,6 +499,8 @@ impl DesktopView {
             commit_no_verify: self.commit_no_verify,
             commit_show_conventional: self.commit_show_conventional,
             show_changes_to_parents: self.workspace.show_changes_to_parents,
+            group_repo_order: self.group_repo_order.clone(),
+            nested_repo_order: self.nested_repo_order.clone(),
         };
         let _ = prefs.save(&AppPreferences::default_path());
     }
