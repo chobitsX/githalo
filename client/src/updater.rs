@@ -204,7 +204,7 @@ pub fn check_latest_release(current_version: &str) -> Result<CheckUpdateOutcome,
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr.trim();
         if detail.contains("403") {
-            return Err("GitHub API 请求频率受限，请稍后再试或直接前往 GitHub 查看".into());
+            return Err("检查更新请求过于频繁，请稍后再试或选择手动下载".into());
         }
         return Err(if detail.is_empty() {
             format!("检查更新失败（{}）", output.status)
@@ -213,8 +213,8 @@ pub fn check_latest_release(current_version: &str) -> Result<CheckUpdateOutcome,
         });
     }
 
-    let body = String::from_utf8(output.stdout)
-        .map_err(|_| "GitHub 返回了无效的 UTF-8 数据".to_owned())?;
+    let body =
+        String::from_utf8(output.stdout).map_err(|_| "更新服务返回了无效的响应数据".to_owned())?;
     evaluate_release_json(&body, current_version)
 }
 
@@ -227,7 +227,7 @@ pub fn evaluate_release_json(
     let current = SemVer::parse(current_version)
         .ok_or_else(|| format!("无效的当前版本号：{current_version}"))?;
     let latest = SemVer::parse(&release.version)
-        .ok_or_else(|| format!("GitHub 返回了无效版本号：{}", release.tag_name))?;
+        .ok_or_else(|| format!("更新服务返回了无效版本号：{}", release.tag_name))?;
 
     if latest > current {
         Ok(CheckUpdateOutcome::Available(release))
@@ -246,7 +246,7 @@ pub fn download_and_prepare_update(
     mut on_progress: impl FnMut(DownloadProgress),
 ) -> Result<PreparedUpdate, String> {
     let Some(asset_url) = release.asset_url.as_deref() else {
-        return Err("该发布版本暂未包含当前平台的安装包，请前往 GitHub 页面查看".into());
+        return Err("该版本暂未提供当前平台的安装包，请选择手动下载".into());
     };
     let asset_name = release
         .asset_name

@@ -3643,8 +3643,8 @@ impl DesktopView {
                                 "settings-toggle-auto-updates",
                                 tr("自动检查新版本", "Automatically Check for Updates"),
                                 tr(
-                                    "启动后在后台静默检查 GitHub Releases 新版本（每 6 小时最多一次），绝不打断工作",
-                                    "Silently check GitHub Releases in the background on launch (at most once every 6 hours)",
+                                    "启动后在后台静默检查可用更新，发现新版本时在顶栏轻提示",
+                                    "Silently check for available updates in the background on launch",
                                 ),
                                 None,
                                 self.auto_check_updates,

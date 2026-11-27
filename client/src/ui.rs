@@ -1139,8 +1139,8 @@ impl DesktopView {
                 title: tr("检查软件更新…", "Check for Updates…").into(),
                 subtitle: Some(
                     tr(
-                        "检测 GitHub 新版本并支持应用内一键下载更新",
-                        "Check GitHub Releases & update in-app",
+                        "检查可用更新并支持应用内一键下载升级",
+                        "Check for updates & upgrade in-app",
                     )
                     .into(),
                 ),

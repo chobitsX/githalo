@@ -471,76 +471,80 @@ impl DesktopView {
                             div()
                                 .text_size(px(12.5))
                                 .text_color(rgb(theme().text))
-                                .child(tr(
-                                    "正在连接 GitHub 检查最新版本…",
-                                    "Checking GitHub Releases for the latest version…",
-                                )),
+                                .child(tr("正在检查最新版本…", "Checking for the latest version…")),
                         ),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .child(
-                            text_button("update-close-checking", tr("关闭", "Close"), false)
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.close_overlay(window, cx);
-                                })),
-                        ),
-                ),
-            AppUpdateState::UpToDate { version } => div()
-                .flex()
-                .flex_col()
-                .gap(px(14.))
-                .child(
-                    div()
-                        .px(px(14.))
-                        .py(px(16.))
-                        .rounded(px(8.))
-                        .bg(rgb(theme().success_bg))
-                        .border_1()
-                        .border_color(rgb(theme().success_border))
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(theme().success))
-                                .child(tr("当前已是最新版本", "GitHalo is up to date")),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(theme().muted))
-                                .child(if is_zh() {
-                                    format!("当前版本 v{current_ver} 已与 GitHub 最新发布 v{version} 一致。")
-                                } else {
-                                    format!(
-                                        "You are running v{current_ver}, matching the latest release v{version}."
-                                    )
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            text_button("update-recheck", tr("重新检查", "Check Again"), false)
+                .child(div().flex().justify_end().child(
+                    text_button("update-close-checking", tr("关闭", "Close"), false).on_click(
+                        cx.listener(|view, _, window, cx| {
+                            view.close_overlay(window, cx);
+                        }),
+                    ),
+                )),
+            AppUpdateState::UpToDate { version } => {
+                let display_ver = if version.is_empty() {
+                    current_ver
+                } else {
+                    version.as_str()
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.))
+                    .child(
+                        div()
+                            .px(px(14.))
+                            .py(px(16.))
+                            .rounded(px(8.))
+                            .bg(rgb(theme().success_bg))
+                            .border_1()
+                            .border_color(rgb(theme().success_border))
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme().success))
+                                    .child(tr("当前已是最新版本", "GitHalo is up to date")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(theme().muted))
+                                    .child(if is_zh() {
+                                        format!("当前使用的 GitHalo v{display_ver} 已是最新版本。")
+                                    } else {
+                                        format!(
+                                            "GitHalo v{display_ver} is currently the newest version available."
+                                        )
+                                    }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                text_button(
+                                    "update-recheck",
+                                    tr("重新检查", "Check Again"),
+                                    false,
+                                )
                                 .on_click(cx.listener(|view, _, _, cx| {
                                     view.start_update_check(true, cx);
                                 })),
-                        )
-                        .child(
-                            text_button("update-close-latest", tr("完成", "Done"), true)
-                                .on_click(cx.listener(|view, _, window, cx| {
-                                    view.close_overlay(window, cx);
-                                })),
-                        ),
-                ),
+                            )
+                            .child(
+                                text_button("update-close-latest", tr("完成", "Done"), true)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.close_overlay(window, cx);
+                                    })),
+                            ),
+                    )
+            }
             AppUpdateState::Available { release } => {
                 let release_clone = release.clone();
                 let skip_ver = release.version.clone();
@@ -606,7 +610,7 @@ impl DesktopView {
                             )
                             .child(
                                 div()
-                                    .id("update-open-github")
+                                    .id("update-open-release-notes")
                                     .role(Role::Button)
                                     .tab_index(0)
                                     .px(px(7.))
@@ -615,7 +619,7 @@ impl DesktopView {
                                     .text_size(px(11.))
                                     .text_color(rgb(theme().link))
                                     .hover(|s| s.bg(rgb(theme().hover)))
-                                    .child("GitHub ↗")
+                                    .child(tr("发行说明 ↗", "Release Notes ↗"))
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.open_url(&release_url);
                                     })),
@@ -702,24 +706,31 @@ impl DesktopView {
                 let stage_label = match stage {
                     DownloadStage::Downloading => {
                         let bytes_text = match total {
-                            Some(t) => format!("{} / {}", format_bytes(*downloaded), format_bytes(*t)),
+                            Some(t) => {
+                                format!("{} / {}", format_bytes(*downloaded), format_bytes(*t))
+                            }
                             None => format_bytes(*downloaded),
                         };
                         if is_zh() {
-                            format!("正在下载 GitHalo v{}（{bytes_text} · {pct}%）", release.version)
+                            format!(
+                                "正在下载 GitHalo v{}（{bytes_text} · {pct}%）",
+                                release.version
+                            )
                         } else {
-                            format!("Downloading GitHalo v{} ({bytes_text} · {pct}%)", release.version)
+                            format!(
+                                "Downloading GitHalo v{} ({bytes_text} · {pct}%)",
+                                release.version
+                            )
                         }
                     }
                     DownloadStage::VerifyingChecksum => {
-                        tr("正在校验 SHA-256 完整性…", "Verifying SHA-256 checksum…").to_owned()
+                        tr("正在校验安装包完整性…", "Verifying package integrity…").to_owned()
                     }
                     DownloadStage::ExtractingApp => {
-                        tr("正在解压新版本应用包…", "Extracting application bundle…").to_owned()
+                        tr("正在准备新版本应用…", "Preparing application bundle…").to_owned()
                     }
                     DownloadStage::VerifyingSignature => {
-                        tr("正在校验 Apple Developer ID 签名…", "Verifying Apple code signature…")
-                            .to_owned()
+                        tr("正在校验安全签名…", "Verifying application signature…").to_owned()
                     }
                 };
                 div()
@@ -802,11 +813,11 @@ impl DesktopView {
                 let desc = if in_place {
                     if is_zh() {
                         format!(
-                            "GitHalo v{ver} 已通过 SHA-256 完整性与 Apple 代码签名校验。点击下方按钮将自动替换当前应用并立即重启。"
+                            "GitHalo v{ver} 已下载并通过完整性与安全签名校验。点击下方按钮将自动完成更新并重新启动。"
                         )
                     } else {
                         format!(
-                            "GitHalo v{ver} passed SHA-256 and Apple code signature verification. Click below to replace the app and relaunch."
+                            "GitHalo v{ver} is downloaded and verified. Click below to finish updating and relaunch."
                         )
                     }
                 } else if is_zh() {
@@ -908,12 +919,14 @@ impl DesktopView {
                             .child(
                                 text_button(
                                     "update-open-releases-fallback",
-                                    tr("前往 GitHub 手动下载", "Open GitHub Releases"),
+                                    tr("手动下载", "Download Manually"),
                                     false,
                                 )
-                                .on_click(cx.listener(move |_, _, _, cx| {
-                                    cx.open_url(&open_url);
-                                })),
+                                .on_click(cx.listener(
+                                    move |_, _, _, cx| {
+                                        cx.open_url(&open_url);
+                                    },
+                                )),
                             )
                             .child(
                                 div()
@@ -921,10 +934,16 @@ impl DesktopView {
                                     .items_center()
                                     .gap(px(8.))
                                     .child(
-                                        text_button("update-close-error", tr("关闭", "Close"), false)
-                                            .on_click(cx.listener(|view, _, window, cx| {
+                                        text_button(
+                                            "update-close-error",
+                                            tr("关闭", "Close"),
+                                            false,
+                                        )
+                                        .on_click(
+                                            cx.listener(|view, _, window, cx| {
                                                 view.close_overlay(window, cx);
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .child(
                                         text_button("update-retry", tr("重试", "Retry"), true)
