@@ -557,7 +557,7 @@ fn inherited_repository_environment_does_not_retarget_commands() {
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "inherited_repository_environment_does_not_retarget_commands",
+            "git_sync::inherited_repository_environment_does_not_retarget_commands",
             "--nocapture",
         ])
         .env(CHILD_ROOT, &repo)

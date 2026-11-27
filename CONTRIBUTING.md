@@ -53,7 +53,7 @@ Git tests use the built-in offline bundle (`client/src/git/fixtures/sync.bundle`
 
 ```bash
 cd client
-cargo test --release --locked --no-default-features --test workspace_flow first_release_timings -- --ignored --nocapture
+cargo test --release --locked --no-default-features --test integration first_release_timings -- --ignored --nocapture
 ```
 
 ## Architecture Overview

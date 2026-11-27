@@ -44,7 +44,7 @@ cargo test --locked
 
 ```sh
 cargo test --locked --no-default-features
-cargo test --release --locked --no-default-features --test workspace_flow first_release_timings -- --ignored --nocapture
+cargo test --release --locked --no-default-features --test integration first_release_timings -- --ignored --nocapture
 ```
 
 ## 模块入口

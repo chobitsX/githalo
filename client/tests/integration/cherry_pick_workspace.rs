@@ -79,15 +79,18 @@ impl Harness {
                 self.workspace.daily.error,
                 self.workspace.cherry_pick.error,
             );
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.updates.recv_blocking() {
-                Ok(update) => self.workspace.apply(update),
-                Err(_) => panic!("workspace update channel closed while waiting to {label}"),
+            match self.updates.try_recv() {
+                Ok(update) => {
+                    self.workspace.apply(update);
+                    while let Ok(update) = self.updates.try_recv() {
+                        self.workspace.apply(update);
+                    }
+                }
+                Err(TryRecvError::Empty) => std::thread::sleep(Duration::from_millis(10)),
+                Err(TryRecvError::Closed) => {
+                    panic!("workspace update channel closed while waiting to {label}")
+                }
             }
-            while let Ok(update) = self.updates.try_recv() {
-                self.workspace.apply(update);
-            }
-            let _ = remaining;
         }
         self.drain();
     }

@@ -26,3 +26,8 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "28d0a354
 name = "githalo"
 path = "src/main.rs"
 required-features = ["desktop"]
+
+# 关闭第三方依赖的 dev 调试符号以大幅缩小 target/debug 体积并加快链接，
+# 保留 githalo 自身完整调试信息与回溯，不影响 release 构建。
+[profile.dev.package."*"]
+debug = false

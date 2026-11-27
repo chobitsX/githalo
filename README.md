@@ -138,7 +138,7 @@ Reproduce the benchmark locally:
 
 ```bash
 cd client
-cargo test --release --locked --no-default-features --test workspace_flow first_release_timings -- --ignored --nocapture
+cargo test --release --locked --no-default-features --test integration first_release_timings -- --ignored --nocapture
 ```
 
 ---

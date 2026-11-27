@@ -600,7 +600,7 @@ fn group_fetch_isolates_authentication_failure_and_a_missing_worktree() {
             .env("no_proxy", "127.0.0.1")
             .args([
                 "--exact",
-                "group_fetch_isolates_authentication_failure_and_a_missing_worktree",
+                "workspace_flow::group_fetch_isolates_authentication_failure_and_a_missing_worktree",
                 "--nocapture",
             ])
             .output()
