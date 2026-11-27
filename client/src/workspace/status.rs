@@ -562,6 +562,46 @@ impl Workspace {
         let _ = self.start_fetch_inner(id, None);
     }
 
+    /// 对单个仓库执行全量远端获取（拉取所有远端分支与标签，并清理远端已删除分支）。
+    pub(super) fn start_fetch_all(&mut self, id: WorktreeId) {
+        let common = self.repo(id).and_then(|row| row.common.as_ref());
+        if self.writes.iter().any(|(other, write)| {
+            write.running()
+                && (*other == id
+                    || common.is_some()
+                        && self.repo(*other).and_then(|r| r.common.as_ref()) == common)
+        }) {
+            if self.selected == Some(id) {
+                self.message = Some("当前仓库的写操作结束后可再次获取".into());
+            }
+            return;
+        }
+        let Some(row) = self.repo_mut(id) else {
+            return;
+        };
+        if row.fetching {
+            return;
+        }
+        row.fetching = true;
+        let target = row.target.clone();
+        self.bump_board_version();
+        let fetch = self.runtime.fetch.clone();
+        self.runtime.status.execute(move || {
+            let result = git::read_sync_with_common(&target);
+            let before = result.snapshot;
+            let common = result.common;
+            fetch.run(move || {
+                let result = git::fetch_all_remotes(&before);
+                Event::FetchedAll {
+                    before,
+                    common,
+                    result,
+                    at: SystemTime::now(),
+                }
+            });
+        });
+    }
+
     fn start_fetch_inner(&mut self, id: WorktreeId, cancel: Option<Arc<AtomicBool>>) -> bool {
         let common = self.repo(id).and_then(|row| row.common.as_ref());
         if self.writes.iter().any(|(other, write)| {
@@ -663,6 +703,59 @@ impl Workspace {
         }
         self.bump_board_version();
     }
+
+    pub(super) fn apply_fetch_all(
+        &mut self,
+        before: SyncSnapshot,
+        common: Option<PathBuf>,
+        result: Result<FetchAllOutcome, String>,
+        at: SystemTime,
+    ) {
+        let target = before.worktree;
+        let Some(row) = self.repo_mut(target.id).filter(|r| r.target == target) else {
+            return;
+        };
+        row.fetching = false;
+        row.failure = None;
+        let mut affected = vec![target.id];
+        match result {
+            Err(err) => {
+                self.message = Some(if crate::i18n::is_zh() {
+                    format!("获取远端失败：{err}")
+                } else {
+                    format!("Fetch failed: {err}")
+                });
+                if let Some(row) = self.repo_mut(target.id) {
+                    row.failure = Some((before.status, err));
+                    row.publish();
+                }
+            }
+            Ok(outcome) => {
+                let summary = format_fetch_all_summary(&outcome);
+                affected =
+                    self.record_fetch_outcome(&target, common.as_deref(), outcome.upstream, at);
+                // 全量 fetch 更新的是整个仓库共享的 refs/remotes/*，即使当前分支未设上游也要联动同仓 worktree。
+                if common.is_some() {
+                    for sibling in &self.repos {
+                        if sibling.common.as_deref() == common.as_deref()
+                            && !affected.contains(&sibling.target.id)
+                        {
+                            affected.push(sibling.target.id);
+                        }
+                    }
+                }
+                self.message = Some(summary);
+            }
+        }
+        if self.selected.is_some_and(|id| affected.contains(&id)) {
+            self.load_history();
+            self.load_branches();
+        }
+        for id in affected {
+            self.start_status(id);
+        }
+        self.bump_board_version();
+    }
     // Standalone Fetch and the network phase of Pull share exactly the same timestamp rules.
     pub(super) fn record_fetch_outcome(
         &mut self,
@@ -733,4 +826,67 @@ impl Workspace {
     pub(super) fn known_common_dir(&self, id: WorktreeId) -> Option<PathBuf> {
         self.repo(id).and_then(|row| row.common.clone())
     }
+}
+
+fn format_fetch_all_summary(outcome: &FetchAllOutcome) -> String {
+    let zh = crate::i18n::is_zh();
+    if outcome.remote_count == 0 {
+        return if zh {
+            "当前仓库未配置远端仓库".into()
+        } else {
+            "No remotes configured for this repository".into()
+        };
+    }
+    let mut parts = Vec::new();
+    if outcome.new_branches > 0 {
+        parts.push(if zh {
+            format!("新增 {} 个分支", outcome.new_branches)
+        } else {
+            format!("{} new branch(es)", outcome.new_branches)
+        });
+    }
+    if outcome.updated_branches > 0 {
+        parts.push(if zh {
+            format!("更新 {} 个分支", outcome.updated_branches)
+        } else {
+            format!("{} updated", outcome.updated_branches)
+        });
+    }
+    if outcome.pruned_branches > 0 {
+        parts.push(if zh {
+            format!("清理 {} 个已删分支", outcome.pruned_branches)
+        } else {
+            format!("{} pruned", outcome.pruned_branches)
+        });
+    }
+    if outcome.updated_tags > 0 {
+        parts.push(if zh {
+            format!("更新 {} 个标签", outcome.updated_tags)
+        } else {
+            format!("{} tag(s)", outcome.updated_tags)
+        });
+    }
+    let mut message = if parts.is_empty() {
+        if zh {
+            format!("已获取全部远端（共 {} 个），已是最新", outcome.remote_count)
+        } else {
+            format!(
+                "Fetched {} remote(s) — already up to date",
+                outcome.remote_count
+            )
+        }
+    } else if zh {
+        format!("已获取远端更新：{}", parts.join("、"))
+    } else {
+        format!("Fetched remotes: {}", parts.join(", "))
+    };
+    if !outcome.warnings.is_empty() {
+        let warning = outcome.warnings.join("；");
+        if zh {
+            message.push_str(&format!("（部分远端失败：{warning}）"));
+        } else {
+            message.push_str(&format!(" (partial failures: {warning})"));
+        }
+    }
+    message
 }

@@ -1245,8 +1245,8 @@ impl DesktopView {
         }
         .when(ready, |btn| {
             btn.on_click(cx.listener(move |view, _, window, cx| {
-                view.close_overlay(window, cx);
                 view.dispatch_repo_op(RepoOpAction::ExecuteReset { preview_id, mode }, cx);
+                view.dismiss_overlay_after_submit(window, cx);
             }))
         });
 
@@ -1465,7 +1465,6 @@ impl DesktopView {
                             ready,
                             |btn| {
                                 btn.on_click(cx.listener(move |view, _, window, cx| {
-                                    view.close_overlay(window, cx);
                                     view.dispatch_repo_op(
                                         RepoOpAction::ExecuteRevert {
                                             preview_id,
@@ -1475,6 +1474,7 @@ impl DesktopView {
                                         },
                                         cx,
                                     );
+                                    view.dismiss_overlay_after_submit(window, cx);
                                 }))
                             },
                         ),
@@ -1654,11 +1654,11 @@ impl DesktopView {
                             ready,
                             |btn| {
                                 btn.on_click(cx.listener(move |view, _, window, cx| {
-                                    view.close_overlay(window, cx);
                                     view.dispatch_repo_op(
                                         RepoOpAction::ExecuteMerge { preview_id, mode },
                                         cx,
                                     );
+                                    view.dismiss_overlay_after_submit(window, cx);
                                 }))
                             },
                         ),
@@ -2319,7 +2319,6 @@ impl DesktopView {
                                                             .read(cx)
                                                             .text()
                                                             .to_owned();
-                                                        view.close_overlay(window, cx);
                                                         view.dispatch_repo_op(
                                                             RepoOpAction::ResolveConflict {
                                                                 conflict: c_custom.clone(),
@@ -2329,6 +2328,9 @@ impl DesktopView {
                                                                     ),
                                                             },
                                                             cx,
+                                                        );
+                                                        view.dismiss_overlay_after_submit(
+                                                            window, cx,
                                                         );
                                                     },
                                                 ))
@@ -2357,7 +2359,6 @@ impl DesktopView {
                                 )
                                 .when(writable, |btn| {
                                     btn.on_click(cx.listener(move |view, _, window, cx| {
-                                        view.close_overlay(window, cx);
                                         view.dispatch_repo_op(
                                             RepoOpAction::ResolveConflict {
                                                 conflict: c_yours.clone(),
@@ -2365,6 +2366,7 @@ impl DesktopView {
                                             },
                                             cx,
                                         );
+                                        view.dismiss_overlay_after_submit(window, cx);
                                     }))
                                 }),
                             )
@@ -2381,7 +2383,6 @@ impl DesktopView {
                                 )
                                 .when(writable, |btn| {
                                     btn.on_click(cx.listener(move |view, _, window, cx| {
-                                        view.close_overlay(window, cx);
                                         view.dispatch_repo_op(
                                             RepoOpAction::ResolveConflict {
                                                 conflict: c_theirs.clone(),
@@ -2389,6 +2390,7 @@ impl DesktopView {
                                             },
                                             cx,
                                         );
+                                        view.dismiss_overlay_after_submit(window, cx);
                                     }))
                                 }),
                             )
@@ -2402,7 +2404,6 @@ impl DesktopView {
                                     )
                                     .when(writable, |btn| {
                                         btn.on_click(cx.listener(move |view, _, window, cx| {
-                                            view.close_overlay(window, cx);
                                             view.dispatch_repo_op(
                                                 RepoOpAction::ResolveConflict {
                                                     conflict: c_both_y.clone(),
@@ -2410,6 +2411,7 @@ impl DesktopView {
                                                 },
                                                 cx,
                                             );
+                                            view.dismiss_overlay_after_submit(window, cx);
                                         }))
                                     }),
                                 )
@@ -2422,7 +2424,6 @@ impl DesktopView {
                                     )
                                     .when(writable, |btn| {
                                         btn.on_click(cx.listener(move |view, _, window, cx| {
-                                            view.close_overlay(window, cx);
                                             view.dispatch_repo_op(
                                                 RepoOpAction::ResolveConflict {
                                                     conflict: c_both_t.clone(),
@@ -2430,6 +2431,7 @@ impl DesktopView {
                                                 },
                                                 cx,
                                             );
+                                            view.dismiss_overlay_after_submit(window, cx);
                                         }))
                                     }),
                                 )

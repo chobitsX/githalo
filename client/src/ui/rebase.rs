@@ -658,7 +658,6 @@ impl DesktopView {
                             ready,
                             |btn| {
                                 btn.on_click(cx.listener(move |view, _, window, cx| {
-                                    view.close_overlay(window, cx);
                                     view.dispatch_repo_op(
                                         RepoOpAction::ExecuteRebase {
                                             preview_id,
@@ -666,6 +665,7 @@ impl DesktopView {
                                         },
                                         cx,
                                     );
+                                    view.dismiss_overlay_after_submit(window, cx);
                                 }))
                             },
                         ),
@@ -958,7 +958,6 @@ impl DesktopView {
                 }
             })
             .collect();
-        self.close_overlay(window, cx);
         self.dispatch_repo_op(
             RepoOpAction::ExecuteInteractiveRebase {
                 preview_id,
@@ -967,6 +966,7 @@ impl DesktopView {
             },
             cx,
         );
+        self.dismiss_overlay_after_submit(window, cx);
     }
 
     pub(super) fn abort_rebase_dialog(

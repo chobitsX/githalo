@@ -17,7 +17,7 @@ use std::sync::{
 };
 use std::time::SystemTime;
 
-use crate::git::{self, FetchOutcome};
+use crate::git::{self, FetchAllOutcome, FetchOutcome};
 pub use crate::history::{
     BlameLine, ChangedFile, Commit, CommitChangesBundle, CommitRef, CommitRefKind,
     LocalCompareDiff, ParentChangesGroup,
@@ -117,7 +117,10 @@ pub enum Action {
     Select(WorktreeId),
     ShowPanel(Panel),
     ToggleGroup(Option<GroupId>),
+    /// 仅刷新当前分支上游跟踪引用的轻量获取（供分组批量同步与既有状态回归测试使用）。
     RefreshRepo(WorktreeId),
+    /// 获取仓库全部远端的所有分支更新与标签（`git fetch --prune`），拉取同事新推送分支。
+    FetchRepo(WorktreeId),
     RefreshGroup(Option<GroupId>),
     /// Cancels any queued repositories remaining in the active group/nested batch fetch.
     CancelBatchFetch,
@@ -250,6 +253,12 @@ enum Event {
         before: SyncSnapshot,
         common: Option<PathBuf>,
         result: Result<FetchOutcome, String>,
+        at: SystemTime,
+    },
+    FetchedAll {
+        before: SyncSnapshot,
+        common: Option<PathBuf>,
+        result: Result<FetchAllOutcome, String>,
         at: SystemTime,
     },
     FetchCancelled {
@@ -782,6 +791,7 @@ impl Workspace {
                 }
             }
             Action::RefreshRepo(id) => self.start_fetch(id),
+            Action::FetchRepo(id) => self.start_fetch_all(id),
             Action::RefreshGroup(id) => {
                 if let Some(group) = self.groups.iter().find(|g| g.id == id) {
                     let label = if id.is_none() {
@@ -1200,6 +1210,12 @@ impl Workspace {
                 result,
                 at,
             } => self.apply_fetch(before, common, result, at),
+            Event::FetchedAll {
+                before,
+                common,
+                result,
+                at,
+            } => self.apply_fetch_all(before, common, result, at),
             Event::FetchCancelled { target } => self.apply_fetch_cancelled(target),
             Event::FetchTime {
                 target,

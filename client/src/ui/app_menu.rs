@@ -622,7 +622,7 @@ impl DesktopView {
             if view.overlay.is_none()
                 && let Some(id) = view.workspace.selected
             {
-                view.dispatch(Action::RefreshRepo(id), cx);
+                view.dispatch(Action::FetchRepo(id), cx);
             }
         }))
         .on_action(cx.listener(|view, _: &MenuNewBranch, window, cx| {

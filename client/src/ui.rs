@@ -1172,7 +1172,7 @@ impl DesktopView {
             }
             PaletteCommand::Fetch => {
                 if let Some(id) = self.workspace.selected {
-                    self.dispatch(Action::RefreshRepo(id), cx);
+                    self.dispatch(Action::FetchRepo(id), cx);
                 }
             }
             PaletteCommand::Pull => self.prepare_remote(RemoteOperation::Pull, window, cx),
@@ -1762,7 +1762,7 @@ impl DesktopView {
                     )
                     .when(!fetching, |b| {
                         b.on_click(cx.listener(move |view, _, _, cx| {
-                            view.dispatch(Action::RefreshRepo(repo_id), cx);
+                            view.dispatch(Action::FetchRepo(repo_id), cx);
                         }))
                     }),
                 )

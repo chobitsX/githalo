@@ -180,6 +180,25 @@ pub enum FetchOutcome {
     NoUpstream,
 }
 
+/// 单仓全量远端获取（`git fetch --prune`）的引用更新统计与当前上游同步结果。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchAllOutcome {
+    /// 实际配置并尝试获取的远端数量。
+    pub remote_count: usize,
+    /// 本次新增的远端分支数量。
+    pub new_branches: usize,
+    /// 本次更新（含强推更新）的远端分支数量。
+    pub updated_branches: usize,
+    /// 本次通过 `--prune` 清理的已删除远端分支数量。
+    pub pruned_branches: usize,
+    /// 本次新增或更新的标签数量。
+    pub updated_tags: usize,
+    /// 若当前检出分支配置了上游，附带其获取后的上游同步结果以更新时间戳与历史计数。
+    pub upstream: FetchOutcome,
+    /// 多远端场景下部分远端失败时的非致命警告信息。
+    pub warnings: Vec<String>,
+}
+
 /// Resolve a selected directory to the canonical root of its Git worktree.
 pub fn discover(path: &Path) -> Result<PathBuf, String> {
     let path = canonicalize(path)?;
@@ -362,6 +381,205 @@ pub fn fetch_upstream(snapshot: &SyncSnapshot) -> Result<FetchOutcome, String> {
         tracking_ref: tracking_ref.clone(),
         oid,
     })
+}
+
+/// 获取仓库所有已配置远端的分支更新与标签（`git fetch --prune -- <remote>`），
+/// 即使处于分离 HEAD 或当前分支未设置上游也能拉取同事推送的新分支，并清理远端已删除分支。
+pub fn fetch_all_remotes(snapshot: &SyncSnapshot) -> Result<FetchAllOutcome, String> {
+    if let SyncStatus::WorktreeUnavailable { reason } | SyncStatus::ReadFailed { reason } =
+        &snapshot.status
+    {
+        return Err(reason.clone());
+    }
+
+    let root = &snapshot.worktree.root;
+    verify_root(root)?;
+
+    let remotes_raw = checked(
+        read_command(root).arg("remote"),
+        "无法读取已配置的 Git 远端列表",
+    )?;
+    let remotes: Vec<OsString> = remotes_raw
+        .split_inclusive(|&byte| byte == b'\n')
+        .filter_map(|line| line_content(line).ok())
+        .filter(|line| !line.is_empty())
+        .map(os_string)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let configured_upstream: Option<(&UpstreamConfig, Option<&OsStr>)> = match &snapshot.status {
+        SyncStatus::Branch { upstream, .. } => match upstream {
+            UpstreamStatus::Resolved {
+                config,
+                tracking_ref,
+                ..
+            } => Some((config, Some(tracking_ref.as_os_str()))),
+            UpstreamStatus::Unavailable {
+                config,
+                tracking_ref,
+            }
+            | UpstreamStatus::Deleted {
+                config,
+                tracking_ref,
+            } => Some((config, tracking_ref.as_deref())),
+            UpstreamStatus::NotConfigured | UpstreamStatus::ReadFailed { .. } => None,
+        },
+        SyncStatus::UnbornBranch {
+            upstream: Some(config),
+            ..
+        } if config.remote == "." => Some((config, None)),
+        _ => None,
+    };
+
+    if remotes.is_empty() {
+        let upstream = if configured_upstream.is_some_and(|(cfg, _)| cfg.remote == ".") {
+            FetchOutcome::Local
+        } else {
+            FetchOutcome::NoUpstream
+        };
+        return Ok(FetchAllOutcome {
+            remote_count: 0,
+            new_branches: 0,
+            updated_branches: 0,
+            pruned_branches: 0,
+            updated_tags: 0,
+            upstream,
+            warnings: Vec::new(),
+        });
+    }
+
+    let mut new_branches = 0usize;
+    let mut updated_branches = 0usize;
+    let mut pruned_branches = 0usize;
+    let mut updated_tags = 0usize;
+    let mut succeeded_remotes = 0usize;
+    let mut warnings = Vec::new();
+    let mut upstream_remote_ok = false;
+    let mut upstream_oid: Option<String> = None;
+
+    for remote in &remotes {
+        let mut command = read_command(root);
+        command
+            .args([
+                "fetch",
+                "--porcelain",
+                "--prune",
+                "--no-recurse-submodules",
+                "--no-auto-maintenance",
+                "--no-write-commit-graph",
+                "--",
+            ])
+            .arg(remote);
+
+        let output = run(&mut command)?;
+        if !output.status.success() {
+            let remote_name = remote.to_string_lossy();
+            let detail = failure(&format!("无法从远端 {remote_name} 获取更新"), &output);
+            warnings.push(detail);
+            continue;
+        }
+
+        succeeded_remotes += 1;
+        let is_upstream_remote = configured_upstream.is_some_and(|(cfg, _)| cfg.remote == *remote);
+        if is_upstream_remote {
+            upstream_remote_ok = true;
+        }
+
+        for line in output
+            .stdout
+            .split_inclusive(|&byte| byte == b'\n')
+            .filter_map(|raw| line_content(raw).ok())
+        {
+            if let Some(update) = parse_porcelain_fetch_line(line) {
+                if update.reference.starts_with(b"refs/remotes/") {
+                    match update.flag {
+                        b'*' => new_branches += 1,
+                        b' ' | b'+' => updated_branches += 1,
+                        b'-' => pruned_branches += 1,
+                        _ => {}
+                    }
+                } else if update.reference.starts_with(b"refs/tags/")
+                    && matches!(update.flag, b'*' | b't' | b'+' | b' ')
+                {
+                    updated_tags += 1;
+                }
+                if is_upstream_remote
+                    && let Some((_, Some(tracking_ref))) = configured_upstream
+                    && update.reference == tracking_ref.as_encoded_bytes()
+                    && matches!(update.flag, b' ' | b'+' | b'*' | b't' | b'=')
+                    && let Ok(oid) = object_id(update.new_oid)
+                {
+                    upstream_oid = Some(oid);
+                }
+            }
+        }
+    }
+
+    if succeeded_remotes == 0 {
+        return Err(warnings
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "无法从远端获取更新".into()));
+    }
+
+    let upstream = match configured_upstream {
+        Some((config, _)) if config.remote == "." => FetchOutcome::Local,
+        Some((config, Some(tracking_ref))) if upstream_remote_ok => {
+            let oid = upstream_oid.or_else(|| resolve_tracking_ref_oid(root, tracking_ref));
+            match oid {
+                Some(oid) => FetchOutcome::Fetched {
+                    config: config.clone(),
+                    tracking_ref: tracking_ref.to_os_string(),
+                    oid,
+                },
+                None => FetchOutcome::NoUpstream,
+            }
+        }
+        _ => FetchOutcome::NoUpstream,
+    };
+
+    Ok(FetchAllOutcome {
+        remote_count: remotes.len(),
+        new_branches,
+        updated_branches,
+        pruned_branches,
+        updated_tags,
+        upstream,
+        warnings,
+    })
+}
+
+struct PorcelainFetchLine<'a> {
+    flag: u8,
+    new_oid: &'a [u8],
+    reference: &'a [u8],
+}
+
+fn parse_porcelain_fetch_line(line: &[u8]) -> Option<PorcelainFetchLine<'_>> {
+    let [flag, b' ', fields @ ..] = line else {
+        return None;
+    };
+    let mut fields = fields.splitn(3, |&byte| byte == b' ');
+    let (old_oid, new_oid, reference) = (fields.next()?, fields.next()?, fields.next()?);
+    if !is_oid(old_oid) || !is_oid(new_oid) || reference.is_empty() {
+        return None;
+    }
+    Some(PorcelainFetchLine {
+        flag: *flag,
+        new_oid,
+        reference,
+    })
+}
+
+fn resolve_tracking_ref_oid(root: &Path, tracking_ref: &OsStr) -> Option<String> {
+    let output = run(read_command(root)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(tracking_ref))
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = line_content(&output.stdout).ok()?;
+    object_id(line).ok()
 }
 
 /// Anchor all commands for a registered root to its own .git directory or

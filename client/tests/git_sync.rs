@@ -1,4 +1,6 @@
-use githalo::git::{FetchOutcome, common_dir, discover, fetch_upstream, read_sync};
+use githalo::git::{
+    FetchOutcome, common_dir, discover, fetch_all_remotes, fetch_upstream, read_sync,
+};
 use githalo::worktree::{
     SyncCounts, SyncStatus, UpstreamConfig, UpstreamStatus, WorktreeId, WorktreeTarget,
 };
@@ -572,5 +574,111 @@ fn inherited_repository_environment_does_not_retarget_commands() {
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn fetch_all_remotes_discovers_new_branches_prunes_deleted_and_handles_detached_head() {
+    let fixture = Fixture::new();
+    let repo = fixture.clone("project", false);
+    let tree = target(&repo, 1);
+
+    // 1. 同事推送一个全新远端分支并推进当前上游分支。
+    git(
+        &fixture.remote,
+        &["update-ref", "refs/heads/feature/colleague-new", LOCAL],
+    );
+    git(
+        &fixture.remote,
+        &["update-ref", "refs/heads/base", UPSTREAM],
+    );
+    let outcome = fetch_all_remotes(&read_sync(&tree)).expect("fetch_all_remotes should succeed");
+    assert_eq!(outcome.remote_count, 1);
+    assert_eq!(outcome.new_branches, 1);
+    assert_eq!(outcome.updated_branches, 1);
+    assert_eq!(outcome.pruned_branches, 0);
+    assert!(outcome.warnings.is_empty());
+    assert_eq!(
+        outcome.upstream,
+        FetchOutcome::Fetched {
+            config: UpstreamConfig {
+                remote: "origin".into(),
+                merge_ref: "refs/heads/base".into(),
+            },
+            tracking_ref: "refs/remotes/origin/base".into(),
+            oid: UPSTREAM.into(),
+        }
+    );
+    assert_eq!(
+        git(
+            &repo,
+            &["rev-parse", "refs/remotes/origin/feature/colleague-new"]
+        )
+        .trim(),
+        LOCAL
+    );
+
+    // 2. 同事删除远端分支时，`--prune` 会清理过期的本地远端跟踪引用。
+    git(
+        &fixture.remote,
+        &["update-ref", "-d", "refs/heads/feature/colleague-new"],
+    );
+    let pruned = fetch_all_remotes(&read_sync(&tree)).expect("prune fetch should succeed");
+    assert_eq!(pruned.pruned_branches, 1);
+    assert!(
+        !command(&repo)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/feature/colleague-new",
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    // 3. 分离 HEAD 状态下，依然能获取同事新推送的远端分支。
+    git(&repo, &["switch", "--quiet", "--detach", BASE]);
+    git(
+        &fixture.remote,
+        &["update-ref", "refs/heads/feature/while-detached", UPSTREAM],
+    );
+    let detached =
+        fetch_all_remotes(&read_sync(&tree)).expect("detached HEAD fetch should succeed");
+    assert_eq!(detached.new_branches, 1);
+    assert_eq!(detached.upstream, FetchOutcome::NoUpstream);
+    assert_eq!(
+        git(
+            &repo,
+            &["rev-parse", "refs/remotes/origin/feature/while-detached"]
+        )
+        .trim(),
+        UPSTREAM
+    );
+
+    // 4. 多远端部分失败时，健康远端的新分支依然成功拉取并保留警告。
+    git_output(
+        command(&repo)
+            .args(["remote", "add", "broken"])
+            .arg(fixture.root.join("missing-remote.git")),
+    );
+    git(
+        &fixture.remote,
+        &["update-ref", "refs/heads/feature/partial-ok", LOCAL],
+    );
+    let partial = fetch_all_remotes(&read_sync(&tree))
+        .expect("fetch should succeed when at least one remote succeeds");
+    assert_eq!(partial.remote_count, 2);
+    assert_eq!(partial.new_branches, 1);
+    assert_eq!(partial.warnings.len(), 1);
+    assert_eq!(
+        git(
+            &repo,
+            &["rev-parse", "refs/remotes/origin/feature/partial-ok"]
+        )
+        .trim(),
+        LOCAL
     );
 }

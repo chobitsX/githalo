@@ -1845,7 +1845,7 @@ impl DesktopView {
                         cx,
                         move |view, _, window, cx| {
                             view.close_overlay(window, cx);
-                            view.dispatch(Action::RefreshRepo(id), cx);
+                            view.dispatch(Action::FetchRepo(id), cx);
                         },
                     ));
                 }

@@ -863,7 +863,7 @@ impl DesktopView {
                 );
             }
         }
-        self.close_overlay(window, cx);
+        self.dismiss_overlay_after_submit(window, cx);
     }
 
     pub(super) fn git_review_dialog(

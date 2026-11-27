@@ -909,6 +909,23 @@ impl DesktopView {
         }
     }
 
+    /// Dismiss the active overlay after a confirmed submit action has already been dispatched.
+    /// Unlike `close_overlay`, this never emits `CancelPreview`/`CancelReview`/`CloseConflict`
+    /// that would invalidate a just-dispatched execution referencing `preview_id`.
+    pub(super) fn dismiss_overlay_after_submit(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_popup_menu(cx);
+        let _ = self.overlay.take();
+        self.previous_focus
+            .take()
+            .unwrap_or_else(|| self.focus.clone())
+            .focus(window, cx);
+        cx.notify();
+    }
+
     pub(super) fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_popup_menu(cx);
         let previous = self.overlay.take();
@@ -1412,12 +1429,12 @@ impl DesktopView {
                     .is_some_and(|n| !n.children.is_empty());
                 let mut items = vec![menu_item(
                     "refresh-repo",
-                    tr("刷新本仓", "Fetch Repository"),
+                    tr("获取远端更新（Fetch）", "Fetch Repository"),
                     None,
                     cx,
                     move |view, _, window, cx| {
                         view.close_overlay(window, cx);
-                        view.dispatch(Action::RefreshRepo(id), cx);
+                        view.dispatch(Action::FetchRepo(id), cx);
                     },
                 )];
                 if has_nested {

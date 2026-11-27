@@ -125,7 +125,6 @@ impl DesktopView {
             mainline: preview.is_merge_commit().then_some(form.mainline),
         };
         let preview_id = self.workspace.cherry_pick.preview_id;
-        self.close_overlay(window, cx);
         self.dispatch_cherry_pick(
             CherryPickAction::Execute {
                 preview_id,
@@ -133,6 +132,7 @@ impl DesktopView {
             },
             cx,
         );
+        self.dismiss_overlay_after_submit(window, cx);
     }
 
     fn confirm_abort_cherry_pick(&mut self, window: &mut Window, cx: &mut Context<Self>) {

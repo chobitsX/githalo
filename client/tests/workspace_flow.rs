@@ -1466,3 +1466,50 @@ fn batch_fetch_reports_progress_and_can_cancel_queued_repos() {
             .is_some_and(|m| m.contains("取消") || m.to_lowercase().contains("cancel"))
     );
 }
+
+#[test]
+fn fetch_repo_discovers_colleague_branch_and_updates_branches_panel() {
+    let directory = tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let remote = bare_remote(&root);
+    // 使用标准全分支 clone（携带 +refs/heads/*:refs/remotes/origin/*）模拟真实工作仓。
+    let repo = root.join("team-repo");
+    successful_git(
+        git_command(&root)
+            .args(["clone", "--quiet", "--no-local", "--branch", "base"])
+            .arg(&remote)
+            .arg(&repo),
+    );
+    let repo = repo.canonicalize().unwrap();
+
+    let mut harness = Harness::open(&root.join("workspace.sqlite3"));
+    let id = harness.add_repo(&repo, None);
+    harness.wait("settle initial workspace reads", settled);
+
+    // 同事向远端推送新分支。
+    git(
+        &remote,
+        &["update-ref", "refs/heads/feature/colleague-push", LOCAL],
+    );
+
+    harness.workspace.dispatch(Action::FetchRepo(id));
+    harness.wait("complete FetchRepo and reload branches", |ws| {
+        settled(ws)
+            && ws.daily.branches.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .remote_branches()
+                    .iter()
+                    .any(|b| b.name == "origin/feature/colleague-push")
+            })
+    });
+
+    let row = harness.workspace.repo(id).unwrap();
+    assert!(row.last_fetch.is_some());
+    assert!(
+        harness
+            .workspace
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("新增 1 个分支") || m.contains("1 new branch"))
+    );
+}
